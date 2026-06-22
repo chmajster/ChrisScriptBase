@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Repository: [chmajster/ChrisScriptBase](https://github.com/chmajster/ChrisScriptBase)
 
 set -o errexit
 set -o nounset

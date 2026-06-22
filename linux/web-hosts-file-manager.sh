@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Repository: [chmajster/ChrisScriptBase](https://github.com/chmajster/ChrisScriptBase)
 ###############################################################################
 #  install.sh – Pełny instalator aplikacji Flask „Hosts Manager"
 #  Uruchomienie:  sudo bash install.sh

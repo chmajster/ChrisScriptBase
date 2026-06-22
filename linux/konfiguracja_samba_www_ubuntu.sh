@@ -1,4 +1,5 @@
 #!/bin/bash
+# Repository: [chmajster/ChrisScriptBase](https://github.com/chmajster/ChrisScriptBase)
 # =============================================================================
 # Skrypt instalacji i konfiguracji: Apache2, PHP, MariaDB, phpMyAdmin, Samba
 # Udostępnia /var/www jako \\serwer\www dla wszystkich użytkowników

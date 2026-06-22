@@ -1,6 +1,8 @@
 /*
  * Watchdog ServiceNow Dashboard
  * -----------------------------
+ * Repository: [chmajster/ChrisScriptBase](https://github.com/chmajster/ChrisScriptBase)
+ *
  * Run this file inside an authenticated ServiceNow browser session as a
  * bookmarklet, userscript, or browser snippet. It uses the current page's
  * ServiceNow session cookies and does not require a backend server.

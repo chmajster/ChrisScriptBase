@@ -1,4 +1,5 @@
 #!/bin/bash
+# Repository: [chmajster/ChrisScriptBase](https://github.com/chmajster/ChrisScriptBase)
 
 echo "Detecting OS"
 
