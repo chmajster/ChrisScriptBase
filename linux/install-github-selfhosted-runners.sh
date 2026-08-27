@@ -481,7 +481,7 @@ list_action_runner_service_units() {
 }
 
 repo_from_service_unit() {
-    local unit="$1" prefix rest host marker repo runner repo_sanitized profile_sanitized
+    local unit="$1" prefix rest host marker legacy_marker repo runner repo_sanitized profile_sanitized
     unit="${unit,,}"
     prefix="actions.runner.${GITHUB_OWNER,,}-"
     [[ "$unit" == "$prefix"*".service" ]] || return 1
@@ -491,18 +491,27 @@ repo_from_service_unit() {
     host="$(hostname -s)"
     host="${host,,}"
     marker=".${host}-"
-    [[ "$rest" == *"$marker"* ]] || return 1
+    legacy_marker=".${host}"
 
-    repo="${rest%%"$marker"*}"
-    runner="${rest#*"$marker"}"
-    [[ -n "$repo" && -n "$runner" ]] || return 1
+    if [[ "$rest" == *"$marker"* ]]; then
+        repo="${rest%%"$marker"*}"
+        runner="${rest#*"$marker"}"
+        [[ -n "$repo" && -n "$runner" ]] || return 1
 
-    repo_sanitized="$(sanitize_name "$repo")"
-    if [[ "$ACTIVE_PROFILE" == "default" ]]; then
-        [[ "$runner" == "$repo_sanitized" ]] || return 1
+        repo_sanitized="$(sanitize_name "$repo")"
+        if [[ "$ACTIVE_PROFILE" == "default" ]]; then
+            [[ "$runner" == "$repo_sanitized" ]] || return 1
+        else
+            profile_sanitized="$(sanitize_name "$ACTIVE_PROFILE")"
+            [[ "$runner" == "${profile_sanitized}-${repo_sanitized}" || "$runner" == "$repo_sanitized" ]] || return 1
+        fi
+    elif [[ "$rest" == *"$legacy_marker" ]]; then
+        # Najstarszy format usługi nie zawiera nazwy runnera po hostname:
+        # actions.runner.<owner>-<repo>.<host>.service
+        repo="${rest%"$legacy_marker"}"
+        [[ -n "$repo" ]] || return 1
     else
-        profile_sanitized="$(sanitize_name "$ACTIVE_PROFILE")"
-        [[ "$runner" == "${profile_sanitized}-${repo_sanitized}" || "$runner" == "$repo_sanitized" ]] || return 1
+        return 1
     fi
 
     printf '%s\n' "$repo"
