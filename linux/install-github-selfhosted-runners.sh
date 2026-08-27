@@ -341,6 +341,7 @@ load_profile() {
     fi
     labels="$(read_gitconfig_value "github.${profile}.labels")"
     [[ -n "$labels" ]] && CUSTOM_LABELS="$labels"
+    return 0
 }
 
 check_profile_config() {
@@ -412,6 +413,7 @@ validate_github_token() {
     echo "Token owner:  $login"
     echo "GitHub owner: $GITHUB_OWNER"
     echo "Mode:         $MODE"
+    echo "Token source: ${GITHUB_TOKEN_SOURCE:-unknown}"
     echo "Labels:       $CUSTOM_LABELS"
 }
 
@@ -763,7 +765,13 @@ uninstall_repo_runner() {
     dir="$(repo_runner_dir "$repo")"
     log "[$ACTIVE_PROFILE] Usuwanie: ${GITHUB_OWNER}/${repo}"
     [[ -d "$dir" ]] || { echo "Runner lokalny nie istnieje: $dir"; return 3; }
-    if [[ -x "$dir/svc.sh" ]]; then (cd "$dir" && ./svc.sh stop || true; ./svc.sh uninstall || true); fi
+    if [[ -x "$dir/svc.sh" ]]; then
+        (
+            cd "$dir"
+            ./svc.sh stop || true
+            ./svc.sh uninstall || true
+        )
+    fi
     if [[ -f "$dir/.runner" && -x "$dir/config.sh" ]]; then
         if token="$(get_repo_remove_token "$repo")" && [[ -n "$token" && "$token" != null ]]; then
             sudo -u "$RUNNER_USER" bash -c "cd '$dir' && ./config.sh remove --unattended --token '$token'" || remote_ok=false
@@ -790,7 +798,13 @@ install_org_runner() {
 uninstall_org_runner() {
     local dir token="" remote_ok=true
     dir="$(org_runner_dir)"; [[ -d "$dir" ]] || { echo "Runner lokalny nie istnieje: $dir"; return 3; }
-    if [[ -x "$dir/svc.sh" ]]; then (cd "$dir" && ./svc.sh stop || true; ./svc.sh uninstall || true); fi
+    if [[ -x "$dir/svc.sh" ]]; then
+        (
+            cd "$dir"
+            ./svc.sh stop || true
+            ./svc.sh uninstall || true
+        )
+    fi
     if [[ -f "$dir/.runner" && -x "$dir/config.sh" ]]; then
         if token="$(get_org_remove_token)" && [[ -n "$token" && "$token" != null ]]; then
             sudo -u "$RUNNER_USER" bash -c "cd '$dir' && ./config.sh remove --unattended --token '$token'" || remote_ok=false
@@ -806,7 +820,9 @@ purge_if_empty() {
         warn "--purge: w $RUNNER_BASE nadal istnieją runnery."; return 0
     fi
     rm -rf "$RUNNER_BASE"
-    id "$RUNNER_USER" &>/dev/null && userdel "$RUNNER_USER" 2>/dev/null || true
+    if id "$RUNNER_USER" &>/dev/null; then
+        userdel "$RUNNER_USER" 2>/dev/null || true
+    fi
     echo "Purge zakończony."
 }
 
@@ -814,16 +830,37 @@ process_user_profile() {
     local version="${1:-}" arch="${2:-}" repo rc
     local -a repositories=()
     local success=0 failed=0 skipped=0
+    if [[ "$LIST_REPOS" == true ]]; then
+        resolve_repositories
+        return 0
+    fi
     mapfile -t repositories < <(resolve_repositories)
-    [[ "$LIST_REPOS" == false ]] || return 0
     [[ ${#repositories[@]} -gt 0 ]] || { warn "Profil '$ACTIVE_PROFILE': nic nie wybrano."; return 0; }
     echo "Wybrane repozytoria [$ACTIVE_PROFILE]: ${#repositories[@]}"
     printf ' - %s\n' "${repositories[@]}"
     for repo in "${repositories[@]}"; do
         if [[ "$ACTION" == install ]]; then
-            if install_repo_runner "$repo" "$version" "$arch"; then ((success+=1)); else rc=$?; [[ $rc -eq 3 ]] && ((skipped+=1)) || ((failed+=1)); fi
+            if install_repo_runner "$repo" "$version" "$arch"; then
+                ((success += 1))
+            else
+                rc=$?
+                if [[ "$rc" -eq 3 ]]; then
+                    ((skipped += 1))
+                else
+                    ((failed += 1))
+                fi
+            fi
         else
-            if uninstall_repo_runner "$repo"; then ((success+=1)); else rc=$?; [[ $rc -eq 3 ]] && ((skipped+=1)) || ((failed+=1)); fi
+            if uninstall_repo_runner "$repo"; then
+                ((success += 1))
+            else
+                rc=$?
+                if [[ "$rc" -eq 3 ]]; then
+                    ((skipped += 1))
+                else
+                    ((failed += 1))
+                fi
+            fi
         fi
     done
     log "Podsumowanie profilu: $ACTIVE_PROFILE"
@@ -833,7 +870,11 @@ process_user_profile() {
 
 process_org_profile() {
     local version="${1:-}" arch="${2:-}"
-    [[ "$REPO_SELECTION_MODE" == all && "$LIST_REPOS" == false ]] ||
+    if [[ "$LIST_REPOS" == true ]]; then
+        warn "MODE=org: --list-repos dotyczy repozytoriów użytkownika; pomijam organization-level runnera."
+        return 0
+    fi
+    [[ "$REPO_SELECTION_MODE" == all ]] ||
       warn "MODE=org: selekcja repo nie dotyczy organization-level runnera; użyj Runner Groups."
     if [[ "$ACTION" == install ]]; then
         install_org_runner "$version" "$arch"
@@ -850,10 +891,10 @@ main() {
     ensure_dependencies
     ensure_selection_ui_dependencies
     [[ ${#SELECTED_PROFILES[@]} -gt 0 ]] || SELECTED_PROFILES=(default)
-    [[ "$ACTION" != install ]] || create_runner_user
+    [[ "$ACTION" != install || "$LIST_REPOS" == true ]] || create_runner_user
 
     local version="" arch="" profile failed_profiles=0
-    if [[ "$ACTION" == install ]]; then version="$(get_runner_version)"; arch="$(detect_arch)"; fi
+    if [[ "$ACTION" == install && "$LIST_REPOS" == false ]]; then version="$(get_runner_version)"; arch="$(detect_arch)"; fi
 
     for profile in "${SELECTED_PROFILES[@]}"; do
         load_profile "$profile"; check_profile_config; validate_github_token
