@@ -603,6 +603,7 @@ validate_github_token() {
     echo "Profile:         $ACTIVE_PROFILE"
     echo "Token owner:     $login"
     echo "GitHub owner:    $GITHUB_OWNER"
+    echo "Owner source:    ${GITHUB_OWNER_SOURCE:-unknown}"
     echo "Mode:            $MODE"
     echo "Labels:          $CUSTOM_LABELS"
     echo "Token source:    ${GITHUB_TOKEN_SOURCE:-unknown}"
@@ -1279,8 +1280,9 @@ purge_if_empty() {
     fi
 
     rm -rf "$RUNNER_BASE"
-    id "$RUNNER_USER" &>/dev/null &&
+    if id "$RUNNER_USER" &>/dev/null; then
         userdel "$RUNNER_USER" 2>/dev/null || true
+    fi
 
     echo "Purge zakończony."
     return 0
@@ -1291,8 +1293,12 @@ process_user_profile() {
     local -a repositories=()
     local success=0 failed=0 skipped=0
 
+    if [[ "$LIST_REPOS" == true ]]; then
+        resolve_repositories
+        return 0
+    fi
+
     mapfile -t repositories < <(resolve_repositories)
-    [[ "$LIST_REPOS" == false ]] || return 0
 
     if [[ ${#repositories[@]} -eq 0 ]]; then
         warn "Profil '$ACTIVE_PROFILE': nie wybrano żadnych repozytoriów."
@@ -1370,13 +1376,13 @@ main() {
     [[ ${#SELECTED_PROFILES[@]} -gt 0 ]] ||
         SELECTED_PROFILES=("default")
 
-    if [[ "$ACTION" == "install" ]]; then
+    if [[ "$ACTION" == "install" && "$LIST_REPOS" == false ]]; then
         create_runner_user
     fi
 
     local version="" arch="" profile failed_profiles=0
 
-    if [[ "$ACTION" == "install" ]]; then
+    if [[ "$ACTION" == "install" && "$LIST_REPOS" == false ]]; then
         version="$(get_runner_version)"
         arch="$(detect_arch)"
     fi
