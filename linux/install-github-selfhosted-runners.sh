@@ -39,44 +39,87 @@ error() { echo "ERROR: $*" >&2; exit 1; }
 
 show_help() {
 cat <<'HELP'
-GitHub Self-Hosted Runner Installer / Uninstaller
+GitHub Self-Hosted Runner Manager
 
-Użycie:
+Jeden skrypt do instalacji, wyboru i odinstalowania GitHub Actions
+self-hosted runnerów dla repozytoriów użytkownika lub organizacji.
+
+UŻYCIE
   sudo ./install-github-selfhosted-runners.sh [opcje]
-  sudo ./uninstall-github-selfhosted-runners.sh [opcje]
+  sudo ./install-github-selfhosted-runners.sh --install [opcje]
+  sudo ./install-github-selfhosted-runners.sh --uninstall [opcje]
 
-Akcje:
-  --install                 Instalacja runnerów (domyślnie).
-  --uninstall               Odinstalowanie runnerów.
-  --purge                   Po uninstall usuń pusty RUNNER_BASE i RUNNER_USER.
+AKCJE
+  --install
+      Instaluje runnery. Jest to akcja domyślna.
 
-Profile:
-  -p, --profile NAME        Wybierz profil; można podać wiele razy.
-  --profiles A,B,C          Wybierz profile rozdzielone przecinkami.
-  --list-profiles           Pokaż wykryte profile.
+  --uninstall
+      Zatrzymuje usługę systemd, wyrejestrowuje runnera z GitHub
+      i usuwa jego lokalny katalog.
 
-Repozytoria:
-  -r, --repo REPO           Wybierz repozytorium; można podać wiele razy.
-  --repos A,B,C             Lista repozytoriów rozdzielona przecinkami.
-  --repo PROFILE:REPO       Repo tylko dla wskazanego profilu.
-  --select-repos            Interaktywny wybór repozytoriów.
-  --all-repos               Wszystkie repozytoria.
-  --list-repos              Pokaż repozytoria dla wybranych profili.
+  --purge
+      Używane razem z --uninstall. Po usunięciu runnerów usuwa także
+      RUNNER_BASE i użytkownika RUNNER_USER, jeżeli nie pozostały inne runnery.
 
-Pozostałe:
-  -h, --help                Wyświetla pomoc.
+PROFILE
+  -p, --profile NAME
+      Wybiera jeden profil. Opcję można podać wiele razy.
 
-Profil default zachowuje zgodność ze starszym ~/.gitconfig:
+  --profiles A,B,C
+      Wybiera kilka profili rozdzielonych przecinkami.
+
+  --list-profiles
+      Pokazuje profile wykryte w ~/.gitconfig.
+
+REPOZYTORIA
+  -r, --repo REPO
+      Wybiera jedno repozytorium. Opcję można podać wiele razy.
+
+  --repos REPO1,REPO2,REPO3
+      Wybiera kilka repozytoriów rozdzielonych przecinkami.
+
+  --repo PROFILE:REPO
+      Przypisuje repozytorium tylko do wskazanego profilu.
+      Przydatne przy jednoczesnej obsłudze kilku kont GitHub.
+
+  --select-repos
+      Wyświetla numerowaną listę repozytoriów i pozwala wybrać je
+      interaktywnie przez numery lub nazwy.
+
+  --all-repos
+      Wybiera wszystkie dostępne repozytoria dla profilu MODE=user.
+      Jest to również zachowanie domyślne, jeśli nie podano --repo,
+      --repos ani --select-repos.
+
+  --list-repos
+      Pokazuje repozytoria dostępne dla wybranych profili i kończy działanie.
+
+  Uwaga:
+      Dla MODE=org tworzony jest organization-level runner. Opcje wyboru
+      repozytoriów nie ograniczają jego dostępu. Ograniczenia należy ustawić
+      przez Runner Groups po stronie GitHub.
+
+POZOSTAŁE
+  -h, --help
+      Wyświetla tę pomoc.
+
+KONFIGURACJA ~/.gitconfig
+
+Profil domyślny, zgodny ze starszą konfiguracją:
+
   [github]
       username = chmajster
       tokenBase64 = <TOKEN_BASE64>
 
-Nazwane profile:
+Nazwany profil użytkownika:
+
   [github "home"]
       mode = user
       username = chmajster
       tokenBase64 = <TOKEN_BASE64>
       labels = homelab,linux
+
+Nazwany profil organizacji:
 
   [github "work"]
       mode = org
@@ -84,49 +127,135 @@ Nazwane profile:
       tokenBase64 = <TOKEN_BASE64>
       labels = work,linux
 
-Pola profilu:
+Obsługiwane pola profilu:
   mode          user albo org
-  username      owner dla mode=user
-  organization  owner dla mode=org
-  owner         uniwersalny owner
-  tokenBase64   PAT zakodowany Base64
-  labels        etykiety runnera
+  username      właściciel dla mode=user
+  organization  organizacja dla mode=org
+  owner         uniwersalny owner zamiast username/organization
+  tokenBase64   GitHub PAT zakodowany Base64
+  labels        dodatkowe etykiety self-hosted runnera
 
-Przykłady:
-  sudo ./install-github-selfhosted-runners.sh
+Zmienne środowiskowe profilu default:
+  GITHUB_OWNER
+  GITHUB_TOKEN
+  MODE
+  RUNNER_USER
+  RUNNER_BASE
+  CUSTOM_LABELS
 
-  sudo ./install-github-selfhosted-runners.sh \
-    --repo Algen-server-web-explorer-panel \
-    --repo HomeLAB-DNS
+PRZYKŁADY — INSTALACJA
 
-  sudo ./install-github-selfhosted-runners.sh --select-repos
+  Wszystkie repozytoria profilu default:
 
-  sudo ./install-github-selfhosted-runners.sh \
-    --profiles home,work \
-    --repo home:HomeLAB-DNS \
-    --repo home:Algen-server-web-explorer-panel \
-    --repo work:backend-api
+    sudo ./install-github-selfhosted-runners.sh
 
-  sudo ./install-github-selfhosted-runners.sh \
-    --profile home --list-repos
+  Jedno repozytorium:
 
-  sudo ./install-github-selfhosted-runners.sh \
-    --uninstall --profile home --repo HomeLAB-DNS
+    sudo ./install-github-selfhosted-runners.sh \
+      --repo Algen-server-web-explorer-panel
 
-  sudo ./uninstall-github-selfhosted-runners.sh \
-    --profile home --repo HomeLAB-DNS
+  Kilka repozytoriów:
 
-  sudo ./uninstall-github-selfhosted-runners.sh \
-    --profile home --all-repos
+    sudo ./install-github-selfhosted-runners.sh \
+      --repos Algen-server-web-explorer-panel,HomeLAB-DNS
 
-Repo-level runner:
-  Fine-grained PAT: Administration = Read and write
-  Classic PAT: repo
+  Interaktywny wybór repozytoriów:
+
+    sudo ./install-github-selfhosted-runners.sh --select-repos
+
+  Jeden nazwany profil:
+
+    sudo ./install-github-selfhosted-runners.sh \
+      --profile home \
+      --select-repos
+
+  Kilka profili i osobne repozytoria dla każdego:
+
+    sudo ./install-github-selfhosted-runners.sh \
+      --profiles home,work \
+      --repo home:HomeLAB-DNS \
+      --repo home:Algen-server-web-explorer-panel \
+      --repo work:backend-api
+
+PRZYKŁADY — INFORMACJE
+
+  Lista profili:
+
+    ./install-github-selfhosted-runners.sh --list-profiles
+
+  Lista repozytoriów profilu:
+
+    sudo ./install-github-selfhosted-runners.sh \
+      --profile home \
+      --list-repos
+
+PRZYKŁADY — ODINSTALOWANIE
+
+  Jedno repozytorium:
+
+    sudo ./install-github-selfhosted-runners.sh \
+      --uninstall \
+      --profile home \
+      --repo HomeLAB-DNS
+
+  Kilka repozytoriów:
+
+    sudo ./install-github-selfhosted-runners.sh \
+      --uninstall \
+      --profile home \
+      --repos HomeLAB-DNS,HomeLAB-Proxmox-CloudPortal
+
+  Interaktywny wybór runnerów do usunięcia:
+
+    sudo ./install-github-selfhosted-runners.sh \
+      --uninstall \
+      --profile home \
+      --select-repos
+
+  Wszystkie runnery profilu:
+
+    sudo ./install-github-selfhosted-runners.sh \
+      --uninstall \
+      --profile home \
+      --all-repos
+
+  Wszystkie runnery profilu i pełne czyszczenie lokalne:
+
+    sudo ./install-github-selfhosted-runners.sh \
+      --uninstall \
+      --profile home \
+      --all-repos \
+      --purge
+
+UPRAWNIENIA TOKENU
+
+Repo-level runner, MODE=user:
+  Fine-grained PAT:
+      Repository permissions -> Administration: Read and write
+  Classic PAT:
+      repo
   Konto musi mieć admin access do repozytorium.
 
-Organization-level runner:
-  Fine-grained PAT: Self-hosted runners = Read and write
-  Classic PAT: admin:org
+Organization-level runner, MODE=org:
+  Fine-grained PAT:
+      Organization permissions -> Self-hosted runners: Read and write
+  Classic PAT:
+      admin:org
+  Konto musi mieć odpowiednie uprawnienia administracyjne organizacji.
+
+DIAGNOSTYKA
+
+  Lista usług runnerów:
+
+    systemctl --type=service | grep actions.runner
+
+  Logi wszystkich runnerów:
+
+    journalctl -u 'actions.runner.*' -f
+
+  Pomoc:
+
+    ./install-github-selfhosted-runners.sh --help
 HELP
 }
 
