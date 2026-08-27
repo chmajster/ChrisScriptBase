@@ -1,0 +1,281 @@
+name: Apply runner uninstall ordering fix
+
+on:
+  push:
+    branches:
+      - fix/selfhosted-runner-orphan-services-20260827
+    paths:
+      - '.github/workflows/apply-runner-uninstall-order-fix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/selfhosted-runner-orphan-services-20260827
+          fetch-depth: 0
+
+      - name: Enforce stop-remove-files ordering
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path('linux/install-github-selfhosted-runners.sh')
+          text = path.read_text()
+
+          start = text.index('remove_runner_service_unit() {')
+          end = text.index('\nuninstall_repo_runner() {', start)
+          new_helpers = r'''stop_runner_service_unit() {
+              local unit="$1"
+              case "$unit" in
+                  actions.runner.*.service) ;;
+                  *) warn "Pomijam nieoczekiwaną nazwę usługi: $unit"; return 1 ;;
+              esac
+              systemctl stop "$unit" >/dev/null 2>&1 || true
+              return 0
+          }
+
+          remove_runner_service_unit() {
+              local unit="$1" fragment=""
+              case "$unit" in
+                  actions.runner.*.service) ;;
+                  *) warn "Pomijam nieoczekiwaną nazwę usługi: $unit"; return 1 ;;
+              esac
+
+              systemctl disable "$unit" >/dev/null 2>&1 || true
+              fragment="$(systemctl show --property=FragmentPath --value "$unit" 2>/dev/null || true)"
+
+              if [[ "$fragment" == /etc/systemd/system/actions.runner.*.service ]]; then
+                  rm -f -- "$fragment"
+              fi
+              rm -f -- "/etc/systemd/system/$unit"
+              find /etc/systemd/system -type l -name "$unit" -delete 2>/dev/null || true
+
+              systemctl daemon-reload >/dev/null 2>&1 || true
+              systemctl reset-failed "$unit" >/dev/null 2>&1 || true
+              return 0
+          }
+          '''.replace('          ', '')
+          text = text[:start] + new_helpers.rstrip() + text[end:]
+
+          start = text.index('uninstall_repo_runner() {')
+          end = text.index('\ninstall_org_runner() {', start)
+          new_repo = r'''uninstall_repo_runner() {
+              local repo="$1" dir token="" service_unit="" remote_ok=true local_ok=true
+              local -a dirs=() units=() dir_units=() remaining=()
+
+              log "[$ACTIVE_PROFILE] Usuwanie: ${GITHUB_OWNER}/${repo}"
+              mapfile -t dirs < <(find_repo_runner_dirs "$repo")
+              mapfile -t units < <(runner_service_units_for_repo "$repo")
+
+              for dir in "${dirs[@]}"; do
+                  service_unit="$(service_name_from_runner_dir "$dir")"
+                  [[ -n "$service_unit" ]] && dir_units+=("$service_unit")
+              done
+              if [[ ${#dir_units[@]} -gt 0 ]]; then
+                  mapfile -t units < <(printf '%s\n' "${units[@]}" "${dir_units[@]}" | awk 'NF && !seen[$0]++')
+              fi
+
+              if [[ ${#dirs[@]} -eq 0 && ${#units[@]} -eq 0 ]]; then
+                  echo "Runner lokalny ani usługa systemd nie istnieją dla: ${GITHUB_OWNER}/${repo}"
+                  return 3
+              fi
+
+              # FAZA 1: najpierw zatrzymaj wszystkie procesy/usługi runnera.
+              for dir in "${dirs[@]}"; do
+                  if [[ -x "$dir/svc.sh" ]]; then
+                      (
+                          cd "$dir"
+                          ./svc.sh stop
+                      ) || warn "Nie udało się zatrzymać usługi przez svc.sh w $dir; próbuję przez systemd."
+                  fi
+              done
+              for service_unit in "${units[@]}"; do
+                  stop_runner_service_unit "$service_unit" || local_ok=false
+              done
+
+              # FAZA 2: dopiero po zatrzymaniu wszystkich usług usuń ich rejestrację systemd.
+              for dir in "${dirs[@]}"; do
+                  if [[ -x "$dir/svc.sh" ]]; then
+                      (
+                          cd "$dir"
+                          ./svc.sh uninstall
+                      ) || warn "svc.sh uninstall nie usunął usługi z $dir; wykonuję wymuszone czyszczenie systemd."
+                  fi
+              done
+              for service_unit in "${units[@]}"; do
+                  remove_runner_service_unit "$service_unit" || local_ok=false
+              done
+
+              # Usuń ewentualne osierocone unity wykryte po pierwszej próbie, nadal przed kasowaniem plików.
+              mapfile -t remaining < <(runner_service_units_for_repo "$repo")
+              for service_unit in "${remaining[@]}"; do
+                  stop_runner_service_unit "$service_unit" || local_ok=false
+                  remove_runner_service_unit "$service_unit" || local_ok=false
+              done
+
+              mapfile -t remaining < <(runner_service_units_for_repo "$repo")
+              if [[ ${#remaining[@]} -gt 0 ]]; then
+                  warn "Nie udało się usunąć usług systemd dla ${GITHUB_OWNER}/${repo}: ${remaining[*]}"
+                  warn "Pliki runnera pozostają na dysku, aby można było ponowić czyszczenie."
+                  return 1
+              fi
+
+              # FAZA 3: po usunięciu usług wyrejestruj runnera z GitHub.
+              for dir in "${dirs[@]}"; do
+                  if [[ -f "$dir/.runner" && -x "$dir/config.sh" ]]; then
+                      token=""
+                      if token="$(get_repo_remove_token "$repo")" && [[ -n "$token" && "$token" != null ]]; then
+                          sudo -u "$RUNNER_USER" bash -c "cd '$dir' && ./config.sh remove --unattended --token '$token'" || remote_ok=false
+                      else
+                          warn "Brak remove token; usługa lokalna została usunięta, ale wyrejestrowanie GitHub nie powiodło się."
+                          remote_ok=false
+                      fi
+                      unset token
+                  fi
+              done
+
+              # FAZA 4: pliki/katalogi runnera są usuwane zawsze jako ostatnie.
+              for dir in "${dirs[@]}"; do
+                  rm -rf "$dir"
+              done
+
+              [[ "$remote_ok" == true && "$local_ok" == true ]]
+          }
+          '''.replace('          ', '')
+          text = text[:start] + new_repo.rstrip() + text[end:]
+
+          start = text.index('uninstall_org_runner() {')
+          end = text.index('\npurge_if_empty() {', start)
+          new_org = r'''uninstall_org_runner() {
+              local dir token="" service_unit="" remote_ok=true local_ok=true
+              dir="$(org_runner_dir)"
+              [[ -d "$dir" ]] || { echo "Runner lokalny nie istnieje: $dir"; return 3; }
+              service_unit="$(service_name_from_runner_dir "$dir")"
+
+              # 1. Stop.
+              if [[ -x "$dir/svc.sh" ]]; then
+                  (
+                      cd "$dir"
+                      ./svc.sh stop
+                  ) || warn "Nie udało się zatrzymać organization runnera przez svc.sh."
+              fi
+              [[ -z "$service_unit" ]] || stop_runner_service_unit "$service_unit" || local_ok=false
+
+              # 2. Usuń usługę systemd.
+              if [[ -x "$dir/svc.sh" ]]; then
+                  (
+                      cd "$dir"
+                      ./svc.sh uninstall
+                  ) || warn "svc.sh uninstall nie usunął organization runnera; wykonuję wymuszone czyszczenie."
+              fi
+              [[ -z "$service_unit" ]] || remove_runner_service_unit "$service_unit" || local_ok=false
+
+              if [[ -n "$service_unit" ]] && systemctl list-unit-files --type=service --no-legend "$service_unit" 2>/dev/null | awk '{print $1}' | grep -Fqx "$service_unit"; then
+                  warn "Usługa $service_unit nadal istnieje; nie usuwam plików organization runnera."
+                  return 1
+              fi
+
+              # 3. Wyrejestruj z GitHub.
+              if [[ -f "$dir/.runner" && -x "$dir/config.sh" ]]; then
+                  if token="$(get_org_remove_token)" && [[ -n "$token" && "$token" != null ]]; then
+                      sudo -u "$RUNNER_USER" bash -c "cd '$dir' && ./config.sh remove --unattended --token '$token'" || remote_ok=false
+                  else
+                      remote_ok=false
+                  fi
+              fi
+              unset token
+
+              # 4. Pliki na końcu.
+              rm -rf "$dir"
+              [[ "$remote_ok" == true && "$local_ok" == true ]]
+          }
+          '''.replace('          ', '')
+          text = text[:start] + new_org.rstrip() + text[end:]
+
+          path.write_text(text)
+
+          test_path = Path('linux/tests/test-install-github-selfhosted-runners.sh')
+          tests = test_path.read_text()
+          marker = "printf '\\nRESULT: pass=%d fail=%d\\n' \"$pass\" \"$fail\"\n"
+          if marker not in tests:
+              raise SystemExit('test marker not found')
+
+          regression = r'''
+          expect_success "uninstall order is stop then service removal then files" env LIB="$LIB" TEST_TMP="$TMP" bash -c '
+              source "$LIB"
+              ACTIVE_PROFILE=home
+              GITHUB_OWNER=chmajster
+              RUNNER_BASE="$TEST_TMP/order-runners"
+              dir="$RUNNER_BASE/profiles/home/homelab-dns"
+              mkdir -p "$dir"
+              printf "%s\n" actions.runner.chmajster-HomeLAB-DNS.kynlab01-home-homelab-dns.service > "$dir/.service"
+              cat > "$dir/svc.sh" <<EOF
+          #!/usr/bin/env bash
+          echo "svc-$1" >> "$TEST_TMP/order.log"
+          exit 0
+          EOF
+              chmod +x "$dir/svc.sh"
+              list_action_runner_service_units() {
+                  [[ -f "$TEST_TMP/unit-removed" ]] || echo actions.runner.chmajster-HomeLAB-DNS.kynlab01-home-homelab-dns.service
+              }
+              hostname() { echo kynlab01; }
+              stop_runner_service_unit() { echo systemd-stop >> "$TEST_TMP/order.log"; return 0; }
+              remove_runner_service_unit() { echo systemd-remove >> "$TEST_TMP/order.log"; touch "$TEST_TMP/unit-removed"; return 0; }
+              rm() {
+                  if [[ "$*" == *"$dir"* ]]; then echo files-remove >> "$TEST_TMP/order.log"; fi
+                  command rm "$@"
+              }
+              : > "$TEST_TMP/order.log"
+              uninstall_repo_runner HomeLAB-DNS
+              mapfile -t order < "$TEST_TMP/order.log"
+              [[ "${order[0]}" == svc-stop ]]
+              [[ "${order[1]}" == systemd-stop ]]
+              [[ "${order[2]}" == svc-uninstall ]]
+              [[ "${order[3]}" == systemd-remove ]]
+              [[ "${order[4]}" == files-remove ]]
+          '
+
+          expect_success "service cleanup failure keeps runner files" env LIB="$LIB" TEST_TMP="$TMP" bash -c '
+              source "$LIB"
+              ACTIVE_PROFILE=home
+              GITHUB_OWNER=chmajster
+              RUNNER_BASE="$TEST_TMP/keep-runners"
+              dir="$RUNNER_BASE/profiles/home/homelab-dns"
+              mkdir -p "$dir"
+              printf "%s\n" actions.runner.chmajster-HomeLAB-DNS.kynlab01-home-homelab-dns.service > "$dir/.service"
+              list_action_runner_service_units() { echo actions.runner.chmajster-HomeLAB-DNS.kynlab01-home-homelab-dns.service; }
+              hostname() { echo kynlab01; }
+              stop_runner_service_unit() { return 0; }
+              remove_runner_service_unit() { return 0; }
+              if uninstall_repo_runner HomeLAB-DNS; then exit 1; fi
+              [[ -d "$dir" ]]
+          '
+
+          '''.replace('          ', '')
+          tests = tests.replace(marker, regression + marker, 1)
+          test_path.write_text(tests)
+          PY
+
+      - name: Validate
+        shell: bash
+        run: |
+          bash -n linux/install-github-selfhosted-runners.sh
+          shellcheck linux/install-github-selfhosted-runners.sh
+          bash linux/tests/test-install-github-selfhosted-runners.sh
+
+      - name: Commit fixes
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add linux/install-github-selfhosted-runners.sh linux/tests/test-install-github-selfhosted-runners.sh
+          if ! git diff --cached --quiet; then
+            git commit -m 'Enforce runner uninstall stop-remove-files order'
+            git push origin HEAD:fix/selfhosted-runner-orphan-services-20260827
+          fi
