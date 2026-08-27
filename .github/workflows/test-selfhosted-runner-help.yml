@@ -1,0 +1,21 @@
+name: Test self-hosted runner help
+
+on:
+  pull_request:
+    paths:
+      - 'linux/install-github-selfhosted-runners.sh'
+      - 'linux/tests/test-install-github-selfhosted-runners.sh'
+      - '.github/workflows/test-selfhosted-runner-help.yml'
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ShellCheck
+        run: |
+          shellcheck --version
+          shellcheck linux/install-github-selfhosted-runners.sh
+      - name: Run CLI and help regression tests
+        run: bash linux/tests/test-install-github-selfhosted-runners.sh
