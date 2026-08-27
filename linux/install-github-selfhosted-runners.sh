@@ -861,6 +861,16 @@ service_name_from_runner_dir() {
     head -n 1 "$dir/.service" | tr -d '\r'
 }
 
+stop_runner_service_unit() {
+    local unit="$1"
+    case "$unit" in
+        actions.runner.*.service) ;;
+        *) warn "Pomijam nieoczekiwaną nazwę usługi: $unit"; return 1 ;;
+    esac
+    systemctl stop "$unit" >/dev/null 2>&1 || true
+    return 0
+}
+
 remove_runner_service_unit() {
     local unit="$1" fragment=""
     case "$unit" in
@@ -868,7 +878,6 @@ remove_runner_service_unit() {
         *) warn "Pomijam nieoczekiwaną nazwę usługi: $unit"; return 1 ;;
     esac
 
-    systemctl stop "$unit" >/dev/null 2>&1 || true
     systemctl disable "$unit" >/dev/null 2>&1 || true
     fragment="$(systemctl show --property=FragmentPath --value "$unit" 2>/dev/null || true)"
 
@@ -882,65 +891,88 @@ remove_runner_service_unit() {
     systemctl reset-failed "$unit" >/dev/null 2>&1 || true
     return 0
 }
-
 uninstall_repo_runner() {
     local repo="$1" dir token="" service_unit="" remote_ok=true local_ok=true
-    local -a dirs=() units=() remaining=()
+    local -a dirs=() units=() dir_units=() remaining=()
 
     log "[$ACTIVE_PROFILE] Usuwanie: ${GITHUB_OWNER}/${repo}"
     mapfile -t dirs < <(find_repo_runner_dirs "$repo")
     mapfile -t units < <(runner_service_units_for_repo "$repo")
+
+    for dir in "${dirs[@]}"; do
+        service_unit="$(service_name_from_runner_dir "$dir")"
+        [[ -n "$service_unit" ]] && dir_units+=("$service_unit")
+    done
+    if [[ ${#dir_units[@]} -gt 0 ]]; then
+        mapfile -t units < <(printf '%s\n' "${units[@]}" "${dir_units[@]}" | awk 'NF && !seen[$0]++')
+    fi
 
     if [[ ${#dirs[@]} -eq 0 && ${#units[@]} -eq 0 ]]; then
         echo "Runner lokalny ani usługa systemd nie istnieją dla: ${GITHUB_OWNER}/${repo}"
         return 3
     fi
 
+    # FAZA 1: najpierw zatrzymaj wszystkie procesy/usługi runnera.
     for dir in "${dirs[@]}"; do
-        service_unit="$(service_name_from_runner_dir "$dir")"
-
         if [[ -x "$dir/svc.sh" ]]; then
-  if ! (
+  (
       cd "$dir"
       ./svc.sh stop
-      ./svc.sh uninstall
-  ); then
-      warn "svc.sh nie usunął poprawnie usługi z $dir; wykonuję wymuszone czyszczenie systemd."
-  fi
+  ) || warn "Nie udało się zatrzymać usługi przez svc.sh w $dir; próbuję przez systemd."
         fi
-
-        if [[ -n "$service_unit" ]]; then
-  remove_runner_service_unit "$service_unit" || local_ok=false
-        fi
-
-        if [[ -f "$dir/.runner" && -x "$dir/config.sh" ]]; then
-  token=""
-  if token="$(get_repo_remove_token "$repo")" && [[ -n "$token" && "$token" != null ]]; then
-      sudo -u "$RUNNER_USER" bash -c "cd '$dir' && ./config.sh remove --unattended --token '$token'" || remote_ok=false
-  else
-      warn "Brak remove token; usuwam runnera i usługę tylko lokalnie."
-      remote_ok=false
-  fi
-  unset token
-        fi
-
-        rm -rf "$dir"
+    done
+    for service_unit in "${units[@]}"; do
+        stop_runner_service_unit "$service_unit" || local_ok=false
     done
 
-    mapfile -t units < <(runner_service_units_for_repo "$repo")
+    # FAZA 2: dopiero po zatrzymaniu wszystkich usług usuń ich rejestrację systemd.
+    for dir in "${dirs[@]}"; do
+        if [[ -x "$dir/svc.sh" ]]; then
+  (
+      cd "$dir"
+      ./svc.sh uninstall
+  ) || warn "svc.sh uninstall nie usunął usługi z $dir; wykonuję wymuszone czyszczenie systemd."
+        fi
+    done
     for service_unit in "${units[@]}"; do
+        remove_runner_service_unit "$service_unit" || local_ok=false
+    done
+
+    # Usuń ewentualne osierocone unity wykryte po pierwszej próbie, nadal przed kasowaniem plików.
+    mapfile -t remaining < <(runner_service_units_for_repo "$repo")
+    for service_unit in "${remaining[@]}"; do
+        stop_runner_service_unit "$service_unit" || local_ok=false
         remove_runner_service_unit "$service_unit" || local_ok=false
     done
 
     mapfile -t remaining < <(runner_service_units_for_repo "$repo")
     if [[ ${#remaining[@]} -gt 0 ]]; then
         warn "Nie udało się usunąć usług systemd dla ${GITHUB_OWNER}/${repo}: ${remaining[*]}"
-        local_ok=false
+        warn "Pliki runnera pozostają na dysku, aby można było ponowić czyszczenie."
+        return 1
     fi
+
+    # FAZA 3: po usunięciu usług wyrejestruj runnera z GitHub.
+    for dir in "${dirs[@]}"; do
+        if [[ -f "$dir/.runner" && -x "$dir/config.sh" ]]; then
+  token=""
+  if token="$(get_repo_remove_token "$repo")" && [[ -n "$token" && "$token" != null ]]; then
+      sudo -u "$RUNNER_USER" bash -c "cd '$dir' && ./config.sh remove --unattended --token '$token'" || remote_ok=false
+  else
+      warn "Brak remove token; usługa lokalna została usunięta, ale wyrejestrowanie GitHub nie powiodło się."
+      remote_ok=false
+  fi
+  unset token
+        fi
+    done
+
+    # FAZA 4: pliki/katalogi runnera są usuwane zawsze jako ostatnie.
+    for dir in "${dirs[@]}"; do
+        rm -rf "$dir"
+    done
 
     [[ "$remote_ok" == true && "$local_ok" == true ]]
 }
-
 install_org_runner() {
     local version="$1" arch="$2" dir token name
     dir="$(org_runner_dir)"; name="$(hostname -s)-$(sanitize_name "$ACTIVE_PROFILE")-$(sanitize_name "$GITHUB_OWNER")"
@@ -955,23 +987,48 @@ install_org_runner() {
 }
 
 uninstall_org_runner() {
-    local dir token="" remote_ok=true
-    dir="$(org_runner_dir)"; [[ -d "$dir" ]] || { echo "Runner lokalny nie istnieje: $dir"; return 3; }
+    local dir token="" service_unit="" remote_ok=true local_ok=true
+    dir="$(org_runner_dir)"
+    [[ -d "$dir" ]] || { echo "Runner lokalny nie istnieje: $dir"; return 3; }
+    service_unit="$(service_name_from_runner_dir "$dir")"
+
+    # 1. Stop.
     if [[ -x "$dir/svc.sh" ]]; then
         (
-            cd "$dir"
-            ./svc.sh stop || true
-            ./svc.sh uninstall || true
-        )
+  cd "$dir"
+  ./svc.sh stop
+        ) || warn "Nie udało się zatrzymać organization runnera przez svc.sh."
     fi
+    [[ -z "$service_unit" ]] || stop_runner_service_unit "$service_unit" || local_ok=false
+
+    # 2. Usuń usługę systemd.
+    if [[ -x "$dir/svc.sh" ]]; then
+        (
+  cd "$dir"
+  ./svc.sh uninstall
+        ) || warn "svc.sh uninstall nie usunął organization runnera; wykonuję wymuszone czyszczenie."
+    fi
+    [[ -z "$service_unit" ]] || remove_runner_service_unit "$service_unit" || local_ok=false
+
+    if [[ -n "$service_unit" ]] && systemctl list-unit-files --type=service --no-legend "$service_unit" 2>/dev/null | awk '{print $1}' | grep -Fqx "$service_unit"; then
+        warn "Usługa $service_unit nadal istnieje; nie usuwam plików organization runnera."
+        return 1
+    fi
+
+    # 3. Wyrejestruj z GitHub.
     if [[ -f "$dir/.runner" && -x "$dir/config.sh" ]]; then
         if token="$(get_org_remove_token)" && [[ -n "$token" && "$token" != null ]]; then
-            sudo -u "$RUNNER_USER" bash -c "cd '$dir' && ./config.sh remove --unattended --token '$token'" || remote_ok=false
-        else remote_ok=false; fi
+  sudo -u "$RUNNER_USER" bash -c "cd '$dir' && ./config.sh remove --unattended --token '$token'" || remote_ok=false
+        else
+  remote_ok=false
+        fi
     fi
-    unset token; rm -rf "$dir"; [[ "$remote_ok" == true ]]
-}
+    unset token
 
+    # 4. Pliki na końcu.
+    rm -rf "$dir"
+    [[ "$remote_ok" == true && "$local_ok" == true ]]
+}
 purge_if_empty() {
     local -a remaining_services=()
     [[ "$PURGE" == true ]] || return 0

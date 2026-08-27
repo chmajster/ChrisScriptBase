@@ -197,5 +197,57 @@ expect_success "purge keeps runner user when services still exist" env LIB="$LIB
     [[ -d "$RUNNER_BASE" && ! -e "$TEST_TMP/id-called" ]]
 '
 
+
+expect_success "uninstall order is stop then service removal then files" env LIB="$LIB" TEST_TMP="$TMP" bash -c '
+    source "$LIB"
+    ACTIVE_PROFILE=home
+    GITHUB_OWNER=chmajster
+    RUNNER_BASE="$TEST_TMP/order-runners"
+    dir="$RUNNER_BASE/profiles/home/homelab-dns"
+    mkdir -p "$dir"
+    printf "%s\n" actions.runner.chmajster-HomeLAB-DNS.kynlab01-home-homelab-dns.service > "$dir/.service"
+    set -- "\$1"
+    cat > "$dir/svc.sh" <<EOF
+#!/usr/bin/env bash
+echo "svc-$1" >> "$TEST_TMP/order.log"
+exit 0
+EOF
+    chmod +x "$dir/svc.sh"
+    list_action_runner_service_units() {
+        [[ -f "$TEST_TMP/unit-removed" ]] || echo actions.runner.chmajster-HomeLAB-DNS.kynlab01-home-homelab-dns.service
+    }
+    hostname() { echo kynlab01; }
+    stop_runner_service_unit() { echo systemd-stop >> "$TEST_TMP/order.log"; return 0; }
+    remove_runner_service_unit() { echo systemd-remove >> "$TEST_TMP/order.log"; touch "$TEST_TMP/unit-removed"; return 0; }
+    rm() {
+        if [[ "$*" == *"$dir"* ]]; then echo files-remove >> "$TEST_TMP/order.log"; fi
+        command rm "$@"
+    }
+    : > "$TEST_TMP/order.log"
+    uninstall_repo_runner HomeLAB-DNS
+    mapfile -t order < "$TEST_TMP/order.log"
+    [[ "${order[0]}" == svc-stop ]]
+    [[ "${order[1]}" == systemd-stop ]]
+    [[ "${order[2]}" == svc-uninstall ]]
+    [[ "${order[3]}" == systemd-remove ]]
+    [[ "${order[4]}" == files-remove ]]
+'
+
+expect_success "service cleanup failure keeps runner files" env LIB="$LIB" TEST_TMP="$TMP" bash -c '
+    source "$LIB"
+    ACTIVE_PROFILE=home
+    GITHUB_OWNER=chmajster
+    RUNNER_BASE="$TEST_TMP/keep-runners"
+    dir="$RUNNER_BASE/profiles/home/homelab-dns"
+    mkdir -p "$dir"
+    printf "%s\n" actions.runner.chmajster-HomeLAB-DNS.kynlab01-home-homelab-dns.service > "$dir/.service"
+    list_action_runner_service_units() { echo actions.runner.chmajster-HomeLAB-DNS.kynlab01-home-homelab-dns.service; }
+    hostname() { echo kynlab01; }
+    stop_runner_service_unit() { return 0; }
+    remove_runner_service_unit() { return 0; }
+    if uninstall_repo_runner HomeLAB-DNS; then exit 1; fi
+    [[ -d "$dir" ]]
+'
+
 printf '\nRESULT: pass=%d fail=%d\n' "$pass" "$fail"
 [[ "$fail" -eq 0 ]]
