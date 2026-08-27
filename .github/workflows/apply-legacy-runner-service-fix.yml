@@ -7,6 +7,7 @@ on:
     paths:
       - '.github/workflows/apply-legacy-runner-service-fix.yml'
       - '.github/scripts/patch-legacy-runner-service.py'
+      - 'linux/tests/test-install-github-selfhosted-runners-legacy-service.sh'
 
 permissions:
   contents: write
