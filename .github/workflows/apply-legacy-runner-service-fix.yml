@@ -1,0 +1,41 @@
+name: Apply legacy runner service cleanup fix
+
+on:
+  push:
+    branches:
+      - fix/legacy-runner-service-name-20260827
+    paths:
+      - '.github/workflows/apply-legacy-runner-service-fix.yml'
+      - '.github/scripts/patch-legacy-runner-service.py'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/legacy-runner-service-name-20260827
+          fetch-depth: 0
+
+      - name: Apply production fix
+        run: python3 .github/scripts/patch-legacy-runner-service.py
+
+      - name: Validate
+        run: |
+          bash -n linux/install-github-selfhosted-runners.sh
+          shellcheck linux/install-github-selfhosted-runners.sh
+          bash linux/tests/test-install-github-selfhosted-runners.sh
+          bash linux/tests/test-install-github-selfhosted-runners-legacy-service.sh
+
+      - name: Commit production fix
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add linux/install-github-selfhosted-runners.sh
+          if ! git diff --cached --quiet; then
+            git commit -m 'Handle legacy runner service names without suffix'
+            git push origin HEAD:fix/legacy-runner-service-name-20260827
+          fi
