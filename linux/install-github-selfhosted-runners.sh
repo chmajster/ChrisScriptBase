@@ -11,7 +11,7 @@ DEFAULT_LABELS="${CUSTOM_LABELS:-homelab}"
 API_VERSION="${GITHUB_API_VERSION:-2022-11-28}"
 
 REPO_SELECTION_MODE=""
-SELECTION_UI="auto"
+SELECTION_UI="auto"   # auto | gui | tui | zenity
 LIST_PROFILES=false
 LIST_REPOS=false
 PURGE=false
@@ -26,7 +26,6 @@ MODE="$DEFAULT_MODE"
 GITHUB_OWNER=""
 GITHUB_TOKEN=""
 CUSTOM_LABELS="$DEFAULT_LABELS"
-GITHUB_OWNER_SOURCE=""
 GITHUB_TOKEN_SOURCE=""
 
 GUI_DISPLAY="${DISPLAY:-}"
@@ -50,7 +49,8 @@ cat <<'HELP'
 GitHub Self-Hosted Runner Manager
 
 Jeden skrypt do instalacji i odinstalowania GitHub Actions self-hosted runnerów.
-Obsługuje wiele profili GitHub, wybór konkretnych repozytoriów oraz GUI/TUI.
+Obsługuje profile z ~/.gitconfig, wybór repozytoriów oraz interfejs działający
+zarówno lokalnie, jak i przez zwykłe SSH.
 
 UŻYCIE
   sudo bash ./install-github-selfhosted-runners.sh [opcje]
@@ -58,172 +58,86 @@ UŻYCIE
   sudo bash ./install-github-selfhosted-runners.sh --uninstall [opcje]
 
 AKCJE
-  --install
-      Instaluje runnery. Akcja domyślna.
-
-  --uninstall
-      Zatrzymuje usługę systemd, wyrejestrowuje runnera z GitHub
-      i usuwa jego lokalny katalog.
-
-  --purge
-      Z --uninstall usuwa także pusty RUNNER_BASE i RUNNER_USER.
+  --install                 Instaluje runnery. Akcja domyślna.
+  --uninstall               Wyrejestrowuje i usuwa runnery.
+  --purge                   Z --uninstall usuwa pusty RUNNER_BASE i RUNNER_USER.
 
 PROFILE
-  -p, --profile NAME
-      Wybiera profil. Opcję można podać wiele razy.
-
-  --profiles A,B,C
-      Wybiera kilka profili.
-
-  --list-profiles
-      Pokazuje profile wykryte w ~/.gitconfig użytkownika wywołującego sudo.
+  -p, --profile NAME        Wybiera profil; można podać wiele razy.
+  --profiles A,B,C          Wybiera kilka profili.
+  --list-profiles           Pokazuje profile wykryte w ~/.gitconfig.
 
 REPOZYTORIA
-  -r, --repo REPO
-      Wybiera jedno repozytorium. Opcję można podać wiele razy.
+  -r, --repo REPO           Jedno repo; można podać wiele razy.
+  --repos A,B,C             Kilka repozytoriów.
+  --repo PROFILE:REPO       Repo tylko dla wskazanego profilu.
+  --all-repos               Wszystkie repozytoria.
+  --list-repos              Wyświetla repozytoria i kończy działanie.
 
-  --repos REPO1,REPO2
-      Wybiera kilka repozytoriów.
+  --select-repos            Interaktywny wybór repozytoriów.
+  -GUI, --gui               Interfejs okienkowy także przez SSH:
+                            * lokalny desktop -> Zenity,
+                            * zwykłe SSH -> dialog/whiptail w terminalu.
+  --tui                     Wymusza terminalowe okno dialog/whiptail.
+  --zenity                  Wymusza natywne Zenity; wymaga X11/Wayland.
 
-  --repo PROFILE:REPO
-      Przypisuje repozytorium tylko do wskazanego profilu.
+WAŻNE
+  --gui NIE wymaga X11/Wayland. Przez SSH wyświetla terminalowe okno
+  z checkboxami. Klawisze: strzałki, SPACJA zaznacza, TAB zmienia przycisk,
+  ENTER zatwierdza.
 
-  --select-repos
-      Uruchamia interaktywny wybór repozytoriów.
-      W trybie auto używa Zenity, jeśli wykryto sesję graficzną.
-      Bez działającego GUI przechodzi do TUI.
-
-  -GUI, --gui
-      Wymusza GUI Zenity. Używaj razem z --select-repos.
-
-  --tui
-      Wymusza wybór tekstowy w terminalu. Używaj razem z --select-repos.
-
-  --all-repos
-      Wybiera wszystkie repozytoria dostępne dla profilu MODE=user.
-      Jest to również zachowanie domyślne, jeśli nie podano selekcji.
-
-  --list-repos
-      Pokazuje repozytoria dostępne dla wybranych profili.
-
-UWAGA O SELEKCJI
-  --all-repos, --select-repos oraz --repo/--repos są trybami wzajemnie
-  wykluczającymi się. Skrypt zgłosi błąd zamiast uzależniać zachowanie
-  od kolejności argumentów.
-
-GUI
-  Przy zwykłym sudo zmienne DISPLAY/WAYLAND_DISPLAY mogą zostać usunięte.
-  Skrypt próbuje odzyskać środowisko sesji użytkownika przez systemd --user.
-
-  Dla GUI najpewniejsza forma uruchomienia to:
-    sudo -E bash ./install-github-selfhosted-runners.sh \
-      --profile home --select-repos --gui
-
-  Jeśli polecenie jest wykonywane przez SSH bez X11/Wayland, GUI nie może
-  zostać uruchomione. Wtedy użyj --tui.
+  --all-repos, --select-repos oraz --repo/--repos są wzajemnie wykluczające.
 
 KONFIGURACJA ~/.gitconfig
 
-Profil domyślny:
   [github]
       mode = user
       username = chmajster
       tokenBase64 = <TOKEN_BASE64>
       labels = homelab,linux
 
-Nazwany profil:
   [github "home"]
       mode = user
       username = chmajster
       tokenBase64 = <TOKEN_BASE64>
       labels = homelab,linux
 
-Profil organizacji:
   [github "work"]
       mode = org
       organization = moja-organizacja
       tokenBase64 = <TOKEN_BASE64>
       labels = work,linux
 
-Pola profilu:
-  mode          user albo org
-  username      owner dla mode=user
-  organization  owner dla mode=org
-  owner         uniwersalny owner
-  tokenBase64   PAT zakodowany Base64
-  labels        etykiety runnera
-
 PRZYKŁADY
 
-  Poniższe przykłady używają profilu "home".
-  Jeśli używasz innego profilu, zmień wartość po --profile.
-
-  Lista profili:
-    sudo bash ./install-github-selfhosted-runners.sh --list-profiles
-
-  Lista repozytoriów profilu home:
+  SSH — okno z checkboxami:
     sudo bash ./install-github-selfhosted-runners.sh \
-      --profile home --list-repos
+      --profile home --select-repos --gui
 
-  GUI — wybór repozytoriów do instalacji:
-    sudo -E bash ./install-github-selfhosted-runners.sh \
-      --install --profile home --select-repos --gui
-
-  GUI — wybór repozytoriów do usunięcia:
-    sudo -E bash ./install-github-selfhosted-runners.sh \
+  SSH — wybór runnerów do usunięcia:
+    sudo bash ./install-github-selfhosted-runners.sh \
       --uninstall --profile home --select-repos --gui
 
-  Automatyczny GUI/TUI:
-    sudo -E bash ./install-github-selfhosted-runners.sh \
-      --profile home --select-repos
-
-  TUI — wybór repozytoriów:
-    sudo bash ./install-github-selfhosted-runners.sh \
-      --profile home --select-repos --tui
-
-  Jedno repo:
-    sudo bash ./install-github-selfhosted-runners.sh \
-      --install --profile home --repo HomeLAB-DNS
-
-  Kilka repo:
-    sudo bash ./install-github-selfhosted-runners.sh \
-      --install --profile home \
-      --repos HomeLAB-DNS,Algen-server-web-explorer-panel
-
-  Odinstalowanie jednego repo:
-    sudo bash ./install-github-selfhosted-runners.sh \
-      --uninstall --profile home --repo HomeLAB-DNS
-
-  Odinstalowanie wszystkich:
+  Wszystkie runnery profilu:
     sudo bash ./install-github-selfhosted-runners.sh \
       --uninstall --profile home --all-repos
 
-  Pełne czyszczenie:
+  Wszystkie + pełne czyszczenie:
     sudo bash ./install-github-selfhosted-runners.sh \
       --uninstall --profile home --all-repos --purge
 
-  Profil domyślny zamiast "home":
-    sudo bash ./install-github-selfhosted-runners.sh \
-      --install --repo HomeLAB-DNS
-
-NIEPOPRAWNE POŁĄCZENIA OPCJI
-  Nie używaj:
-    --all-repos --select-repos
-    --all-repos --repo REPO
-    --select-repos --repo REPO
+  Wymuszenie prawdziwego okna Zenity:
+    sudo -E bash ./install-github-selfhosted-runners.sh \
+      --profile home --select-repos --zenity
 
 UPRAWNIENIA TOKENU
-  MODE=user, Fine-grained PAT:
+  MODE=user Fine-grained PAT:
       Repository permissions -> Administration: Read and write
-      Token musi mieć dostęp do repozytoriów, które mają dostać runnera.
-
-  MODE=user, Classic PAT:
+  MODE=user Classic PAT:
       repo
-
-  MODE=org, Fine-grained PAT:
+  MODE=org Fine-grained PAT:
       Organization permissions -> Self-hosted runners: Read and write
-
-  MODE=org, Classic PAT:
+  MODE=org Classic PAT:
       admin:org
 
 DIAGNOSTYKA
@@ -236,107 +150,64 @@ append_csv() {
     local array_name="$1" csv="$2" item
     local -n target="$array_name"
     local -a parts=()
-
     IFS=',' read -r -a parts <<< "$csv"
     for item in "${parts[@]}"; do
         item="${item#"${item%%[![:space:]]*}"}"
         item="${item%"${item##*[![:space:]]}"}"
         [[ -n "$item" ]] && target+=("$item")
     done
-
     return 0
 }
 
 set_repo_selection_mode() {
     local requested="$1" option="$2"
-
     if [[ -n "$REPO_SELECTION_MODE" && "$REPO_SELECTION_MODE" != "$requested" ]]; then
-        error "Opcja $option koliduje z wcześniej wybranym trybem repozytoriów '$REPO_SELECTION_MODE'. Użyj tylko jednego z: --all-repos, --select-repos, --repo/--repos."
+        error "Opcja $option koliduje z trybem '$REPO_SELECTION_MODE'. Użyj tylko jednego z: --all-repos, --select-repos, --repo/--repos."
     fi
-
     REPO_SELECTION_MODE="$requested"
 }
 
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            -h|--help)
-                show_help
-                exit 0
-                ;;
-            --install)
-                ACTION="install"
-                shift
-                ;;
-            --uninstall)
-                ACTION="uninstall"
-                shift
-                ;;
-            --purge)
-                PURGE=true
-                shift
-                ;;
+            -h|--help) show_help; exit 0 ;;
+            --install) ACTION="install"; shift ;;
+            --uninstall) ACTION="uninstall"; shift ;;
+            --purge) PURGE=true; shift ;;
             -p|--profile)
                 [[ $# -ge 2 ]] || error "$1 wymaga nazwy profilu."
-                SELECTED_PROFILES+=("$2")
-                shift 2
-                ;;
+                SELECTED_PROFILES+=("$2"); shift 2 ;;
             --profiles)
                 [[ $# -ge 2 ]] || error "$1 wymaga listy profili."
-                append_csv SELECTED_PROFILES "$2"
-                shift 2
-                ;;
+                append_csv SELECTED_PROFILES "$2"; shift 2 ;;
             -r|--repo)
                 [[ $# -ge 2 ]] || error "$1 wymaga repozytorium."
-                set_repo_selection_mode "explicit" "$1"
-                SELECTED_REPOS+=("$2")
-                shift 2
-                ;;
+                set_repo_selection_mode explicit "$1"
+                SELECTED_REPOS+=("$2"); shift 2 ;;
             --repos)
                 [[ $# -ge 2 ]] || error "$1 wymaga listy repozytoriów."
-                set_repo_selection_mode "explicit" "$1"
-                append_csv SELECTED_REPOS "$2"
-                shift 2
-                ;;
+                set_repo_selection_mode explicit "$1"
+                append_csv SELECTED_REPOS "$2"; shift 2 ;;
             --select-repos)
-                set_repo_selection_mode "interactive" "$1"
-                shift
-                ;;
-            -GUI|--gui)
-                SELECTION_UI="gui"
-                shift
-                ;;
-            --tui)
-                SELECTION_UI="tui"
-                shift
-                ;;
+                set_repo_selection_mode interactive "$1"; shift ;;
+            -GUI|--gui) SELECTION_UI="gui"; shift ;;
+            --tui) SELECTION_UI="tui"; shift ;;
+            --zenity) SELECTION_UI="zenity"; shift ;;
             --all-repos)
-                set_repo_selection_mode "all" "$1"
-                shift
-                ;;
-            --list-profiles)
-                LIST_PROFILES=true
-                shift
-                ;;
-            --list-repos)
-                LIST_REPOS=true
-                shift
-                ;;
-            *)
-                error "Nieznana opcja: $1. Użyj --help."
-                ;;
+                set_repo_selection_mode all "$1"; shift ;;
+            --list-profiles) LIST_PROFILES=true; shift ;;
+            --list-repos) LIST_REPOS=true; shift ;;
+            *) error "Nieznana opcja: $1. Użyj --help." ;;
         esac
     done
 
     [[ -n "$REPO_SELECTION_MODE" ]] || REPO_SELECTION_MODE="all"
 
     if [[ "$SELECTION_UI" != "auto" && "$REPO_SELECTION_MODE" != "interactive" ]]; then
-        error "--gui/-GUI i --tui wymagają --select-repos."
+        error "--gui/-GUI, --tui i --zenity wymagają --select-repos."
     fi
-
-    if [[ "$PURGE" == true && "$ACTION" != "uninstall" ]]; then
-        error "--purge działa tylko razem z --uninstall."
-    fi
+    [[ "$PURGE" == false || "$ACTION" == "uninstall" ]] ||
+        error "--purge działa tylko z --uninstall."
 }
 
 require_root() {
@@ -345,22 +216,19 @@ require_root() {
 
 ensure_dependencies() {
     local missing=() cmd
-
     for cmd in curl jq tar gzip git base64 getent awk sudo; do
         command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
     done
-
     if [[ ${#missing[@]} -gt 0 ]]; then
         log "Instalacja brakujących zależności"
         apt-get update
         apt-get install -y curl jq tar gzip ca-certificates git coreutils gawk sudo
     fi
-
     return 0
 }
 
 get_invoking_user() {
-    if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+    if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
         printf '%s\n' "$SUDO_USER"
     else
         id -un
@@ -369,7 +237,6 @@ get_invoking_user() {
 
 get_user_home() {
     local username="$1" home
-
     home="$(getent passwd "$username" | cut -d: -f6)"
     [[ -n "$home" ]] || error "Nie można ustalić HOME użytkownika: $username"
     printf '%s\n' "$home"
@@ -383,14 +250,11 @@ init_invoking_user() {
 
 read_gitconfig_value() {
     local key="$1"
-
     [[ -f "$GITCONFIG_PATH" ]] || return 1
     git config --file "$GITCONFIG_PATH" --get "$key" 2>/dev/null || true
 }
 
-decode_token() {
-    printf '%s' "$1" | base64 --decode 2>/dev/null
-}
+decode_token() { printf '%s' "$1" | base64 --decode 2>/dev/null; }
 
 list_profiles() {
     local -a profiles=()
@@ -401,7 +265,7 @@ list_profiles() {
        [[ -n "$(read_gitconfig_value 'github.organization')" ]] ||
        [[ -n "$(read_gitconfig_value 'github.owner')" ]] ||
        [[ -n "$(read_gitconfig_value 'github.tokenBase64')" ]]; then
-        profiles+=("default")
+        profiles+=(default)
     fi
 
     if [[ -f "$GITCONFIG_PATH" ]]; then
@@ -410,9 +274,7 @@ list_profiles() {
         done < <(
             git config --file "$GITCONFIG_PATH" --name-only \
                 --get-regexp '^github\..+\.(username|organization|owner|tokenBase64|mode|labels)$' \
-                2>/dev/null |
-            awk -F. 'NF >= 3 {print $2}' |
-            sort -u
+                2>/dev/null | awk -F. 'NF >= 3 {print $2}' | sort -u
         )
     fi
 
@@ -420,18 +282,14 @@ list_profiles() {
         echo "Brak skonfigurowanych profili."
         return 0
     fi
-
     printf '%s\n' "${profiles[@]}" | awk '!seen[$0]++'
 }
 
 load_profile() {
-    local profile="$1"
-    local token_base64="" profile_mode="" profile_owner="" labels=""
-
+    local profile="$1" token_base64="" profile_mode="" profile_owner="" labels=""
     ACTIVE_PROFILE="$profile"
     GITHUB_OWNER=""
     GITHUB_TOKEN=""
-    GITHUB_OWNER_SOURCE=""
     GITHUB_TOKEN_SOURCE=""
     CUSTOM_LABELS="$DEFAULT_LABELS"
     MODE="$DEFAULT_MODE"
@@ -439,73 +297,54 @@ load_profile() {
     if [[ "$profile" == "default" ]]; then
         profile_mode="$(read_gitconfig_value 'github.mode')"
         [[ -n "$profile_mode" ]] && MODE="$profile_mode"
-
         GITHUB_OWNER="$ENV_GITHUB_OWNER"
         GITHUB_TOKEN="$ENV_GITHUB_TOKEN"
-        [[ -n "$GITHUB_OWNER" ]] && GITHUB_OWNER_SOURCE="environment"
-        [[ -n "$GITHUB_TOKEN" ]] && GITHUB_TOKEN_SOURCE="environment"
 
         if [[ -z "$GITHUB_OWNER" ]]; then
             GITHUB_OWNER="$(read_gitconfig_value 'github.owner')"
             if [[ -z "$GITHUB_OWNER" ]]; then
                 case "$MODE" in
                     user) GITHUB_OWNER="$(read_gitconfig_value 'github.username')" ;;
-                    org)  GITHUB_OWNER="$(read_gitconfig_value 'github.organization')" ;;
+                    org) GITHUB_OWNER="$(read_gitconfig_value 'github.organization')" ;;
                 esac
             fi
-            [[ -n "$GITHUB_OWNER" ]] && GITHUB_OWNER_SOURCE="$GITCONFIG_PATH"
         fi
-
         if [[ -z "$GITHUB_TOKEN" ]]; then
             token_base64="$(read_gitconfig_value 'github.tokenBase64')"
             if [[ -n "$token_base64" ]]; then
-                GITHUB_TOKEN="$(decode_token "$token_base64")" ||
-                    error "Nie można zdekodować github.tokenBase64 z $GITCONFIG_PATH."
+                GITHUB_TOKEN="$(decode_token "$token_base64")" || error "Nie można zdekodować github.tokenBase64."
                 GITHUB_TOKEN_SOURCE="$GITCONFIG_PATH"
             fi
+        else
+            GITHUB_TOKEN_SOURCE="environment"
         fi
-
         labels="$(read_gitconfig_value 'github.labels')"
         [[ -n "$labels" ]] && CUSTOM_LABELS="$labels"
         return 0
     fi
 
     [[ -f "$GITCONFIG_PATH" ]] || error "Brak $GITCONFIG_PATH dla profilu '$profile'."
-
     profile_mode="$(read_gitconfig_value "github.${profile}.mode")"
     [[ -n "$profile_mode" ]] && MODE="$profile_mode"
-
     profile_owner="$(read_gitconfig_value "github.${profile}.owner")"
     if [[ -z "$profile_owner" ]]; then
         case "$MODE" in
             user) profile_owner="$(read_gitconfig_value "github.${profile}.username")" ;;
-            org)  profile_owner="$(read_gitconfig_value "github.${profile}.organization")" ;;
+            org) profile_owner="$(read_gitconfig_value "github.${profile}.organization")" ;;
         esac
     fi
-
     GITHUB_OWNER="$profile_owner"
-    [[ -n "$GITHUB_OWNER" ]] &&
-        GITHUB_OWNER_SOURCE="${GITCONFIG_PATH} [github \"$profile\"]"
-
     token_base64="$(read_gitconfig_value "github.${profile}.tokenBase64")"
     if [[ -n "$token_base64" ]]; then
-        GITHUB_TOKEN="$(decode_token "$token_base64")" ||
-            error "Nie można zdekodować tokenBase64 profilu '$profile'."
+        GITHUB_TOKEN="$(decode_token "$token_base64")" || error "Nie można zdekodować tokenBase64 profilu '$profile'."
         GITHUB_TOKEN_SOURCE="${GITCONFIG_PATH} [github \"$profile\"]"
     fi
-
     labels="$(read_gitconfig_value "github.${profile}.labels")"
     [[ -n "$labels" ]] && CUSTOM_LABELS="$labels"
-
-    return 0
 }
 
 check_profile_config() {
-    case "$MODE" in
-        user|org) ;;
-        *) error "Profil '$ACTIVE_PROFILE': mode musi być user albo org." ;;
-    esac
-
+    case "$MODE" in user|org) ;; *) error "Profil '$ACTIVE_PROFILE': mode musi być user albo org." ;; esac
     [[ -n "$GITHUB_OWNER" ]] || error "Profil '$ACTIVE_PROFILE': brak ownera GitHub."
     [[ -n "$GITHUB_TOKEN" ]] || error "Profil '$ACTIVE_PROFILE': brak tokenu GitHub."
 }
@@ -513,7 +352,6 @@ check_profile_config() {
 print_api_error() {
     local status="$1" method="$2" endpoint="$3" body_file="$4" headers_file="$5"
     local message docs request_id remaining
-
     message="$(jq -r '.message // empty' "$body_file" 2>/dev/null || true)"
     docs="$(jq -r '.documentation_url // empty' "$body_file" 2>/dev/null || true)"
     request_id="$(awk -F': ' 'tolower($1)=="x-github-request-id" {gsub("\r","",$2); print $2}' "$headers_file" | tail -n1)"
@@ -530,82 +368,51 @@ print_api_error() {
     [[ -n "$docs" ]] && echo "  Docs:       $docs" >&2
 
     case "$status" in
-        401)
-            echo "Przyczyna: token jest nieprawidłowy, wygasł albo został unieważniony." >&2
-            ;;
+        401) echo "Przyczyna: token jest nieprawidłowy lub wygasł." >&2 ;;
         403)
-            echo "Przyczyna: token/konto nie ma wymaganych uprawnień." >&2
-            if [[ "$endpoint" == /repos/*/actions/runners/*-token ]]; then
+            echo "Przyczyna: brak wymaganych uprawnień tokenu/konta." >&2
+            [[ "$endpoint" == /repos/*/actions/runners/*-token ]] &&
                 echo "Repo runner: Fine-grained PAT Administration=Read and write lub Classic PAT repo." >&2
-            elif [[ "$endpoint" == /orgs/*/actions/runners/*-token ]]; then
+            [[ "$endpoint" == /orgs/*/actions/runners/*-token ]] &&
                 echo "Organization runner: Self-hosted runners=Read and write lub Classic PAT admin:org." >&2
-            fi
-            [[ "$remaining" == "0" ]] && echo "Wyczerpano limit GitHub API." >&2
-            echo "Sprawdź także SAML/SSO." >&2
             ;;
-        404)
-            echo "Przyczyna: zasób nie istnieje albo token nie ma do niego dostępu." >&2
-            ;;
-        422)
-            echo "Przyczyna: GitHub odrzucił parametry żądania." >&2
-            ;;
-        429)
-            echo "Przyczyna: przekroczono limit GitHub API." >&2
-            ;;
+        404) echo "Przyczyna: zasób nie istnieje albo token nie ma dostępu." >&2 ;;
+        422) echo "Przyczyna: GitHub odrzucił parametry żądania." >&2 ;;
+        429) echo "Przyczyna: przekroczono limit GitHub API." >&2 ;;
     esac
 }
 
 github_api() {
-    local method="$1" endpoint="$2"
-    local body_file headers_file status curl_rc
-
-    body_file="$(mktemp)"
-    headers_file="$(mktemp)"
-
-    status="$(
-        curl --silent --show-error --location \
-            --request "$method" \
-            --header "Accept: application/vnd.github+json" \
-            --header "Authorization: Bearer ${GITHUB_TOKEN}" \
-            --header "X-GitHub-Api-Version: ${API_VERSION}" \
-            --dump-header "$headers_file" \
-            --output "$body_file" \
-            --write-out '%{http_code}' \
-            "https://api.github.com${endpoint}"
-    )" || {
-        curl_rc=$?
+    local method="$1" endpoint="$2" body_file headers_file status curl_rc
+    body_file="$(mktemp)"; headers_file="$(mktemp)"
+    status="$(curl --silent --show-error --location --request "$method" \
+        --header "Accept: application/vnd.github+json" \
+        --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+        --header "X-GitHub-Api-Version: ${API_VERSION}" \
+        --dump-header "$headers_file" --output "$body_file" --write-out '%{http_code}' \
+        "https://api.github.com${endpoint}")" || {
+        curl_rc=$?; rm -f "$body_file" "$headers_file"
         echo "Błąd połączenia z GitHub API (curl=$curl_rc): $method $endpoint" >&2
-        rm -f "$body_file" "$headers_file"
         return "$curl_rc"
     }
-
     if [[ ! "$status" =~ ^2[0-9][0-9]$ ]]; then
         print_api_error "$status" "$method" "$endpoint" "$body_file" "$headers_file"
-        rm -f "$body_file" "$headers_file"
-        return 1
+        rm -f "$body_file" "$headers_file"; return 1
     fi
-
-    cat "$body_file"
-    rm -f "$body_file" "$headers_file"
+    cat "$body_file"; rm -f "$body_file" "$headers_file"
 }
 
 validate_github_token() {
     local response login
-
     log "Weryfikacja tokenu GitHub: profil $ACTIVE_PROFILE"
-
-    response="$(github_api GET '/user')" ||
-        error "Profil '$ACTIVE_PROFILE': uwierzytelnienie tokenu nie powiodło się."
-
+    response="$(github_api GET '/user')" || error "Profil '$ACTIVE_PROFILE': uwierzytelnienie nie powiodło się."
     login="$(printf '%s' "$response" | jq -r '.login // empty')"
     [[ -n "$login" ]] || error "GitHub API nie zwrócił loginu."
-
-    echo "Profile:         $ACTIVE_PROFILE"
-    echo "Token owner:     $login"
-    echo "GitHub owner:    $GITHUB_OWNER"
-    echo "Mode:            $MODE"
-    echo "Labels:          $CUSTOM_LABELS"
-    echo "Token source:    ${GITHUB_TOKEN_SOURCE:-unknown}"
+    echo "Profile:      $ACTIVE_PROFILE"
+    echo "Token owner:  $login"
+    echo "GitHub owner: $GITHUB_OWNER"
+    echo "Mode:         $MODE"
+    echo "Labels:       $CUSTOM_LABELS"
 }
 
 create_runner_user() {
@@ -613,65 +420,28 @@ create_runner_user() {
         log "Tworzenie użytkownika $RUNNER_USER"
         useradd --system --create-home --shell /bin/bash "$RUNNER_USER"
     fi
-
     mkdir -p "$RUNNER_BASE"
     chown -R "$RUNNER_USER:$RUNNER_USER" "$RUNNER_BASE"
 }
 
-sanitize_name() {
-    printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9._-'
-}
-
+sanitize_name() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9._-'; }
 profile_root() {
-    if [[ "$ACTIVE_PROFILE" == "default" ]]; then
-        printf '%s\n' "$RUNNER_BASE"
-    else
+    [[ "$ACTIVE_PROFILE" == "default" ]] && printf '%s\n' "$RUNNER_BASE" ||
         printf '%s/profiles/%s\n' "$RUNNER_BASE" "$(sanitize_name "$ACTIVE_PROFILE")"
-    fi
 }
-
-repo_runner_dir() {
-    printf '%s/%s\n' "$(profile_root)" "$(sanitize_name "$1")"
-}
-
-org_runner_dir() {
-    printf '%s/organization\n' "$(profile_root)"
-}
-
-runner_name_for_repo() {
-    local host
-
-    host="$(hostname -s)"
-    if [[ "$ACTIVE_PROFILE" == "default" ]]; then
-        printf '%s-%s\n' "$host" "$(sanitize_name "$1")"
-    else
-        printf '%s-%s-%s\n' "$host" "$(sanitize_name "$ACTIVE_PROFILE")" "$(sanitize_name "$1")"
-    fi
-}
-
-runner_name_for_org() {
-    local host
-
-    host="$(hostname -s)"
-    if [[ "$ACTIVE_PROFILE" == "default" ]]; then
-        printf '%s-%s\n' "$host" "$(sanitize_name "$GITHUB_OWNER")"
-    else
-        printf '%s-%s-%s\n' "$host" "$(sanitize_name "$ACTIVE_PROFILE")" "$(sanitize_name "$GITHUB_OWNER")"
-    fi
-}
+repo_runner_dir() { printf '%s/%s\n' "$(profile_root)" "$(sanitize_name "$1")"; }
+org_runner_dir() { printf '%s/organization\n' "$(profile_root)"; }
 
 get_runner_version() {
-    curl --silent --show-error --fail \
-        "https://api.github.com/repos/actions/runner/releases/latest" |
-        jq -r '.tag_name' |
-        sed 's/^v//'
+    curl --silent --show-error --fail "https://api.github.com/repos/actions/runner/releases/latest" |
+        jq -r '.tag_name' | sed 's/^v//'
 }
 
 detect_arch() {
     case "$(uname -m)" in
-        x86_64|amd64) echo "x64" ;;
-        aarch64|arm64) echo "arm64" ;;
-        armv7l) echo "arm" ;;
+        x86_64|amd64) echo x64 ;;
+        aarch64|arm64) echo arm64 ;;
+        armv7l) echo arm ;;
         *) error "Nieobsługiwana architektura: $(uname -m)" ;;
     esac
 }
@@ -680,674 +450,392 @@ download_runner() {
     local destination="$1" version="$2" arch="$3"
     local archive="/tmp/actions-runner-${version}-${arch}.tar.gz"
     local url="https://github.com/actions/runner/releases/download/v${version}/actions-runner-linux-${arch}-${version}.tar.gz"
-
     log "Pobieranie GitHub Actions Runner ${version}"
     curl -L --fail --show-error "$url" -o "$archive"
-    mkdir -p "$destination"
-    tar xzf "$archive" -C "$destination"
-    rm -f "$archive"
+    mkdir -p "$destination"; tar xzf "$archive" -C "$destination"; rm -f "$archive"
     chown -R "$RUNNER_USER:$RUNNER_USER" "$destination"
 }
 
 get_user_repositories() {
     local page=1 response count
-
     while true; do
-        response="$(github_api GET "/user/repos?affiliation=owner&per_page=100&page=${page}&sort=full_name")" ||
-            return 1
+        response="$(github_api GET "/user/repos?affiliation=owner&per_page=100&page=${page}&sort=full_name")" || return 1
         count="$(printf '%s' "$response" | jq 'length')"
         [[ "$count" -gt 0 ]] || break
-
-        printf '%s' "$response" |
-            jq -r --arg owner "$GITHUB_OWNER" '
-                .[]
-                | select((.owner.login | ascii_downcase) == ($owner | ascii_downcase))
-                | select(.archived == false)
-                | .name
-            '
-
+        printf '%s' "$response" | jq -r --arg owner "$GITHUB_OWNER" '
+          .[] | select((.owner.login|ascii_downcase)==($owner|ascii_downcase))
+          | select(.archived==false) | .name'
         ((page += 1))
+    done
+}
+
+get_local_repositories() {
+    local root dir meta repo
+    root="$(profile_root)"
+    [[ -d "$root" ]] || return 0
+    for dir in "$root"/*; do
+        [[ -d "$dir" ]] || continue
+        [[ "$(basename "$dir")" == "organization" ]] && continue
+        [[ -f "$dir/.runner" || -f "$dir/.chrisscriptbase-runner" ]] || continue
+        repo=""
+        meta="$dir/.chrisscriptbase-runner"
+        [[ -f "$meta" ]] && repo="$(awk -F= '$1=="repo" {sub(/^repo=/,""); print; exit}' "$meta")"
+        [[ -n "$repo" ]] || repo="$(basename "$dir")"
+        printf '%s\n' "$repo"
     done
 }
 
 repo_spec_for_profile() {
     local spec="$1" profile="$2"
-
-    if [[ "$spec" == *:* ]]; then
-        [[ "${spec%%:*}" == "$profile" ]]
-        return
-    fi
-
-    return 0
+    [[ "$spec" != *:* ]] || [[ "${spec%%:*}" == "$profile" ]]
 }
-
 normalize_repo_spec() {
     local spec="$1"
-
     [[ "$spec" == *:* ]] && spec="${spec#*:}"
     [[ "$spec" == */* ]] && spec="${spec##*/}"
     printf '%s\n' "$spec"
 }
 
 select_requested_repositories() {
-    local profile="$1"
-    shift
-
+    local profile="$1"; shift
     local -a available=("$@") chosen=()
-    local spec requested repo found relevant_specs=0
-
+    local spec requested repo
     for spec in "${SELECTED_REPOS[@]}"; do
         repo_spec_for_profile "$spec" "$profile" || continue
-        ((relevant_specs += 1))
-
         requested="$(normalize_repo_spec "$spec")"
-        found=""
-
         for repo in "${available[@]}"; do
-            if [[ "${repo,,}" == "${requested,,}" ]]; then
-                found="$repo"
-                break
-            fi
+            if [[ "${repo,,}" == "${requested,,}" ]]; then chosen+=("$repo"); break; fi
         done
-
-        if [[ -n "$found" ]]; then
-            chosen+=("$found")
-        else
-            warn "Profil '$profile': brak repo '$requested'."
-        fi
     done
-
-    [[ "$relevant_specs" -gt 0 ]] || return 0
-    printf '%s\n' "${chosen[@]}" | awk 'NF && !seen[tolower($0)]++'
-}
-
-explicit_repositories_for_profile() {
-    local profile="$1" spec repo
-    local -a chosen=()
-
-    for spec in "${SELECTED_REPOS[@]}"; do
-        repo_spec_for_profile "$spec" "$profile" || continue
-        repo="$(normalize_repo_spec "$spec")"
-        [[ -n "$repo" ]] && chosen+=("$repo")
-    done
-
     printf '%s\n' "${chosen[@]}" | awk 'NF && !seen[tolower($0)]++'
 }
 
 read_user_session_environment() {
     local uid="$1"
-
     command -v systemctl >/dev/null 2>&1 || return 0
     [[ -S "/run/user/${uid}/bus" ]] || return 0
-
-    sudo -u "$INVOKING_USER" env \
-        XDG_RUNTIME_DIR="/run/user/${uid}" \
-        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${uid}/bus" \
-        systemctl --user show-environment 2>/dev/null || true
+    sudo -u "$INVOKING_USER" env XDG_RUNTIME_DIR="/run/user/${uid}" \
+      DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${uid}/bus" \
+      systemctl --user show-environment 2>/dev/null || true
 }
-
 session_env_value() {
-    local content="$1" key="$2"
-
-    printf '%s\n' "$content" |
-        awk -v key="$key" 'index($0, key "=") == 1 {sub("^[^=]*=", ""); print; exit}'
+    printf '%s\n' "$1" | awk -v key="$2" 'index($0,key"=")==1{sub("^[^=]*=","");print;exit}'
 }
-
 detect_graphical_session() {
     local uid session_env=""
-
-    uid="$(id -u "$INVOKING_USER")"
-    GUI_XDG_RUNTIME_DIR="/run/user/${uid}"
-
+    uid="$(id -u "$INVOKING_USER")"; GUI_XDG_RUNTIME_DIR="/run/user/${uid}"
     if [[ -z "$GUI_DISPLAY" && -z "$GUI_WAYLAND_DISPLAY" ]]; then
         session_env="$(read_user_session_environment "$uid")"
-        GUI_DISPLAY="$(session_env_value "$session_env" "DISPLAY")"
-        GUI_WAYLAND_DISPLAY="$(session_env_value "$session_env" "WAYLAND_DISPLAY")"
-
-        if [[ -z "$GUI_XAUTHORITY" ]]; then
-            GUI_XAUTHORITY="$(session_env_value "$session_env" "XAUTHORITY")"
-        fi
-
-        if [[ -z "$GUI_DBUS_SESSION_BUS_ADDRESS" ]]; then
-            GUI_DBUS_SESSION_BUS_ADDRESS="$(session_env_value "$session_env" "DBUS_SESSION_BUS_ADDRESS")"
-        fi
+        GUI_DISPLAY="$(session_env_value "$session_env" DISPLAY)"
+        GUI_WAYLAND_DISPLAY="$(session_env_value "$session_env" WAYLAND_DISPLAY)"
+        [[ -n "$GUI_XAUTHORITY" ]] || GUI_XAUTHORITY="$(session_env_value "$session_env" XAUTHORITY)"
+        [[ -n "$GUI_DBUS_SESSION_BUS_ADDRESS" ]] || GUI_DBUS_SESSION_BUS_ADDRESS="$(session_env_value "$session_env" DBUS_SESSION_BUS_ADDRESS)"
     fi
-
-    if [[ -z "$GUI_XAUTHORITY" && -f "${INVOKING_HOME}/.Xauthority" ]]; then
-        GUI_XAUTHORITY="${INVOKING_HOME}/.Xauthority"
-    fi
-
-    if [[ -z "$GUI_DBUS_SESSION_BUS_ADDRESS" && -S "/run/user/${uid}/bus" ]]; then
-        GUI_DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${uid}/bus"
-    fi
-
-    return 0
+    [[ -n "$GUI_XAUTHORITY" || ! -f "$INVOKING_HOME/.Xauthority" ]] || GUI_XAUTHORITY="$INVOKING_HOME/.Xauthority"
+    [[ -n "$GUI_DBUS_SESSION_BUS_ADDRESS" || ! -S "/run/user/${uid}/bus" ]] || GUI_DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${uid}/bus"
 }
+graphical_session_available() { [[ -n "$GUI_DISPLAY" || -n "$GUI_WAYLAND_DISPLAY" ]]; }
 
-graphical_session_available() {
-    [[ -n "$GUI_DISPLAY" || -n "$GUI_WAYLAND_DISPLAY" ]]
-}
-
-ensure_gui_dependencies() {
+ensure_selection_ui_dependencies() {
     [[ "$REPO_SELECTION_MODE" == "interactive" ]] || return 0
-    [[ "$SELECTION_UI" != "tui" ]] || return 0
-
     detect_graphical_session
 
-    if ! graphical_session_available; then
-        if [[ "$SELECTION_UI" == "gui" ]]; then
-            error "--gui/-GUI wymaga aktywnej sesji X11/Wayland. Dla SSH bez GUI użyj --tui."
+    if [[ "$SELECTION_UI" == "zenity" ]]; then
+        graphical_session_available || error "--zenity wymaga X11/Wayland. Przez zwykłe SSH użyj --gui."
+        if ! command -v zenity >/dev/null 2>&1; then
+            apt-get update; apt-get install -y zenity
         fi
         return 0
     fi
 
-    if ! command -v zenity >/dev/null 2>&1; then
-        log "Instalacja Zenity dla GUI"
-        apt-get update
-        apt-get install -y zenity
+    if [[ "$SELECTION_UI" == "auto" || "$SELECTION_UI" == "gui" ]]; then
+        if graphical_session_available; then
+            command -v zenity >/dev/null 2>&1 || { apt-get update; apt-get install -y zenity; }
+            return 0
+        fi
     fi
 
+    if ! command -v dialog >/dev/null 2>&1 && ! command -v whiptail >/dev/null 2>&1; then
+        log "Instalacja terminalowego GUI (dialog)"
+        apt-get update
+        apt-get install -y dialog
+    fi
     return 0
 }
 
 run_zenity() {
-    local -a env_args=(
-        "HOME=$INVOKING_HOME"
-        "XDG_RUNTIME_DIR=$GUI_XDG_RUNTIME_DIR"
-    )
-
-    [[ -n "$GUI_DISPLAY" ]] &&
-        env_args+=("DISPLAY=$GUI_DISPLAY")
-    [[ -n "$GUI_WAYLAND_DISPLAY" ]] &&
-        env_args+=("WAYLAND_DISPLAY=$GUI_WAYLAND_DISPLAY")
-    [[ -n "$GUI_XAUTHORITY" ]] &&
-        env_args+=("XAUTHORITY=$GUI_XAUTHORITY")
-    [[ -n "$GUI_DBUS_SESSION_BUS_ADDRESS" ]] &&
-        env_args+=("DBUS_SESSION_BUS_ADDRESS=$GUI_DBUS_SESSION_BUS_ADDRESS")
-
+    local -a env_args=("HOME=$INVOKING_HOME" "XDG_RUNTIME_DIR=$GUI_XDG_RUNTIME_DIR")
+    [[ -n "$GUI_DISPLAY" ]] && env_args+=("DISPLAY=$GUI_DISPLAY")
+    [[ -n "$GUI_WAYLAND_DISPLAY" ]] && env_args+=("WAYLAND_DISPLAY=$GUI_WAYLAND_DISPLAY")
+    [[ -n "$GUI_XAUTHORITY" ]] && env_args+=("XAUTHORITY=$GUI_XAUTHORITY")
+    [[ -n "$GUI_DBUS_SESSION_BUS_ADDRESS" ]] && env_args+=("DBUS_SESSION_BUS_ADDRESS=$GUI_DBUS_SESSION_BUS_ADDRESS")
     sudo -u "$INVOKING_USER" env "${env_args[@]}" zenity "$@"
 }
 
-gui_select_repositories() {
-    local profile="$1"
-    shift
-
+zenity_select_repositories() {
+    local profile="$1"; shift
     local -a available=("$@") rows=() selected=()
     local repo checked result rc=0 summary
-
     command -v zenity >/dev/null 2>&1 || return 10
     graphical_session_available || return 10
-
     for repo in "${available[@]}"; do
-        checked="FALSE"
-        if [[ "$ACTION" == "uninstall" && -f "$(repo_runner_dir "$repo")/.runner" ]]; then
-            checked="TRUE"
-        fi
+        checked=FALSE
+        [[ "$ACTION" == uninstall && -f "$(repo_runner_dir "$repo")/.runner" ]] && checked=TRUE
         rows+=("$checked" "$repo")
     done
-
-    result="$(
-        run_zenity \
-            --list \
-            --checklist \
-            --title="GitHub Self-Hosted Runner Manager" \
-            --text="Profil: ${profile}
-Akcja: ${ACTION}
-
-Wybierz repozytoria:" \
-            --column="Wybierz" \
-            --column="Repozytorium" \
-            --separator=$'\n' \
-            --width=820 \
-            --height=650 \
-            "${rows[@]}"
-    )" || rc=$?
-
-    if [[ "$rc" -eq 1 ]]; then
-        warn "Anulowano wybór repozytoriów w GUI."
-        return 0
-    fi
-
+    result="$(run_zenity --list --checklist --title="GitHub Self-Hosted Runner Manager" \
+      --text="Profil: ${profile}\nAkcja: ${ACTION}\n\nWybierz repozytoria:" \
+      --column="Wybierz" --column="Repozytorium" --separator=$'\n' --width=820 --height=650 "${rows[@]}")" || rc=$?
+    [[ "$rc" -eq 1 ]] && return 0
     [[ "$rc" -eq 0 ]] || return 10
     [[ -n "$result" ]] || return 0
-
     mapfile -t selected <<< "$result"
     summary="$(printf '%s\n' "${selected[@]}")"
-
-    if ! run_zenity \
-        --question \
-        --title="Potwierdzenie" \
-        --width=600 \
-        --text="Akcja: ${ACTION}
-Profil: ${profile}
-
-Wybrane repozytoria (${#selected[@]}):
-${summary}
-
-Kontynuować?"; then
-        warn "Operacja anulowana w oknie potwierdzenia."
-        return 0
-    fi
-
+    run_zenity --question --title="Potwierdzenie" --width=600 \
+      --text="Akcja: ${ACTION}\nProfil: ${profile}\n\nWybrane (${#selected[@]}):\n${summary}\n\nKontynuować?" || return 0
     printf '%s\n' "${selected[@]}"
 }
 
-terminal_select_repositories() {
-    local profile="$1"
-    shift
+terminal_gui_select_repositories() {
+    local profile="$1"; shift
+    local -a available=("$@") items=()
+    local repo status output rc=0
+    [[ -t 0 && -t 1 ]] || error "Terminalowe GUI wymaga interaktywnej sesji SSH/terminala (alokuj TTY: ssh -t)."
 
-    local -a available=("$@") chosen=() tokens=()
-    local input token repo_candidate repo="" i
-
-    [[ -t 0 ]] || error "Brak GUI i brak interaktywnego terminala dla --select-repos."
-
-    echo >&2
-    echo "Repozytoria profilu '$profile':" >&2
-    for i in "${!available[@]}"; do
-        printf '  %3d) %s\n' "$((i + 1))" "${available[$i]}" >&2
+    for repo in "${available[@]}"; do
+        status=off
+        [[ "$ACTION" == uninstall && -f "$(repo_runner_dir "$repo")/.runner" ]] && status=on
+        items+=("$repo" "" "$status")
     done
 
-    echo >&2
-    echo "Podaj numery lub nazwy oddzielone przecinkami. Dostępne: all, none" >&2
-    read -r -p "Wybór [$profile]: " input
+    if command -v dialog >/dev/null 2>&1; then
+        output="$(dialog --stdout --separate-output --title "GitHub Self-Hosted Runner Manager" \
+          --checklist "Profil: $profile   Akcja: $ACTION\n\nSPACJA = zaznacz, TAB = przycisk, ENTER = zatwierdź" \
+          24 100 16 "${items[@]}")" || rc=$?
+        clear || true
+    else
+        output="$(whiptail --title "GitHub Self-Hosted Runner Manager" \
+          --checklist "Profil: $profile | Akcja: $ACTION | SPACJA zaznacza" 24 100 16 \
+          "${items[@]}" 3>&1 1>&2 2>&3)" || rc=$?
+        output="$(printf '%s\n' "$output" | sed 's/" " /\n/g; s/^"//; s/"$//')"
+    fi
 
-    case "${input,,}" in
-        all)
-            printf '%s\n' "${available[@]}"
-            return 0
-            ;;
-        none|"")
-            return 0
-            ;;
-    esac
+    [[ "$rc" -eq 0 ]] || return 0
+    [[ -n "$output" ]] || return 0
 
+    if command -v dialog >/dev/null 2>&1; then
+        dialog --title "Potwierdzenie" --yesno \
+          "Akcja: $ACTION\nProfil: $profile\n\nWybrane:\n$output\n\nKontynuować?" 22 90 || { clear || true; return 0; }
+        clear || true
+    fi
+    printf '%s\n' "$output"
+}
+
+plain_select_repositories() {
+    local profile="$1"; shift
+    local -a available=("$@") chosen=() tokens=()
+    local input token i repo candidate
+    [[ -t 0 ]] || error "Brak interaktywnego terminala. Użyj SSH z TTY: ssh -t host."
+    echo "Repozytoria profilu '$profile':" >&2
+    for i in "${!available[@]}"; do printf '%3d) %s\n' "$((i+1))" "${available[$i]}" >&2; done
+    read -r -p "Numery/nazwy (przecinki), all lub none: " input
+    case "${input,,}" in all) printf '%s\n' "${available[@]}"; return 0;; none|"") return 0;; esac
     IFS=',' read -r -a tokens <<< "$input"
     for token in "${tokens[@]}"; do
-        token="${token#"${token%%[![:space:]]*}"}"
-        token="${token%"${token##*[![:space:]]}"}"
-
+        token="${token//[[:space:]]/}"
         if [[ "$token" =~ ^[0-9]+$ ]]; then
-            i=$((token - 1))
-            if (( i >= 0 && i < ${#available[@]} )); then
-                chosen+=("${available[$i]}")
-            else
-                warn "Nieprawidłowy numer: $token"
-            fi
-            continue
+            i=$((token-1)); (( i>=0 && i<${#available[@]} )) && chosen+=("${available[$i]}"); continue
         fi
-
-        repo=""
-        for repo_candidate in "${available[@]}"; do
-            if [[ "${repo_candidate,,}" == "${token,,}" ]]; then
-                repo="$repo_candidate"
-                break
-            fi
-        done
-
-        if [[ -n "$repo" ]]; then
-            chosen+=("$repo")
-        else
-            warn "Nieznane repo: $token"
-        fi
+        repo=""; for candidate in "${available[@]}"; do [[ "${candidate,,}" == "${token,,}" ]] && { repo="$candidate"; break; }; done
+        [[ -n "$repo" ]] && chosen+=("$repo")
     done
-
     printf '%s\n' "${chosen[@]}" | awk 'NF && !seen[tolower($0)]++'
 }
 
 interactive_select_repositories() {
-    local profile="$1"
-    shift
+    local profile="$1"; shift
+    local -a available=("$@")
 
-    local -a available=("$@") selected=()
-    local rc=0 gui_output=""
-
-    if [[ "$SELECTION_UI" != "tui" ]]; then
-        if gui_output="$(gui_select_repositories "$profile" "${available[@]}")"; then
-            if [[ -n "$gui_output" ]]; then
-                mapfile -t selected <<< "$gui_output"
-                printf '%s\n' "${selected[@]}"
+    case "$SELECTION_UI" in
+        zenity)
+            zenity_select_repositories "$profile" "${available[@]}"
+            ;;
+        gui)
+            if graphical_session_available && command -v zenity >/dev/null 2>&1; then
+                zenity_select_repositories "$profile" "${available[@]}"
+            else
+                terminal_gui_select_repositories "$profile" "${available[@]}"
             fi
-            return 0
-        else
-            rc=$?
-            if [[ "$SELECTION_UI" == "gui" ]]; then
-                error "Nie udało się uruchomić GUI Zenity (kod $rc)."
+            ;;
+        tui)
+            terminal_gui_select_repositories "$profile" "${available[@]}"
+            ;;
+        auto)
+            if graphical_session_available && command -v zenity >/dev/null 2>&1; then
+                zenity_select_repositories "$profile" "${available[@]}"
+            elif command -v dialog >/dev/null 2>&1 || command -v whiptail >/dev/null 2>&1; then
+                terminal_gui_select_repositories "$profile" "${available[@]}"
+            else
+                plain_select_repositories "$profile" "${available[@]}"
             fi
-        fi
-    fi
-
-    terminal_select_repositories "$profile" "${available[@]}"
+            ;;
+    esac
 }
 
 resolve_repositories() {
     local -a available=() chosen=()
 
-    if [[ "$ACTION" == "uninstall" &&
-          "$REPO_SELECTION_MODE" == "explicit" &&
-          "$LIST_REPOS" == false ]]; then
-        explicit_repositories_for_profile "$ACTIVE_PROFILE"
-        return 0
-    fi
-
-    mapfile -t available < <(get_user_repositories)
-
-    if [[ ${#available[@]} -eq 0 ]]; then
-        error "Profil '$ACTIVE_PROFILE': brak repozytoriów lub brak dostępu."
-    fi
-
     if [[ "$LIST_REPOS" == true ]]; then
-        printf '%s\n' "${available[@]}"
-        return 0
+        mapfile -t available < <(get_user_repositories)
+        printf '%s\n' "${available[@]}"; return 0
     fi
+
+    if [[ "$ACTION" == uninstall ]]; then
+        mapfile -t available < <(get_local_repositories)
+        if [[ "$REPO_SELECTION_MODE" == explicit ]]; then
+            mapfile -t chosen < <(select_requested_repositories "$ACTIVE_PROFILE" "${available[@]}")
+            printf '%s\n' "${chosen[@]}"; return 0
+        fi
+    else
+        mapfile -t available < <(get_user_repositories)
+    fi
+
+    [[ ${#available[@]} -gt 0 ]] || { warn "Profil '$ACTIVE_PROFILE': brak repozytoriów do operacji."; return 0; }
 
     case "$REPO_SELECTION_MODE" in
-        all)
-            chosen=("${available[@]}")
-            ;;
-        explicit)
-            mapfile -t chosen < <(
-                select_requested_repositories "$ACTIVE_PROFILE" "${available[@]}"
-            )
-            ;;
-        interactive)
-            mapfile -t chosen < <(
-                interactive_select_repositories "$ACTIVE_PROFILE" "${available[@]}"
-            )
-            ;;
-        *)
-            error "Nieznany tryb wyboru repozytoriów: $REPO_SELECTION_MODE"
-            ;;
+        all) chosen=("${available[@]}") ;;
+        explicit) mapfile -t chosen < <(select_requested_repositories "$ACTIVE_PROFILE" "${available[@]}") ;;
+        interactive) mapfile -t chosen < <(interactive_select_repositories "$ACTIVE_PROFILE" "${available[@]}") ;;
+        *) error "Nieznany tryb repozytoriów: $REPO_SELECTION_MODE" ;;
     esac
-
     printf '%s\n' "${chosen[@]}"
 }
 
 get_repo_registration_token() {
-    local response
-
-    response="$(github_api POST "/repos/${GITHUB_OWNER}/$1/actions/runners/registration-token")" ||
-        return 1
+    local response; response="$(github_api POST "/repos/${GITHUB_OWNER}/$1/actions/runners/registration-token")" || return 1
     printf '%s' "$response" | jq -r '.token // empty'
 }
-
 get_repo_remove_token() {
-    local response
-
-    response="$(github_api POST "/repos/${GITHUB_OWNER}/$1/actions/runners/remove-token")" ||
-        return 1
+    local response; response="$(github_api POST "/repos/${GITHUB_OWNER}/$1/actions/runners/remove-token")" || return 1
     printf '%s' "$response" | jq -r '.token // empty'
 }
-
 get_org_registration_token() {
-    local response
-
-    response="$(github_api POST "/orgs/${GITHUB_OWNER}/actions/runners/registration-token")" ||
-        return 1
+    local response; response="$(github_api POST "/orgs/${GITHUB_OWNER}/actions/runners/registration-token")" || return 1
     printf '%s' "$response" | jq -r '.token // empty'
 }
-
 get_org_remove_token() {
-    local response
-
-    response="$(github_api POST "/orgs/${GITHUB_OWNER}/actions/runners/remove-token")" ||
-        return 1
+    local response; response="$(github_api POST "/orgs/${GITHUB_OWNER}/actions/runners/remove-token")" || return 1
     printf '%s' "$response" | jq -r '.token // empty'
 }
 
 write_runner_metadata() {
     local runner_dir="$1" repo="${2:-}"
-
-    cat > "${runner_dir}/.chrisscriptbase-runner" <<EOF
+    cat > "$runner_dir/.chrisscriptbase-runner" <<EOF_META
 profile=${ACTIVE_PROFILE}
 mode=${MODE}
 owner=${GITHUB_OWNER}
 repo=${repo}
 labels=${CUSTOM_LABELS}
-EOF
-
-    chown "$RUNNER_USER:$RUNNER_USER" "${runner_dir}/.chrisscriptbase-runner"
-    chmod 600 "${runner_dir}/.chrisscriptbase-runner"
+EOF_META
+    chown "$RUNNER_USER:$RUNNER_USER" "$runner_dir/.chrisscriptbase-runner"
+    chmod 600 "$runner_dir/.chrisscriptbase-runner"
 }
 
 install_repo_runner() {
-    local repo="$1" version="$2" arch="$3"
-    local runner_dir runner_name registration_token
-
-    runner_dir="$(repo_runner_dir "$repo")"
-    runner_name="$(runner_name_for_repo "$repo")"
-
-    log "[$ACTIVE_PROFILE] Repozytorium: ${GITHUB_OWNER}/${repo}"
-
-    if [[ -f "${runner_dir}/.runner" ]]; then
-        echo "Runner już istnieje: $runner_dir"
-        return 3
-    fi
-
-    registration_token="$(get_repo_registration_token "$repo")" || {
-        echo "Nie można pobrać registration token dla ${GITHUB_OWNER}/${repo}." >&2
-        return 1
-    }
-
-    [[ -n "$registration_token" && "$registration_token" != "null" ]] || return 1
-
-    mkdir -p "$runner_dir"
-    download_runner "$runner_dir" "$version" "$arch"
-
-    sudo -u "$RUNNER_USER" bash -c "
-        cd '$runner_dir'
-        ./config.sh \
-            --unattended \
-            --url 'https://github.com/${GITHUB_OWNER}/${repo}' \
-            --token '$registration_token' \
-            --name '$runner_name' \
-            --labels '$CUSTOM_LABELS' \
-            --work '_work' \
-            --replace
-    "
-    unset registration_token
-
-    write_runner_metadata "$runner_dir" "$repo"
-
-    (
-        cd "$runner_dir"
-        ./svc.sh install "$RUNNER_USER"
-        ./svc.sh start
-    )
-
-    echo "Runner gotowy: $runner_name"
+    local repo="$1" version="$2" arch="$3" dir token name host
+    dir="$(repo_runner_dir "$repo")"; host="$(hostname -s)"
+    name="${host}-$(sanitize_name "$ACTIVE_PROFILE")-$(sanitize_name "$repo")"
+    [[ "$ACTIVE_PROFILE" != default ]] || name="${host}-$(sanitize_name "$repo")"
+    log "[$ACTIVE_PROFILE] Instalacja: ${GITHUB_OWNER}/${repo}"
+    [[ ! -f "$dir/.runner" ]] || { echo "Runner już istnieje: $dir"; return 3; }
+    token="$(get_repo_registration_token "$repo")" || return 1
+    [[ -n "$token" && "$token" != null ]] || return 1
+    mkdir -p "$dir"; download_runner "$dir" "$version" "$arch"
+    sudo -u "$RUNNER_USER" bash -c "cd '$dir' && ./config.sh --unattended \
+      --url 'https://github.com/${GITHUB_OWNER}/${repo}' --token '$token' \
+      --name '$name' --labels '$CUSTOM_LABELS' --work '_work' --replace"
+    unset token; write_runner_metadata "$dir" "$repo"
+    (cd "$dir" && ./svc.sh install "$RUNNER_USER" && ./svc.sh start)
 }
 
 uninstall_repo_runner() {
-    local repo="$1" runner_dir remove_token="" remote_ok=true
-
-    runner_dir="$(repo_runner_dir "$repo")"
-    log "[$ACTIVE_PROFILE] Usuwanie runnera: ${GITHUB_OWNER}/${repo}"
-
-    if [[ ! -d "$runner_dir" ]]; then
-        echo "Runner lokalny nie istnieje: $runner_dir"
-        return 3
-    fi
-
-    if [[ -x "${runner_dir}/svc.sh" ]]; then
-        (
-            cd "$runner_dir"
-            ./svc.sh stop || true
-            ./svc.sh uninstall || true
-        )
-    fi
-
-    if [[ -f "${runner_dir}/.runner" && -x "${runner_dir}/config.sh" ]]; then
-        if remove_token="$(get_repo_remove_token "$repo")" &&
-           [[ -n "$remove_token" && "$remove_token" != "null" ]]; then
-            sudo -u "$RUNNER_USER" bash -c \
-                "cd '$runner_dir' && ./config.sh remove --unattended --token '$remove_token'" ||
-                remote_ok=false
+    local repo="$1" dir token="" remote_ok=true
+    dir="$(repo_runner_dir "$repo")"
+    log "[$ACTIVE_PROFILE] Usuwanie: ${GITHUB_OWNER}/${repo}"
+    [[ -d "$dir" ]] || { echo "Runner lokalny nie istnieje: $dir"; return 3; }
+    if [[ -x "$dir/svc.sh" ]]; then (cd "$dir" && ./svc.sh stop || true; ./svc.sh uninstall || true); fi
+    if [[ -f "$dir/.runner" && -x "$dir/config.sh" ]]; then
+        if token="$(get_repo_remove_token "$repo")" && [[ -n "$token" && "$token" != null ]]; then
+            sudo -u "$RUNNER_USER" bash -c "cd '$dir' && ./config.sh remove --unattended --token '$token'" || remote_ok=false
         else
-            warn "Brak remove token; usuwam tylko lokalnie."
-            remote_ok=false
+            warn "Brak remove token; usuwam tylko lokalnie."; remote_ok=false
         fi
     fi
-
-    unset remove_token
-    rm -rf "$runner_dir"
-    [[ "$remote_ok" == true ]]
+    unset token; rm -rf "$dir"; [[ "$remote_ok" == true ]]
 }
 
 install_org_runner() {
-    local version="$1" arch="$2"
-    local runner_dir runner_name registration_token
-
-    runner_dir="$(org_runner_dir)"
-    runner_name="$(runner_name_for_org)"
-
-    if [[ -f "${runner_dir}/.runner" ]]; then
-        echo "Organization runner już istnieje: $runner_dir"
-        return 3
-    fi
-
-    registration_token="$(get_org_registration_token)" ||
-        error "Brak organization registration token."
-
-    mkdir -p "$runner_dir"
-    download_runner "$runner_dir" "$version" "$arch"
-
-    sudo -u "$RUNNER_USER" bash -c "
-        cd '$runner_dir'
-        ./config.sh --unattended \
-            --url 'https://github.com/${GITHUB_OWNER}' \
-            --token '$registration_token' \
-            --name '$runner_name' \
-            --labels '$CUSTOM_LABELS' \
-            --work '_work' \
-            --replace
-    "
-    unset registration_token
-
-    write_runner_metadata "$runner_dir"
-
-    (
-        cd "$runner_dir"
-        ./svc.sh install "$RUNNER_USER"
-        ./svc.sh start
-    )
+    local version="$1" arch="$2" dir token name
+    dir="$(org_runner_dir)"; name="$(hostname -s)-$(sanitize_name "$ACTIVE_PROFILE")-$(sanitize_name "$GITHUB_OWNER")"
+    [[ ! -f "$dir/.runner" ]] || { echo "Organization runner już istnieje: $dir"; return 3; }
+    token="$(get_org_registration_token)" || return 1
+    mkdir -p "$dir"; download_runner "$dir" "$version" "$arch"
+    sudo -u "$RUNNER_USER" bash -c "cd '$dir' && ./config.sh --unattended \
+      --url 'https://github.com/${GITHUB_OWNER}' --token '$token' --name '$name' \
+      --labels '$CUSTOM_LABELS' --work '_work' --replace"
+    unset token; write_runner_metadata "$dir"
+    (cd "$dir" && ./svc.sh install "$RUNNER_USER" && ./svc.sh start)
 }
 
 uninstall_org_runner() {
-    local runner_dir remove_token="" remote_ok=true
-
-    runner_dir="$(org_runner_dir)"
-
-    if [[ ! -d "$runner_dir" ]]; then
-        echo "Runner lokalny nie istnieje: $runner_dir"
-        return 3
+    local dir token="" remote_ok=true
+    dir="$(org_runner_dir)"; [[ -d "$dir" ]] || { echo "Runner lokalny nie istnieje: $dir"; return 3; }
+    if [[ -x "$dir/svc.sh" ]]; then (cd "$dir" && ./svc.sh stop || true; ./svc.sh uninstall || true); fi
+    if [[ -f "$dir/.runner" && -x "$dir/config.sh" ]]; then
+        if token="$(get_org_remove_token)" && [[ -n "$token" && "$token" != null ]]; then
+            sudo -u "$RUNNER_USER" bash -c "cd '$dir' && ./config.sh remove --unattended --token '$token'" || remote_ok=false
+        else remote_ok=false; fi
     fi
-
-    if [[ -x "${runner_dir}/svc.sh" ]]; then
-        (
-            cd "$runner_dir"
-            ./svc.sh stop || true
-            ./svc.sh uninstall || true
-        )
-    fi
-
-    if [[ -f "${runner_dir}/.runner" && -x "${runner_dir}/config.sh" ]]; then
-        if remove_token="$(get_org_remove_token)" &&
-           [[ -n "$remove_token" && "$remove_token" != "null" ]]; then
-            sudo -u "$RUNNER_USER" bash -c \
-                "cd '$runner_dir' && ./config.sh remove --unattended --token '$remove_token'" ||
-                remote_ok=false
-        else
-            warn "Brak organization remove token; usuwam tylko lokalnie."
-            remote_ok=false
-        fi
-    fi
-
-    unset remove_token
-    rm -rf "$runner_dir"
-    [[ "$remote_ok" == true ]]
+    unset token; rm -rf "$dir"; [[ "$remote_ok" == true ]]
 }
 
 purge_if_empty() {
     [[ "$PURGE" == true ]] || return 0
-
-    if [[ -d "$RUNNER_BASE" ]] &&
-       find "$RUNNER_BASE" -mindepth 1 -type f \
-           \( -name '.runner' -o -name '.chrisscriptbase-runner' \) \
-           -print -quit | grep -q .; then
-        warn "--purge: w $RUNNER_BASE nadal istnieją runnery."
-        return 0
+    if [[ -d "$RUNNER_BASE" ]] && find "$RUNNER_BASE" -mindepth 1 -type f \
+      \( -name .runner -o -name .chrisscriptbase-runner \) -print -quit | grep -q .; then
+        warn "--purge: w $RUNNER_BASE nadal istnieją runnery."; return 0
     fi
-
     rm -rf "$RUNNER_BASE"
-    id "$RUNNER_USER" &>/dev/null &&
-        userdel "$RUNNER_USER" 2>/dev/null || true
-
+    id "$RUNNER_USER" &>/dev/null && userdel "$RUNNER_USER" 2>/dev/null || true
     echo "Purge zakończony."
-    return 0
 }
 
 process_user_profile() {
     local version="${1:-}" arch="${2:-}" repo rc
     local -a repositories=()
     local success=0 failed=0 skipped=0
-
     mapfile -t repositories < <(resolve_repositories)
     [[ "$LIST_REPOS" == false ]] || return 0
-
-    if [[ ${#repositories[@]} -eq 0 ]]; then
-        warn "Profil '$ACTIVE_PROFILE': nie wybrano żadnych repozytoriów."
-        return 0
-    fi
-
-    echo
+    [[ ${#repositories[@]} -gt 0 ]] || { warn "Profil '$ACTIVE_PROFILE': nic nie wybrano."; return 0; }
     echo "Wybrane repozytoria [$ACTIVE_PROFILE]: ${#repositories[@]}"
     printf ' - %s\n' "${repositories[@]}"
-
     for repo in "${repositories[@]}"; do
-        if [[ "$ACTION" == "install" ]]; then
-            if install_repo_runner "$repo" "$version" "$arch"; then
-                ((success += 1))
-            else
-                rc=$?
-                if [[ "$rc" -eq 3 ]]; then
-                    ((skipped += 1))
-                else
-                    ((failed += 1))
-                fi
-            fi
+        if [[ "$ACTION" == install ]]; then
+            if install_repo_runner "$repo" "$version" "$arch"; then ((success+=1)); else rc=$?; [[ $rc -eq 3 ]] && ((skipped+=1)) || ((failed+=1)); fi
         else
-            if uninstall_repo_runner "$repo"; then
-                ((success += 1))
-            else
-                rc=$?
-                if [[ "$rc" -eq 3 ]]; then
-                    ((skipped += 1))
-                else
-                    ((failed += 1))
-                fi
-            fi
+            if uninstall_repo_runner "$repo"; then ((success+=1)); else rc=$?; [[ $rc -eq 3 ]] && ((skipped+=1)) || ((failed+=1)); fi
         fi
     done
-
     log "Podsumowanie profilu: $ACTIVE_PROFILE"
-    echo "Akcja:       $ACTION"
-    echo "Wybrane:     ${#repositories[@]}"
-    echo "Sukces:      $success"
-    echo "Pominięte:   $skipped"
-    echo "Błędy:       $failed"
-
+    echo "Akcja: $ACTION | Sukces: $success | Pominięte: $skipped | Błędy: $failed"
     [[ "$failed" -eq 0 ]]
 }
 
 process_org_profile() {
     local version="${1:-}" arch="${2:-}"
-
-    if [[ "$REPO_SELECTION_MODE" != "all" || "$LIST_REPOS" == true ]]; then
-        warn "MODE=org: selekcja repozytoriów nie dotyczy organization-level runnera. Użyj Runner Groups w GitHub."
-        [[ "$LIST_REPOS" == true ]] && return 0
-    fi
-
-    if [[ "$ACTION" == "install" ]]; then
+    [[ "$REPO_SELECTION_MODE" == all && "$LIST_REPOS" == false ]] ||
+      warn "MODE=org: selekcja repo nie dotyczy organization-level runnera; użyj Runner Groups."
+    if [[ "$ACTION" == install ]]; then
         install_org_runner "$version" "$arch"
     else
         uninstall_org_runner
@@ -1357,59 +845,32 @@ process_org_profile() {
 main() {
     parse_args "$@"
     init_invoking_user
-
-    if [[ "$LIST_PROFILES" == true ]]; then
-        list_profiles
-        exit 0
-    fi
-
+    if [[ "$LIST_PROFILES" == true ]]; then list_profiles; exit 0; fi
     require_root
     ensure_dependencies
-    ensure_gui_dependencies
-
-    [[ ${#SELECTED_PROFILES[@]} -gt 0 ]] ||
-        SELECTED_PROFILES=("default")
-
-    if [[ "$ACTION" == "install" ]]; then
-        create_runner_user
-    fi
+    ensure_selection_ui_dependencies
+    [[ ${#SELECTED_PROFILES[@]} -gt 0 ]] || SELECTED_PROFILES=(default)
+    [[ "$ACTION" != install ]] || create_runner_user
 
     local version="" arch="" profile failed_profiles=0
-
-    if [[ "$ACTION" == "install" ]]; then
-        version="$(get_runner_version)"
-        arch="$(detect_arch)"
-    fi
+    if [[ "$ACTION" == install ]]; then version="$(get_runner_version)"; arch="$(detect_arch)"; fi
 
     for profile in "${SELECTED_PROFILES[@]}"; do
-        load_profile "$profile"
-        check_profile_config
-        validate_github_token
-
-        echo "Invoking user:   $INVOKING_USER"
-        echo "Git config:      $GITCONFIG_PATH"
-        echo "Profile root:    $(profile_root)"
-
-        if [[ "$MODE" == "org" ]]; then
-            process_org_profile "$version" "$arch" ||
-                ((failed_profiles += 1))
+        load_profile "$profile"; check_profile_config; validate_github_token
+        echo "Invoking user: $INVOKING_USER"
+        echo "Git config:    $GITCONFIG_PATH"
+        echo "Profile root:  $(profile_root)"
+        if [[ "$MODE" == org ]]; then
+            process_org_profile "$version" "$arch" || ((failed_profiles+=1))
         else
-            process_user_profile "$version" "$arch" ||
-                ((failed_profiles += 1))
+            process_user_profile "$version" "$arch" || ((failed_profiles+=1))
         fi
     done
 
     [[ "$LIST_REPOS" == false ]] || exit 0
-
-    if [[ "$ACTION" == "uninstall" ]]; then
-        purge_if_empty
-    fi
-
-    echo
-    echo "Usługi runnerów:"
-    systemctl --no-pager --type=service |
-        grep 'actions.runner' || true
-
+    [[ "$ACTION" != uninstall ]] || purge_if_empty
+    echo; echo "Usługi runnerów:"
+    systemctl --no-pager --type=service | grep actions.runner || true
     [[ "$failed_profiles" -eq 0 ]] || exit 2
 }
 
