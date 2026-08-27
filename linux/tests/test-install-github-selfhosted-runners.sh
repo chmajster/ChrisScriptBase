@@ -136,5 +136,66 @@ expect_success "list profiles" env LIB="$LIB" TEST_TMP="$TMP" bash -c '
     main --list-profiles | grep -Fx home >/dev/null
 '
 
+
+expect_success "legacy service is discovered for named profile" env LIB="$LIB" TEST_TMP="$TMP" bash -c '
+    source "$LIB"
+    ACTIVE_PROFILE=home
+    GITHUB_OWNER=chmajster
+    hostname() { echo kynlab01; }
+    systemctl() {
+        if [[ "$1" == list-units ]]; then
+  printf "%s\n" "actions.runner.chmajster-HomeLAB-DNS.kynlab01-homelab-dns.service loaded active running"
+        fi
+        return 0
+    }
+    [[ $(get_service_repositories) == homelab-dns ]]
+'
+
+expect_success "orphan legacy service is removed without runner directory" env LIB="$LIB" TEST_TMP="$TMP" bash -c '
+    source "$LIB"
+    ACTIVE_PROFILE=home
+    GITHUB_OWNER=chmajster
+    RUNNER_BASE="$TEST_TMP/runners"
+    hostname() { echo kynlab01; }
+    list_action_runner_service_units() {
+        [[ -f "$TEST_TMP/service-removed" ]] || echo actions.runner.chmajster-HomeLAB-DNS.kynlab01-homelab-dns.service
+    }
+    remove_runner_service_unit() {
+        echo "$1" > "$TEST_TMP/service-removed"
+        return 0
+    }
+    uninstall_repo_runner HomeLAB-DNS
+    grep -Fqx actions.runner.chmajster-HomeLAB-DNS.kynlab01-homelab-dns.service "$TEST_TMP/service-removed"
+'
+
+expect_success "svc uninstall failure falls back to forced service cleanup" env LIB="$LIB" TEST_TMP="$TMP" bash -c '
+    source "$LIB"
+    ACTIVE_PROFILE=home
+    GITHUB_OWNER=chmajster
+    RUNNER_BASE="$TEST_TMP/runners-fallback"
+    dir="$RUNNER_BASE/profiles/home/homelab-dns"
+    mkdir -p "$dir"
+    printf "%s\n" actions.runner.chmajster-HomeLAB-DNS.kynlab01-home-homelab-dns.service > "$dir/.service"
+    printf "#!/usr/bin/env bash\nexit 1\n" > "$dir/svc.sh"
+    chmod +x "$dir/svc.sh"
+    list_action_runner_service_units() { return 0; }
+    remove_runner_service_unit() { echo "$1" > "$TEST_TMP/forced-service"; return 0; }
+    uninstall_repo_runner HomeLAB-DNS
+    [[ ! -d "$dir" ]]
+    grep -Fqx actions.runner.chmajster-HomeLAB-DNS.kynlab01-home-homelab-dns.service "$TEST_TMP/forced-service"
+'
+
+expect_success "purge keeps runner user when services still exist" env LIB="$LIB" TEST_TMP="$TMP" bash -c '
+    source "$LIB"
+    PURGE=true
+    RUNNER_BASE="$TEST_TMP/purge-root"
+    RUNNER_USER=github-runner
+    mkdir -p "$RUNNER_BASE"
+    list_action_runner_service_units() { echo actions.runner.chmajster-Repo.host-repo.service; }
+    id() { echo "id should not be called" > "$TEST_TMP/id-called"; return 0; }
+    purge_if_empty
+    [[ -d "$RUNNER_BASE" && ! -e "$TEST_TMP/id-called" ]]
+'
+
 printf '\nRESULT: pass=%d fail=%d\n' "$pass" "$fail"
 [[ "$fail" -eq 0 ]]

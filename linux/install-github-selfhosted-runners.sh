@@ -59,7 +59,7 @@ UŻYCIE
 
 AKCJE
   --install                 Instaluje runnery. Akcja domyślna.
-  --uninstall               Wyrejestrowuje i usuwa runnery.
+  --uninstall               Wyrejestrowuje runnery i usuwa ich usługi systemd.
   --purge                   Z --uninstall usuwa pusty RUNNER_BASE i RUNNER_USER.
 
 PROFILE
@@ -471,20 +471,104 @@ get_user_repositories() {
     done
 }
 
-get_local_repositories() {
-    local root dir meta repo
-    root="$(profile_root)"
+list_action_runner_service_units() {
+    {
+        systemctl list-units --all --type=service --no-legend 'actions.runner.*.service' 2>/dev/null |
+  awk '{print $1}' || true
+        systemctl list-unit-files --type=service --no-legend 'actions.runner.*.service' 2>/dev/null |
+  awk '{print $1}' || true
+    } | awk '/^actions\.runner\..*\.service$/ && !seen[$0]++'
+}
+
+repo_from_service_unit() {
+    local unit="$1" prefix rest host marker repo runner repo_sanitized profile_sanitized
+    unit="${unit,,}"
+    prefix="actions.runner.${GITHUB_OWNER,,}-"
+    [[ "$unit" == "$prefix"*".service" ]] || return 1
+
+    rest="${unit#"$prefix"}"
+    rest="${rest%.service}"
+    host="$(hostname -s)"
+    host="${host,,}"
+    marker=".${host}-"
+    [[ "$rest" == *"$marker"* ]] || return 1
+
+    repo="${rest%%"$marker"*}"
+    runner="${rest#*"$marker"}"
+    [[ -n "$repo" && -n "$runner" ]] || return 1
+
+    repo_sanitized="$(sanitize_name "$repo")"
+    if [[ "$ACTIVE_PROFILE" == "default" ]]; then
+        [[ "$runner" == "$repo_sanitized" ]] || return 1
+    else
+        profile_sanitized="$(sanitize_name "$ACTIVE_PROFILE")"
+        [[ "$runner" == "${profile_sanitized}-${repo_sanitized}" || "$runner" == "$repo_sanitized" ]] || return 1
+    fi
+
+    printf '%s\n' "$repo"
+}
+
+runner_service_units_for_repo() {
+    local repo="$1" unit parsed
+    while IFS= read -r unit; do
+        [[ -n "$unit" ]] || continue
+        parsed="$(repo_from_service_unit "$unit")" || continue
+        if [[ "${parsed,,}" == "${repo,,}" ]]; then
+  printf '%s\n' "$unit"
+        fi
+    done < <(list_action_runner_service_units)
+}
+
+get_service_repositories() {
+    local unit repo
+    while IFS= read -r unit; do
+        [[ -n "$unit" ]] || continue
+        repo="$(repo_from_service_unit "$unit")" || continue
+        printf '%s\n' "$repo"
+    done < <(list_action_runner_service_units) |
+        awk 'NF && !seen[tolower($0)]++'
+}
+
+scan_runner_root_repositories() {
+    local root="$1" dir meta repo runner_url
     [[ -d "$root" ]] || return 0
+
     for dir in "$root"/*; do
         [[ -d "$dir" ]] || continue
-        [[ "$(basename "$dir")" == "organization" ]] && continue
+        case "$(basename "$dir")" in
+  organization|profiles) continue ;;
+        esac
         [[ -f "$dir/.runner" || -f "$dir/.chrisscriptbase-runner" ]] || continue
+
         repo=""
         meta="$dir/.chrisscriptbase-runner"
-        [[ -f "$meta" ]] && repo="$(awk -F= '$1=="repo" {sub(/^repo=/,""); print; exit}' "$meta")"
+        if [[ -f "$meta" ]]; then
+  repo="$(awk -F= '$1=="repo" {sub(/^repo=/,""); print; exit}' "$meta")"
+        fi
+
+        if [[ -z "$repo" && -f "$dir/.runner" ]]; then
+  runner_url="$(jq -r '.gitHubUrl // empty' "$dir/.runner" 2>/dev/null || true)"
+  runner_url="${runner_url%/}"
+  if [[ "${runner_url,,}" == "https://github.com/${GITHUB_OWNER,,}/"* ]]; then
+      repo="${runner_url##*/}"
+  fi
+        fi
+
         [[ -n "$repo" ]] || repo="$(basename "$dir")"
         printf '%s\n' "$repo"
     done
+}
+
+get_local_repositories() {
+    local root
+    root="$(profile_root)"
+    {
+        scan_runner_root_repositories "$root"
+        if [[ "$ACTIVE_PROFILE" != "default" ]]; then
+  scan_runner_root_repositories "$RUNNER_BASE"
+        fi
+        get_service_repositories
+    } | awk 'NF && !seen[tolower($0)]++'
 }
 
 repo_spec_for_profile() {
@@ -760,26 +844,101 @@ install_repo_runner() {
     (cd "$dir" && ./svc.sh install "$RUNNER_USER" && ./svc.sh start)
 }
 
+find_repo_runner_dirs() {
+    local repo="$1" current legacy dir
+    current="$(repo_runner_dir "$repo")"
+    legacy="${RUNNER_BASE}/$(sanitize_name "$repo")"
+
+    for dir in "$current" "$legacy"; do
+        [[ -d "$dir" ]] || continue
+        printf '%s\n' "$dir"
+    done | awk '!seen[$0]++'
+}
+
+service_name_from_runner_dir() {
+    local dir="$1"
+    [[ -f "$dir/.service" ]] || return 0
+    head -n 1 "$dir/.service" | tr -d '\r'
+}
+
+remove_runner_service_unit() {
+    local unit="$1" fragment=""
+    case "$unit" in
+        actions.runner.*.service) ;;
+        *) warn "Pomijam nieoczekiwaną nazwę usługi: $unit"; return 1 ;;
+    esac
+
+    systemctl stop "$unit" >/dev/null 2>&1 || true
+    systemctl disable "$unit" >/dev/null 2>&1 || true
+    fragment="$(systemctl show --property=FragmentPath --value "$unit" 2>/dev/null || true)"
+
+    if [[ "$fragment" == /etc/systemd/system/actions.runner.*.service ]]; then
+        rm -f -- "$fragment"
+    fi
+    rm -f -- "/etc/systemd/system/$unit"
+    find /etc/systemd/system -type l -name "$unit" -delete 2>/dev/null || true
+
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl reset-failed "$unit" >/dev/null 2>&1 || true
+    return 0
+}
+
 uninstall_repo_runner() {
-    local repo="$1" dir token="" remote_ok=true
-    dir="$(repo_runner_dir "$repo")"
+    local repo="$1" dir token="" service_unit="" remote_ok=true local_ok=true
+    local -a dirs=() units=() remaining=()
+
     log "[$ACTIVE_PROFILE] Usuwanie: ${GITHUB_OWNER}/${repo}"
-    [[ -d "$dir" ]] || { echo "Runner lokalny nie istnieje: $dir"; return 3; }
-    if [[ -x "$dir/svc.sh" ]]; then
-        (
-            cd "$dir"
-            ./svc.sh stop || true
-            ./svc.sh uninstall || true
-        )
+    mapfile -t dirs < <(find_repo_runner_dirs "$repo")
+    mapfile -t units < <(runner_service_units_for_repo "$repo")
+
+    if [[ ${#dirs[@]} -eq 0 && ${#units[@]} -eq 0 ]]; then
+        echo "Runner lokalny ani usługa systemd nie istnieją dla: ${GITHUB_OWNER}/${repo}"
+        return 3
     fi
-    if [[ -f "$dir/.runner" && -x "$dir/config.sh" ]]; then
-        if token="$(get_repo_remove_token "$repo")" && [[ -n "$token" && "$token" != null ]]; then
-            sudo -u "$RUNNER_USER" bash -c "cd '$dir' && ./config.sh remove --unattended --token '$token'" || remote_ok=false
-        else
-            warn "Brak remove token; usuwam tylko lokalnie."; remote_ok=false
+
+    for dir in "${dirs[@]}"; do
+        service_unit="$(service_name_from_runner_dir "$dir")"
+
+        if [[ -x "$dir/svc.sh" ]]; then
+  if ! (
+      cd "$dir"
+      ./svc.sh stop
+      ./svc.sh uninstall
+  ); then
+      warn "svc.sh nie usunął poprawnie usługi z $dir; wykonuję wymuszone czyszczenie systemd."
+  fi
         fi
+
+        if [[ -n "$service_unit" ]]; then
+  remove_runner_service_unit "$service_unit" || local_ok=false
+        fi
+
+        if [[ -f "$dir/.runner" && -x "$dir/config.sh" ]]; then
+  token=""
+  if token="$(get_repo_remove_token "$repo")" && [[ -n "$token" && "$token" != null ]]; then
+      sudo -u "$RUNNER_USER" bash -c "cd '$dir' && ./config.sh remove --unattended --token '$token'" || remote_ok=false
+  else
+      warn "Brak remove token; usuwam runnera i usługę tylko lokalnie."
+      remote_ok=false
+  fi
+  unset token
+        fi
+
+        rm -rf "$dir"
+    done
+
+    mapfile -t units < <(runner_service_units_for_repo "$repo")
+    for service_unit in "${units[@]}"; do
+        remove_runner_service_unit "$service_unit" || local_ok=false
+    done
+
+    mapfile -t remaining < <(runner_service_units_for_repo "$repo")
+    if [[ ${#remaining[@]} -gt 0 ]]; then
+        warn "Nie udało się usunąć usług systemd dla ${GITHUB_OWNER}/${repo}: ${remaining[*]}"
+        local_ok=false
     fi
-    unset token; rm -rf "$dir"; [[ "$remote_ok" == true ]]
+
+    [[ "$remote_ok" == true && "$local_ok" == true ]]
 }
 
 install_org_runner() {
@@ -814,11 +973,21 @@ uninstall_org_runner() {
 }
 
 purge_if_empty() {
+    local -a remaining_services=()
     [[ "$PURGE" == true ]] || return 0
     if [[ -d "$RUNNER_BASE" ]] && find "$RUNNER_BASE" -mindepth 1 -type f \
       \( -name .runner -o -name .chrisscriptbase-runner \) -print -quit | grep -q .; then
-        warn "--purge: w $RUNNER_BASE nadal istnieją runnery."; return 0
+        warn "--purge: w $RUNNER_BASE nadal istnieją runnery."
+        return 0
     fi
+
+    mapfile -t remaining_services < <(list_action_runner_service_units)
+    if [[ ${#remaining_services[@]} -gt 0 ]]; then
+        warn "--purge: nadal istnieją usługi GitHub Actions Runner; nie usuwam użytkownika $RUNNER_USER."
+        printf ' - %s\n' "${remaining_services[@]}" >&2
+        return 0
+    fi
+
     rm -rf "$RUNNER_BASE"
     if id "$RUNNER_USER" &>/dev/null; then
         userdel "$RUNNER_USER" 2>/dev/null || true
