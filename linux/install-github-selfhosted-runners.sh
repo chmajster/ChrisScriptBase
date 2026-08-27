@@ -13,6 +13,9 @@ set -Eeuo pipefail
 #   - tworzy jeden organization-level runner
 #   - dostępny dla repozytoriów organizacji
 #
+# Dane GitHub mogą zostać przekazane przez zmienne środowiskowe
+# albo odczytane z ~/.gitconfig użytkownika uruchamiającego skrypt.
+#
 # Wymagania:
 #   Ubuntu / Debian
 #   root
@@ -28,6 +31,12 @@ RUNNER_BASE="${RUNNER_BASE:-/opt/github-runners}"
 
 CUSTOM_LABELS="${CUSTOM_LABELS:-homelab}"
 API_VERSION="2026-03-10"
+
+INVOKING_USER=""
+INVOKING_HOME=""
+GITCONFIG_PATH=""
+GITHUB_OWNER_SOURCE=""
+GITHUB_TOKEN_SOURCE=""
 
 # ============================================================
 # Funkcje
@@ -51,21 +60,53 @@ GitHub Self-Hosted Runner Installer
 
 Użycie:
   ./install-github-selfhosted-runners.sh --help
+  sudo ./install-github-selfhosted-runners.sh
   sudo -E ./install-github-selfhosted-runners.sh
 
 Opcje:
   -h, --help     Wyświetla tę pomoc i kończy działanie.
 
-Konfiguracja odbywa się przez zmienne środowiskowe:
-  GITHUB_OWNER   Wymagane. Nazwa użytkownika GitHub lub organizacji.
-  GITHUB_TOKEN   Wymagane. GitHub Personal Access Token z uprawnieniami
-                 pozwalającymi zarządzać self-hosted runnerami.
+Źródła konfiguracji:
+  1. Zmienne środowiskowe mają najwyższy priorytet.
+  2. Jeżeli GITHUB_OWNER lub GITHUB_TOKEN nie są ustawione, skrypt próbuje
+     odczytać dane z ~/.gitconfig użytkownika, który uruchomił sudo.
+
+Obsługiwane wpisy ~/.gitconfig:
+
+  MODE=user:
+    github.username
+    github.tokenBase64
+
+  MODE=org:
+    github.organization
+    github.tokenBase64
+
+Przykładowa konfiguracja zgodna z linux/git-config.sh:
+
+  [github]
+      username = chmajster
+      tokenBase64 = <TOKEN_W_BASE64>
+
+Dla organizacji można dodatkowo ustawić:
+
+  [github]
+      organization = moja-organizacja
+
+Zmienne środowiskowe:
+  GITHUB_OWNER   Opcjonalne, jeśli odpowiedni owner jest w ~/.gitconfig.
+                 Nazwa użytkownika GitHub albo organizacji.
+  GITHUB_TOKEN   Opcjonalne, jeśli github.tokenBase64 jest w ~/.gitconfig.
+                 GitHub Personal Access Token.
   MODE           Tryb instalacji: user albo org. Domyślnie: user.
   RUNNER_USER    Lokalny użytkownik systemowy runnera.
                  Domyślnie: github-runner.
   RUNNER_BASE    Katalog bazowy instalacji runnerów.
                  Domyślnie: /opt/github-runners.
   CUSTOM_LABELS  Dodatkowe etykiety runnera. Domyślnie: homelab.
+
+Priorytet danych:
+  GITHUB_OWNER > ~/.gitconfig
+  GITHUB_TOKEN > ~/.gitconfig github.tokenBase64
 
 Tryby:
   MODE=user
@@ -77,7 +118,10 @@ Tryby:
 
 Przykłady:
 
-  Konto użytkownika:
+  Użycie tylko ~/.gitconfig użytkownika:
+    sudo ./install-github-selfhosted-runners.sh
+
+  Konto użytkownika przez zmienne środowiskowe:
     export GITHUB_OWNER="chmajster"
     export GITHUB_TOKEN="github_pat_xxxxxxxxxxxxxxxxx"
     export MODE="user"
@@ -85,7 +129,6 @@ Przykłady:
 
   Organizacja:
     export GITHUB_OWNER="moja-organizacja"
-    export GITHUB_TOKEN="github_pat_xxxxxxxxxxxxxxxxx"
     export MODE="org"
     sudo -E ./install-github-selfhosted-runners.sh
 
@@ -122,6 +165,89 @@ install_dependencies() {
         git
 }
 
+get_invoking_user() {
+    if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+        printf '%s\n' "$SUDO_USER"
+        return
+    fi
+
+    id -un
+}
+
+get_user_home() {
+    local username="$1"
+    local home
+
+    home="$(getent passwd "$username" | cut -d: -f6)"
+
+    [[ -n "$home" ]] || error "Nie można ustalić katalogu HOME użytkownika: $username"
+
+    printf '%s\n' "$home"
+}
+
+read_gitconfig_value() {
+    local key="$1"
+
+    [[ -f "$GITCONFIG_PATH" ]] || return 1
+
+    git config \
+        --file "$GITCONFIG_PATH" \
+        --get "$key" \
+        2>/dev/null || true
+}
+
+load_gitconfig_credentials() {
+    INVOKING_USER="$(get_invoking_user)"
+    INVOKING_HOME="$(get_user_home "$INVOKING_USER")"
+    GITCONFIG_PATH="${INVOKING_HOME}/.gitconfig"
+
+    if [[ -n "$GITHUB_OWNER" ]]; then
+        GITHUB_OWNER_SOURCE="environment"
+    fi
+
+    if [[ -n "$GITHUB_TOKEN" ]]; then
+        GITHUB_TOKEN_SOURCE="environment"
+    fi
+
+    if [[ ! -f "$GITCONFIG_PATH" ]]; then
+        echo "Brak $GITCONFIG_PATH - używam wyłącznie zmiennych środowiskowych."
+        return
+    fi
+
+    if [[ -z "$GITHUB_OWNER" ]]; then
+        case "$MODE" in
+            user)
+                GITHUB_OWNER="$(read_gitconfig_value 'github.username')"
+                ;;
+            org)
+                GITHUB_OWNER="$(read_gitconfig_value 'github.organization')"
+                ;;
+        esac
+
+        if [[ -n "$GITHUB_OWNER" ]]; then
+            GITHUB_OWNER_SOURCE="$GITCONFIG_PATH"
+        fi
+    fi
+
+    if [[ -z "$GITHUB_TOKEN" ]]; then
+        local token_base64
+        local decoded_token
+
+        token_base64="$(read_gitconfig_value 'github.tokenBase64')"
+
+        if [[ -n "$token_base64" ]]; then
+            if decoded_token="$(printf '%s' "$token_base64" | base64 --decode 2>/dev/null)"; then
+                GITHUB_TOKEN="$decoded_token"
+                GITHUB_TOKEN_SOURCE="$GITCONFIG_PATH"
+            else
+                error "Nie można zdekodować github.tokenBase64 z $GITCONFIG_PATH."
+            fi
+
+            unset token_base64 decoded_token
+        fi
+    fi
+}
+
 create_runner_user() {
     if ! id "$RUNNER_USER" &>/dev/null; then
         log "Tworzenie użytkownika $RUNNER_USER"
@@ -139,9 +265,6 @@ create_runner_user() {
 }
 
 check_config() {
-    [[ -n "$GITHUB_TOKEN" ]] || error "Brak GITHUB_TOKEN."
-    [[ -n "$GITHUB_OWNER" ]] || error "Brak GITHUB_OWNER."
-
     case "$MODE" in
         user|org)
             ;;
@@ -149,6 +272,17 @@ check_config() {
             error "MODE musi mieć wartość user albo org."
             ;;
     esac
+
+    if [[ -z "$GITHUB_OWNER" ]]; then
+        if [[ "$MODE" == "org" ]]; then
+            error "Brak GITHUB_OWNER. Ustaw zmienną GITHUB_OWNER albo github.organization w $GITCONFIG_PATH."
+        fi
+
+        error "Brak GITHUB_OWNER. Ustaw zmienną GITHUB_OWNER albo github.username w $GITCONFIG_PATH."
+    fi
+
+    [[ -n "$GITHUB_TOKEN" ]] || \
+        error "Brak GITHUB_TOKEN. Ustaw zmienną GITHUB_TOKEN albo github.tokenBase64 w $GITCONFIG_PATH."
 }
 
 github_api() {
@@ -356,7 +490,7 @@ install_org_runner() {
 
     registration_token="$(get_org_token)"
 
-    [[ -n "$registration_token" ]] ||
+    [[ -n "$registration_token" ]] || \
         error "Nie udało się otrzymać organization registration token."
 
     log "Konfiguracja Organization Runner"
@@ -444,9 +578,9 @@ main() {
     esac
 
     require_root
-    check_config
-
     install_dependencies
+    load_gitconfig_credentials
+    check_config
     create_runner_user
 
     local version
@@ -457,6 +591,10 @@ main() {
 
     echo
     echo "GitHub owner:    $GITHUB_OWNER"
+    echo "Owner source:    ${GITHUB_OWNER_SOURCE:-unknown}"
+    echo "Token source:    ${GITHUB_TOKEN_SOURCE:-unknown}"
+    echo "Invoking user:   $INVOKING_USER"
+    echo "Git config:      $GITCONFIG_PATH"
     echo "Mode:            $MODE"
     echo "Runner version:  $version"
     echo "Architecture:    $arch"
