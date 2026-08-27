@@ -1,3 +1,4 @@
+# Regression suite for documented CLI examples.
 name: Test self-hosted runner help
 
 on:
