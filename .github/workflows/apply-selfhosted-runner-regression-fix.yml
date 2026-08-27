@@ -60,6 +60,11 @@ jobs:
                   1,
               ),
               (
+                  '    labels="$(read_gitconfig_value "github.${profile}.labels")"\n    [[ -n "$labels" ]] && CUSTOM_LABELS="$labels"\n}',
+                  '    labels="$(read_gitconfig_value "github.${profile}.labels")"\n    [[ -n "$labels" ]] && CUSTOM_LABELS="$labels"\n    return 0\n}',
+                  1,
+              ),
+              (
                   '    if [[ -x "$dir/svc.sh" ]]; then (cd "$dir" && ./svc.sh stop || true; ./svc.sh uninstall || true); fi',
                   '    if [[ -x "$dir/svc.sh" ]]; then\n        (\n            cd "$dir"\n            ./svc.sh stop || true\n            ./svc.sh uninstall || true\n        )\n    fi',
                   2,
