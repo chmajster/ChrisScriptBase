@@ -52,18 +52,17 @@ run_case "uninstall removes orphan legacy service without runner directory" '
     ACTIVE_PROFILE=home
     RUNNER_BASE="$TEST_TMP/runners"
     hostname() { echo kynlab01; }
-    unit=actions.runner.chmajster-Knightly.kynlab01.service
-    removed=false
     list_action_runner_service_units() {
-        [[ "$removed" == false ]] && echo "$unit"
+        [[ ! -f "$TEST_TMP/legacy-unit-removed" ]] &&
+            echo actions.runner.chmajster-Knightly.kynlab01.service
     }
     remove_runner_service_unit() {
-        [[ "$1" == "$unit" ]]
-        removed=true
+        [[ "$1" == actions.runner.chmajster-Knightly.kynlab01.service ]]
+        touch "$TEST_TMP/legacy-unit-removed"
         return 0
     }
     uninstall_repo_runner Knightly
-    [[ "$removed" == true ]]
+    [[ -f "$TEST_TMP/legacy-unit-removed" ]]
 '
 
 printf '\nRESULT: pass=%d fail=%d\n' "$pass" "$fail"
