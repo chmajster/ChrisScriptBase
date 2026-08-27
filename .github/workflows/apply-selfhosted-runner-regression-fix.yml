@@ -1,0 +1,79 @@
+name: Apply latest runner manager regression fixes
+
+on:
+  push:
+    branches:
+      - fix/selfhosted-runner-help-regressions-20260827
+    paths:
+      - '.github/workflows/apply-selfhosted-runner-regression-fix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/selfhosted-runner-help-regressions-20260827
+          fetch-depth: 0
+
+      - name: Apply fixes
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path('linux/install-github-selfhosted-runners.sh')
+          text = path.read_text()
+
+          replacements = [
+              (
+                  '    id "$RUNNER_USER" &>/dev/null && userdel "$RUNNER_USER" 2>/dev/null || true',
+                  '    if id "$RUNNER_USER" &>/dev/null; then\n        userdel "$RUNNER_USER" 2>/dev/null || true\n    fi',
+              ),
+              (
+                  '    mapfile -t repositories < <(resolve_repositories)\n    [[ "$LIST_REPOS" == false ]] || return 0',
+                  '    if [[ "$LIST_REPOS" == true ]]; then\n        resolve_repositories\n        return 0\n    fi\n    mapfile -t repositories < <(resolve_repositories)',
+              ),
+              (
+                  '    [[ "$REPO_SELECTION_MODE" == all && "$LIST_REPOS" == false ]] ||\n      warn "MODE=org: selekcja repo nie dotyczy organization-level runnera; użyj Runner Groups."',
+                  '    if [[ "$LIST_REPOS" == true ]]; then\n        warn "MODE=org: --list-repos dotyczy repozytoriów użytkownika; pomijam organization-level runnera."\n        return 0\n    fi\n    [[ "$REPO_SELECTION_MODE" == all ]] ||\n      warn "MODE=org: selekcja repo nie dotyczy organization-level runnera; użyj Runner Groups."',
+              ),
+              (
+                  '    [[ "$ACTION" != install ]] || create_runner_user',
+                  '    [[ "$ACTION" != install || "$LIST_REPOS" == true ]] || create_runner_user',
+              ),
+              (
+                  '    if [[ "$ACTION" == install ]]; then version="$(get_runner_version)"; arch="$(detect_arch)"; fi',
+                  '    if [[ "$ACTION" == install && "$LIST_REPOS" == false ]]; then version="$(get_runner_version)"; arch="$(detect_arch)"; fi',
+              ),
+          ]
+
+          for old, new in replacements:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'Expected exactly one match, got {count}: {old!r}')
+              text = text.replace(old, new, 1)
+
+          path.write_text(text)
+          PY
+
+      - name: Validate
+        shell: bash
+        run: |
+          bash -n linux/install-github-selfhosted-runners.sh
+          shellcheck linux/install-github-selfhosted-runners.sh
+          bash linux/tests/test-install-github-selfhosted-runners.sh
+
+      - name: Commit production fix
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add linux/install-github-selfhosted-runners.sh
+          if ! git diff --cached --quiet; then
+            git commit -m 'Fix list-repos and runner cleanup regressions'
+            git push origin HEAD:fix/selfhosted-runner-help-regressions-20260827
+          fi
