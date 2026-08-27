@@ -45,6 +45,63 @@ error() {
     exit 1
 }
 
+show_help() {
+    cat <<'EOF'
+GitHub Self-Hosted Runner Installer
+
+Użycie:
+  ./install-github-selfhosted-runners.sh --help
+  sudo -E ./install-github-selfhosted-runners.sh
+
+Opcje:
+  -h, --help     Wyświetla tę pomoc i kończy działanie.
+
+Konfiguracja odbywa się przez zmienne środowiskowe:
+  GITHUB_OWNER   Wymagane. Nazwa użytkownika GitHub lub organizacji.
+  GITHUB_TOKEN   Wymagane. GitHub Personal Access Token z uprawnieniami
+                 pozwalającymi zarządzać self-hosted runnerami.
+  MODE           Tryb instalacji: user albo org. Domyślnie: user.
+  RUNNER_USER    Lokalny użytkownik systemowy runnera.
+                 Domyślnie: github-runner.
+  RUNNER_BASE    Katalog bazowy instalacji runnerów.
+                 Domyślnie: /opt/github-runners.
+  CUSTOM_LABELS  Dodatkowe etykiety runnera. Domyślnie: homelab.
+
+Tryby:
+  MODE=user
+    Pobiera wszystkie niearchiwalne repozytoria należące do GITHUB_OWNER
+    i tworzy osobną instancję GitHub Actions Runner dla każdego repozytorium.
+
+  MODE=org
+    Tworzy jedną instancję GitHub Actions Runner na poziomie organizacji.
+
+Przykłady:
+
+  Konto użytkownika:
+    export GITHUB_OWNER="chmajster"
+    export GITHUB_TOKEN="github_pat_xxxxxxxxxxxxxxxxx"
+    export MODE="user"
+    sudo -E ./install-github-selfhosted-runners.sh
+
+  Organizacja:
+    export GITHUB_OWNER="moja-organizacja"
+    export GITHUB_TOKEN="github_pat_xxxxxxxxxxxxxxxxx"
+    export MODE="org"
+    sudo -E ./install-github-selfhosted-runners.sh
+
+  Własny katalog i etykiety:
+    export RUNNER_BASE="/srv/github-runners"
+    export CUSTOM_LABELS="homelab,linux,proxmox"
+    sudo -E ./install-github-selfhosted-runners.sh
+
+Sprawdzenie usług:
+  systemctl --type=service | grep actions.runner
+
+Logi runnerów:
+  journalctl -u 'actions.runner.*' -f
+EOF
+}
+
 require_root() {
     if [[ "$EUID" -ne 0 ]]; then
         error "Uruchom skrypt jako root lub przez sudo."
@@ -142,7 +199,6 @@ download_runner() {
     local arch="$3"
 
     local archive="/tmp/actions-runner-${version}-${arch}.tar.gz"
-
     local url="https://github.com/actions/runner/releases/download/v${version}/actions-runner-linux-${arch}-${version}.tar.gz"
 
     log "Pobieranie GitHub Actions Runner ${version}"
@@ -200,10 +256,6 @@ install_repo_runner() {
     local runner_name="${hostname}-${safe_repo}"
 
     log "Repozytorium: ${GITHUB_OWNER}/${repo}"
-
-    # --------------------------------------------------------
-    # Jeżeli runner jest już skonfigurowany
-    # --------------------------------------------------------
 
     if [[ -f "${runner_dir}/.runner" ]]; then
         echo "Runner już istnieje:"
@@ -346,7 +398,6 @@ get_user_repositories() {
     local page=1
 
     while true; do
-
         local response
 
         response="$(
@@ -380,6 +431,17 @@ get_user_repositories() {
 # ============================================================
 
 main() {
+    case "${1:-}" in
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        "")
+            ;;
+        *)
+            error "Nieznana opcja: $1. Użyj --help, aby wyświetlić pomoc."
+            ;;
+    esac
 
     require_root
     check_config
@@ -401,22 +463,13 @@ main() {
     echo "Runner user:     $RUNNER_USER"
     echo "Runner base:     $RUNNER_BASE"
 
-    # ========================================================
-    # Organization
-    # ========================================================
-
     if [[ "$MODE" == "org" ]]; then
-
         install_org_runner \
             "$version" \
             "$arch"
 
         exit 0
     fi
-
-    # ========================================================
-    # User repositories
-    # ========================================================
 
     log "Pobieranie repozytoriów użytkownika $GITHUB_OWNER"
 
@@ -432,17 +485,11 @@ main() {
 
     printf ' - %s\n' "${repositories[@]}"
 
-    # ========================================================
-    # Instalowanie runnerów
-    # ========================================================
-
     for repo in "${repositories[@]}"; do
-
         install_repo_runner \
             "$repo" \
             "$version" \
             "$arch"
-
     done
 
     log "Instalacja zakończona"
