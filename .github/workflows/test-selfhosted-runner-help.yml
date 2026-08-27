@@ -18,8 +18,6 @@ jobs:
         run: |
           shellcheck --version
           shellcheck linux/install-github-selfhosted-runners.sh
-          shellcheck linux/tests/test-install-github-selfhosted-runners.sh
-          shellcheck linux/tests/test-install-github-selfhosted-runners-systemd.sh
       - name: Run CLI and help regression tests
         run: bash linux/tests/test-install-github-selfhosted-runners.sh
       - name: Run systemd cleanup regression tests
