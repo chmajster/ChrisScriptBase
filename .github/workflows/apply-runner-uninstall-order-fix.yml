@@ -215,6 +215,7 @@ jobs:
               dir="$RUNNER_BASE/profiles/home/homelab-dns"
               mkdir -p "$dir"
               printf "%s\n" actions.runner.chmajster-HomeLAB-DNS.kynlab01-home-homelab-dns.service > "$dir/.service"
+              set -- "\$1"
               cat > "$dir/svc.sh" <<EOF
           #!/usr/bin/env bash
           echo "svc-$1" >> "$TEST_TMP/order.log"
