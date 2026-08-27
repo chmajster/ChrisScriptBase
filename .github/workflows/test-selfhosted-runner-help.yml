@@ -5,6 +5,7 @@ on:
     paths:
       - 'linux/install-github-selfhosted-runners.sh'
       - 'linux/tests/test-install-github-selfhosted-runners.sh'
+      - 'linux/tests/test-install-github-selfhosted-runners-systemd.sh'
       - '.github/workflows/test-selfhosted-runner-help.yml'
   workflow_dispatch:
 
@@ -17,5 +18,9 @@ jobs:
         run: |
           shellcheck --version
           shellcheck linux/install-github-selfhosted-runners.sh
+          shellcheck linux/tests/test-install-github-selfhosted-runners.sh
+          shellcheck linux/tests/test-install-github-selfhosted-runners-systemd.sh
       - name: Run CLI and help regression tests
         run: bash linux/tests/test-install-github-selfhosted-runners.sh
+      - name: Run systemd cleanup regression tests
+        run: bash linux/tests/test-install-github-selfhosted-runners-systemd.sh
