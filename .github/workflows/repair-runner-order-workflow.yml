@@ -1,0 +1,38 @@
+name: Repair runner uninstall ordering workflow
+
+on:
+  push:
+    branches:
+      - fix/selfhosted-runner-orphan-services-20260827
+    paths:
+      - '.github/workflows/repair-runner-order-workflow.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/selfhosted-runner-orphan-services-20260827
+          fetch-depth: 0
+      - name: Repair test heredoc
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          p = Path('.github/workflows/apply-runner-uninstall-order-fix.yml')
+          s = p.read_text()
+          old = '              cat > "$dir/svc.sh" <<EOF\n'
+          new = '              set -- "\\$1"\n              cat > "$dir/svc.sh" <<EOF\n'
+          if s.count(old) != 1:
+              raise SystemExit(f'expected one heredoc, got {s.count(old)}')
+          p.write_text(s.replace(old, new, 1))
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/workflows/apply-runner-uninstall-order-fix.yml
+          git commit -m 'Fix runner uninstall order regression test'
+          git push origin HEAD:fix/selfhosted-runner-orphan-services-20260827
