@@ -13,5 +13,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: ShellCheck
+        run: |
+          shellcheck --version
+          shellcheck linux/install-github-selfhosted-runners.sh
       - name: Run CLI and help regression tests
         run: bash linux/tests/test-install-github-selfhosted-runners.sh
