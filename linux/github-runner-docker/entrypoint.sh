@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2317 # trap handlers are invoked indirectly by Bash.
 set -Eeuo pipefail
 
 cd /actions-runner
