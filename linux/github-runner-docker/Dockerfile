@@ -49,6 +49,4 @@ RUN set -eux; \
 COPY entrypoint.sh /usr/local/bin/runner-entrypoint.sh
 RUN chmod 0755 /usr/local/bin/runner-entrypoint.sh
 
-USER runner
-
 ENTRYPOINT ["/usr/local/bin/runner-entrypoint.sh"]
