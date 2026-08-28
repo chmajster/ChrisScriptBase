@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ACTION=install
+ACTION="install"
 MODE_DEFAULT="${MODE:-user}"
 OWNER_ENV="${GITHUB_OWNER:-}"
 TOKEN_ENV="${GITHUB_TOKEN:-}"
@@ -16,11 +16,11 @@ PURGE=false
 LIST_PROFILES=false
 LIST_REPOS=false
 SELECT_MODE=""
-UI=auto
+UI="auto"
 PROFILES=()
 REPOS=()
 
-PROFILE=default
+PROFILE="default"
 MODE="$MODE_DEFAULT"
 OWNER=""
 TOKEN=""
@@ -32,12 +32,25 @@ GITCONFIG=""
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONTEXT="${RUNNER_DOCKER_CONTEXT:-$HERE}"
 
-die(){ echo "ERROR: $*" >&2; exit 1; }
-warn(){ echo "WARNING: $*" >&2; }
-log(){ echo; echo "=== $* ==="; }
-san(){ printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_.-'; }
+die() {
+    echo "ERROR: $*" >&2
+    exit 1
+}
 
-help(){
+warn() {
+    echo "WARNING: $*" >&2
+}
+
+log() {
+    echo
+    echo "=== $* ==="
+}
+
+san() {
+    printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_.-'
+}
+
+help() {
 cat <<'EOF'
 GitHub Self-Hosted Runner Manager (Docker)
 
@@ -55,7 +68,8 @@ Opcje:
   --all-repos              wszystkie repo (domyślne)
   --select-repos           interaktywny wybór
   --gui|-GUI               Zenity lokalnie albo dialog/whiptail przez SSH
-  --tui                    dialog/whiptail
+  --tui                    wymuś dialog/whiptail
+  --zenity                 wymuś Zenity; wymaga sesji graficznej
   --list-profiles          pokaż profile
   --list-repos             pokaż repo
   --docker-socket          udostępnij /var/run/docker.sock jobom
@@ -73,329 +87,935 @@ Diagnostyka:
 EOF
 }
 
-csv(){
-  local -n a="$1"; local x; IFS=',' read -ra xs <<<"$2"
-  for x in "${xs[@]}"; do x="${x//[[:space:]]/}"; [[ -n "$x" ]] && a+=("$x"); done
+append_csv() {
+    local array_name="$1"
+    local csv_value="$2"
+    local item
+    local -a parts=()
+    local -n target_array="$array_name"
+
+    IFS=',' read -r -a parts <<< "$csv_value"
+    for item in "${parts[@]}"; do
+        item="${item//[[:space:]]/}"
+        if [[ -n "$item" ]]; then
+            target_array+=("$item")
+        fi
+    done
 }
-selmode(){
-  [[ -z "$SELECT_MODE" || "$SELECT_MODE" == "$1" ]] || die "Sprzeczne opcje wyboru repo."
-  SELECT_MODE="$1"
+
+set_selection_mode() {
+    local requested="$1"
+    if [[ -n "$SELECT_MODE" && "$SELECT_MODE" != "$requested" ]]; then
+        die "Sprzeczne opcje wyboru repozytoriów."
+    fi
+    SELECT_MODE="$requested"
 }
-args(){
-  while (($#)); do
-    case "$1" in
-      -h|--help) help; exit;;
-      --install) ACTION=install; shift;;
-      --uninstall) ACTION=uninstall; shift;;
-      --purge) PURGE=true; shift;;
-      --docker-socket) SOCKET=true; shift;;
-      --no-docker-socket) SOCKET=false; shift;;
-      --rebuild-image) REBUILD=true; shift;;
-      -p|--profile) PROFILES+=("${2:?brak profilu}"); shift 2;;
-      --profiles) csv PROFILES "${2:?brak profili}"; shift 2;;
-      -r|--repo) selmode explicit; REPOS+=("${2:?brak repo}"); shift 2;;
-      --repos) selmode explicit; csv REPOS "${2:?brak repo}"; shift 2;;
-      --all-repos) selmode all; shift;;
-      --select-repos) selmode interactive; shift;;
-      --gui|-GUI) UI=gui; shift;;
-      --tui) UI=tui; shift;;
-      --list-profiles) LIST_PROFILES=true; shift;;
-      --list-repos) LIST_REPOS=true; shift;;
-      *) die "Nieznana opcja: $1";;
+
+args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                help
+                exit 0
+                ;;
+            --install)
+                ACTION="install"
+                shift
+                ;;
+            --uninstall)
+                ACTION="uninstall"
+                shift
+                ;;
+            --purge)
+                PURGE=true
+                shift
+                ;;
+            --docker-socket)
+                SOCKET=true
+                shift
+                ;;
+            --no-docker-socket)
+                SOCKET=false
+                shift
+                ;;
+            --rebuild-image)
+                REBUILD=true
+                shift
+                ;;
+            -p|--profile)
+                [[ $# -ge 2 ]] || die "$1 wymaga nazwy profilu."
+                PROFILES+=("$2")
+                shift 2
+                ;;
+            --profiles)
+                [[ $# -ge 2 ]] || die "$1 wymaga listy profili."
+                append_csv PROFILES "$2"
+                shift 2
+                ;;
+            -r|--repo)
+                [[ $# -ge 2 ]] || die "$1 wymaga repozytorium."
+                set_selection_mode "explicit"
+                REPOS+=("$2")
+                shift 2
+                ;;
+            --repos)
+                [[ $# -ge 2 ]] || die "$1 wymaga listy repozytoriów."
+                set_selection_mode "explicit"
+                append_csv REPOS "$2"
+                shift 2
+                ;;
+            --all-repos)
+                set_selection_mode "all"
+                shift
+                ;;
+            --select-repos)
+                set_selection_mode "interactive"
+                shift
+                ;;
+            --gui|-GUI)
+                UI="gui"
+                shift
+                ;;
+            --tui)
+                UI="tui"
+                shift
+                ;;
+            --zenity)
+                UI="zenity"
+                shift
+                ;;
+            --list-profiles)
+                LIST_PROFILES=true
+                shift
+                ;;
+            --list-repos)
+                LIST_REPOS=true
+                shift
+                ;;
+            *)
+                die "Nieznana opcja: $1"
+                ;;
+        esac
+    done
+
+    if [[ -z "$SELECT_MODE" ]]; then
+        SELECT_MODE="all"
+    fi
+    if [[ "$PURGE" == true && "$ACTION" != "uninstall" ]]; then
+        die "--purge wymaga --uninstall"
+    fi
+    if [[ "$UI" != "auto" && "$SELECT_MODE" != "interactive" ]]; then
+        die "--gui/-GUI, --tui i --zenity wymagają --select-repos"
+    fi
+}
+
+caller_init() {
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        CALLER="$SUDO_USER"
+    else
+        CALLER="$(id -un)"
+    fi
+    CALLER_HOME="$(getent passwd "$CALLER" | cut -d: -f6)"
+    [[ -n "$CALLER_HOME" ]] || die "Nie można ustalić HOME użytkownika: $CALLER"
+    GITCONFIG="$CALLER_HOME/.gitconfig"
+}
+
+cfg() {
+    local key="$1"
+    if [[ -f "$GITCONFIG" ]]; then
+        git config --file "$GITCONFIG" --get "$key" 2>/dev/null || true
+    fi
+}
+
+decode_token() {
+    printf '%s' "$1" | base64 --decode 2>/dev/null
+}
+
+profiles() {
+    local base_config=""
+    base_config="${OWNER_ENV}${TOKEN_ENV}$(cfg github.username)$(cfg github.organization)$(cfg github.tokenBase64)"
+    if [[ -n "$base_config" ]]; then
+        echo "default"
+    fi
+
+    if [[ -f "$GITCONFIG" ]]; then
+        git config --file "$GITCONFIG" --name-only \
+            --get-regexp '^github\..+\.(username|organization|owner|tokenBase64|mode|labels)$' \
+            2>/dev/null | awk -F. 'NF>=3 {print $2}' || true
+    fi
+}
+
+load_profile() {
+    local profile_name="$1"
+    local prefix=""
+    local encoded_token=""
+    local configured_labels=""
+
+    PROFILE="$profile_name"
+    MODE="$MODE_DEFAULT"
+    OWNER=""
+    TOKEN=""
+    LABELS="$LABELS_DEFAULT"
+
+    if [[ "$PROFILE" != "default" ]]; then
+        prefix="$PROFILE."
+    fi
+
+    MODE="$(cfg "github.${prefix}mode")"
+    if [[ -z "$MODE" ]]; then
+        MODE="$MODE_DEFAULT"
+    fi
+
+    if [[ "$PROFILE" == "default" ]]; then
+        OWNER="$OWNER_ENV"
+        TOKEN="$TOKEN_ENV"
+    fi
+
+    if [[ -z "$OWNER" ]]; then
+        OWNER="$(cfg "github.${prefix}owner")"
+    fi
+    if [[ -z "$OWNER" ]]; then
+        if [[ "$MODE" == "org" ]]; then
+            OWNER="$(cfg "github.${prefix}organization")"
+        else
+            OWNER="$(cfg "github.${prefix}username")"
+        fi
+    fi
+
+    if [[ -z "$TOKEN" ]]; then
+        encoded_token="$(cfg "github.${prefix}tokenBase64")"
+        if [[ -n "$encoded_token" ]]; then
+            TOKEN="$(decode_token "$encoded_token")" || die "$PROFILE: nie można zdekodować tokenBase64"
+        fi
+    fi
+
+    configured_labels="$(cfg "github.${prefix}labels")"
+    if [[ -n "$configured_labels" ]]; then
+        LABELS="$configured_labels"
+    fi
+
+    case "$MODE" in
+        user|org) ;;
+        *) die "$PROFILE: mode musi być user albo org" ;;
     esac
-  done
-  [[ -n "$SELECT_MODE" ]] || SELECT_MODE=all
-  [[ "$PURGE" == false || "$ACTION" == uninstall ]] || die "--purge wymaga --uninstall"
+    [[ -n "$OWNER" ]] || die "$PROFILE: brak ownera"
+    [[ -n "$TOKEN" ]] || die "$PROFILE: brak tokenu"
 }
 
-caller_init(){
-  CALLER="${SUDO_USER:-$(id -un)}"; [[ "$CALLER" != root || -z "${SUDO_USER:-}" ]] || CALLER=root
-  CALLER_HOME="$(getent passwd "$CALLER" | cut -d: -f6)"
-  [[ -n "$CALLER_HOME" ]] || die "Nie można ustalić HOME: $CALLER"
-  GITCONFIG="$CALLER_HOME/.gitconfig"
-}
-cfg(){ [[ -f "$GITCONFIG" ]] && git config --file "$GITCONFIG" --get "$1" 2>/dev/null || true; }
-decode(){ printf '%s' "$1" | base64 --decode 2>/dev/null; }
-
-profiles(){
-  { [[ -n "$OWNER_ENV$TOKEN_ENV$(cfg github.username)$(cfg github.organization)$(cfg github.tokenBase64)" ]] && echo default || true
-    [[ -f "$GITCONFIG" ]] && git config --file "$GITCONFIG" --name-only \
-      --get-regexp '^github\..+\.(username|organization|owner|tokenBase64|mode|labels)$' 2>/dev/null |
-      awk -F. 'NF>=3{print $2}' || true
-  } | awk 'NF&&!s[$0]++'
-}
-load_profile(){
-  PROFILE="$1"; MODE="$MODE_DEFAULT"; OWNER=""; TOKEN=""; LABELS="$LABELS_DEFAULT"
-  local p="" b=""
-  [[ "$PROFILE" == default ]] || p="$PROFILE."
-  MODE="$(cfg "github.${p}mode")"; [[ -n "$MODE" ]] || MODE="$MODE_DEFAULT"
-  if [[ "$PROFILE" == default ]]; then OWNER="$OWNER_ENV"; TOKEN="$TOKEN_ENV"; fi
-  [[ -n "$OWNER" ]] || OWNER="$(cfg "github.${p}owner")"
-  if [[ -z "$OWNER" ]]; then
-    [[ "$MODE" == org ]] && OWNER="$(cfg "github.${p}organization")" || OWNER="$(cfg "github.${p}username")"
-  fi
-  if [[ -z "$TOKEN" ]]; then b="$(cfg "github.${p}tokenBase64")"; [[ -z "$b" ]] || TOKEN="$(decode "$b")"; fi
-  b="$(cfg "github.${p}labels")"; [[ -n "$b" ]] && LABELS="$b"
-  [[ "$MODE" == user || "$MODE" == org ]] || die "$PROFILE: mode musi być user albo org"
-  [[ -n "$OWNER" && -n "$TOKEN" ]] || die "$PROFILE: brak ownera lub tokenu"
+api() {
+    local method="$1"
+    local endpoint="$2"
+    curl -fsSL -X "$method" \
+        -H "Accept: application/vnd.github+json" \
+        -H "Authorization: Bearer $TOKEN" \
+        -H "X-GitHub-Api-Version: $API_VERSION" \
+        "https://api.github.com$endpoint"
 }
 
-api(){
-  local m="$1" e="$2"
-  curl -fsSL -X "$m" -H "Accept: application/vnd.github+json" \
-    -H "Authorization: Bearer $TOKEN" -H "X-GitHub-Api-Version: $API_VERSION" \
-    "https://api.github.com$e"
-}
-auth(){
-  local who; who="$(api GET /user | jq -r '.login//empty')" || die "$PROFILE: token odrzucony"
-  echo "Profil=$PROFILE owner=$OWNER mode=$MODE token-owner=$who labels=$LABELS"
-}
-remote_repos(){
-  local p=1 r n
-  while :; do
-    r="$(api GET "/user/repos?affiliation=owner&per_page=100&page=$p&sort=full_name")" || return 1
-    n="$(jq length <<<"$r")"; ((n)) || break
-    jq -r --arg o "$OWNER" '.[]|select((.owner.login|ascii_downcase)==($o|ascii_downcase) and .archived==false)|.name' <<<"$r"
-    ((p++))
-  done
+auth() {
+    local login=""
+    login="$(api GET /user | jq -r '.login // empty')" || die "$PROFILE: token odrzucony"
+    [[ -n "$login" ]] || die "$PROFILE: GitHub API nie zwrócił loginu"
+    echo "Profil=$PROFILE owner=$OWNER mode=$MODE token-owner=$login labels=$LABELS"
 }
 
-root(){ [[ "$PROFILE" == default ]] && echo "$STATE_BASE/default" || echo "$STATE_BASE/profiles/$(san "$PROFILE")"; }
-repo_state(){ echo "$(root)/repositories/$(san "$1")"; }
-org_state(){ echo "$(root)/organization"; }
-repo_runner(){ local h="$(hostname -s | tr A-Z a-z)"; [[ "$PROFILE" == default ]] && echo "${h}-$(san "$1")" || echo "${h}-$(san "$PROFILE")-$(san "$1")"; }
-org_runner(){ echo "$(hostname -s | tr A-Z a-z)-$(san "$PROFILE")-$(san "$OWNER")"; }
-repo_container(){ echo "github-runner-$(san "$PROFILE")-$(san "$1")"; }
-org_container(){ echo "github-runner-$(san "$PROFILE")-org"; }
+remote_repos() {
+    local page=1
+    local response=""
+    local count=0
 
-deps(){
-  local c miss=()
-  for c in curl jq git base64 getent awk sudo; do command -v "$c" >/dev/null || miss+=("$c"); done
-  ((${#miss[@]}==0)) || { apt-get update; DEBIAN_FRONTEND=noninteractive apt-get install -y curl jq git coreutils gawk sudo ca-certificates; }
-}
-docker_ready(){
-  command -v docker >/dev/null || { apt-get update; DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io; }
-  command -v systemctl >/dev/null && systemctl enable --now docker >/dev/null 2>&1 || true
-  docker info >/dev/null 2>&1 || die "Docker Engine nie działa"
-}
-build_image(){
-  [[ -f "$CONTEXT/Dockerfile" && -f "$CONTEXT/entrypoint.sh" ]] || die "Brak plików obrazu w $CONTEXT"
-  if [[ "$REBUILD" == false ]] && docker image inspect "$IMAGE" >/dev/null 2>&1; then return 0; fi
-  docker build --pull -t "$IMAGE" "$CONTEXT"
+    while true; do
+        response="$(api GET "/user/repos?affiliation=owner&per_page=100&page=$page&sort=full_name")" || return 1
+        count="$(jq 'length' <<< "$response")"
+        if (( count == 0 )); then
+            break
+        fi
+        jq -r --arg owner "$OWNER" '
+          .[]
+          | select((.owner.login | ascii_downcase) == ($owner | ascii_downcase))
+          | select(.archived == false)
+          | .name
+        ' <<< "$response"
+        ((page += 1))
+    done
 }
 
-meta_get(){ awk -F= -v k="$2" '$1==k{sub(/^[^=]*=/,"");print;exit}' "$1"; }
-write_state(){
-  local d="$1" repo="$2" rn="$3" cn="$4"
-  mkdir -p "$d/work"; chown -R 1001:1001 "$d/work"
-  umask 077; printf '%s' "$TOKEN" >"$d/github_token"; chown root:root "$d/github_token"; chmod 600 "$d/github_token"
-  cat >"$d/metadata" <<EOF
+profile_root() {
+    if [[ "$PROFILE" == "default" ]]; then
+        echo "$STATE_BASE/default"
+    else
+        echo "$STATE_BASE/profiles/$(san "$PROFILE")"
+    fi
+}
+
+repo_state() {
+    echo "$(profile_root)/repositories/$(san "$1")"
+}
+
+org_state() {
+    echo "$(profile_root)/organization"
+}
+
+repo_runner() {
+    local host=""
+    host="$(hostname -s | tr '[:upper:]' '[:lower:]')"
+    if [[ "$PROFILE" == "default" ]]; then
+        echo "${host}-$(san "$1")"
+    else
+        echo "${host}-$(san "$PROFILE")-$(san "$1")"
+    fi
+}
+
+org_runner() {
+    local host=""
+    host="$(hostname -s | tr '[:upper:]' '[:lower:]')"
+    echo "${host}-$(san "$PROFILE")-$(san "$OWNER")"
+}
+
+repo_container() {
+    echo "github-runner-$(san "$PROFILE")-$(san "$1")"
+}
+
+org_container() {
+    echo "github-runner-$(san "$PROFILE")-org"
+}
+
+ensure_dependencies() {
+    local command_name
+    local -a missing=()
+    for command_name in curl jq git base64 getent awk sudo; do
+        if ! command -v "$command_name" >/dev/null 2>&1; then
+            missing+=("$command_name")
+        fi
+    done
+    if (( ${#missing[@]} > 0 )); then
+        apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            curl jq git coreutils gawk sudo ca-certificates
+    fi
+}
+
+docker_ready() {
+    if ! command -v docker >/dev/null 2>&1; then
+        apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io
+    fi
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl enable --now docker >/dev/null 2>&1 || true
+    fi
+    docker info >/dev/null 2>&1 || die "Docker Engine nie działa"
+}
+
+build_image() {
+    [[ -f "$CONTEXT/Dockerfile" ]] || die "Brak $CONTEXT/Dockerfile"
+    [[ -f "$CONTEXT/entrypoint.sh" ]] || die "Brak $CONTEXT/entrypoint.sh"
+    if [[ "$REBUILD" == false ]] && docker image inspect "$IMAGE" >/dev/null 2>&1; then
+        return 0
+    fi
+    docker build --pull -t "$IMAGE" "$CONTEXT"
+}
+
+meta_get() {
+    local file="$1"
+    local key="$2"
+    awk -F= -v key="$key" '$1==key {sub(/^[^=]*=/, ""); print; exit}' "$file"
+}
+
+write_state() {
+    local state_dir="$1"
+    local repo_name="$2"
+    local runner_name="$3"
+    local container_name="$4"
+
+    mkdir -p "$state_dir/work"
+    chown -R 1001:1001 "$state_dir/work"
+
+    umask 077
+    printf '%s' "$TOKEN" > "$state_dir/github_token"
+    chown root:root "$state_dir/github_token"
+    chmod 600 "$state_dir/github_token"
+
+    cat > "$state_dir/metadata" <<EOF
 profile=$PROFILE
 mode=$MODE
 owner=$OWNER
-repo=$repo
-runner_name=$rn
-container_name=$cn
+repo=$repo_name
+runner_name=$runner_name
+container_name=$container_name
 image=$IMAGE
 docker_socket=$SOCKET
 EOF
-  chmod 600 "$d/metadata"
+    chmod 600 "$state_dir/metadata"
 }
 
-runner_id(){
-  local e="$1" n="$2" p=1 r id
-  while :; do
-    r="$(api GET "$e?per_page=100&page=$p")" || return 1
-    id="$(jq -r --arg n "$n" '.runners[]?|select(.name==$n)|.id' <<<"$r" | head -1)"
-    [[ -z "$id" ]] || { echo "$id"; return; }
-    (($(jq '.runners|length' <<<"$r")==100)) || return 1
-    ((p++))
-  done
-}
-remote_delete(){
-  local id; id="$(runner_id "$1" "$2" 2>/dev/null)" || return 0
-  [[ -n "$id" ]] && api DELETE "$1/$id" >/dev/null || true
-}
+runner_id() {
+    local endpoint="$1"
+    local runner_name="$2"
+    local page=1
+    local response=""
+    local id=""
+    local page_size=0
 
-legacy_dirs(){
-  local repo="$1" a="$RUNNER_BASE/$(san "$repo")" b="$RUNNER_BASE/profiles/$(san "$PROFILE")/$(san "$repo")"
-  [[ "$PROFILE" != default && -d "$b" ]] && echo "$b"; [[ -d "$a" ]] && echo "$a"
-}
-legacy_cleanup(){
-  local repo="$1" d u agent
-  while read -r d; do
-    [[ -n "$d" && ( -f "$d/.runner" || -f "$d/.service" || -f "$d/.chrisscriptbase-runner" ) ]] || continue
-    log "Migracja systemd -> Docker: $d"
-    agent="$(jq -r '.agentName//.name//empty' "$d/.runner" 2>/dev/null || true)"
-    [[ -x "$d/svc.sh" ]] && (cd "$d"; ./svc.sh stop >/dev/null 2>&1 || true; ./svc.sh uninstall >/dev/null 2>&1 || true)
-    u="$(head -1 "$d/.service" 2>/dev/null | tr -d '\r' || true)"
-    if [[ "$u" == actions.runner.*.service ]] && command -v systemctl >/dev/null; then
-      systemctl stop "$u" >/dev/null 2>&1 || true; systemctl disable "$u" >/dev/null 2>&1 || true
-      rm -f "/etc/systemd/system/$u"; find /etc/systemd/system -type l -name "$u" -delete 2>/dev/null || true
-      systemctl daemon-reload >/dev/null 2>&1 || true
-    fi
-    [[ -n "$agent" ]] && remote_delete "/repos/$OWNER/$repo/actions/runners" "$agent"
-    rm -rf "$d"
-  done < <(legacy_dirs "$repo")
-}
-
-legacy_org_dirs(){
-  local a="$RUNNER_BASE/organization" b="$RUNNER_BASE/profiles/$(san "$PROFILE")/organization"
-  [[ "$PROFILE" != default && -d "$b" ]] && echo "$b"; [[ -d "$a" ]] && echo "$a"
-}
-legacy_org_cleanup(){
-  local d u agent
-  while read -r d; do
-    [[ -n "$d" && ( -f "$d/.runner" || -f "$d/.service" || -f "$d/.chrisscriptbase-runner" ) ]] || continue
-    log "Migracja organization systemd -> Docker: $d"
-    agent="$(jq -r '.agentName//.name//empty' "$d/.runner" 2>/dev/null || true)"
-    [[ -x "$d/svc.sh" ]] && (cd "$d"; ./svc.sh stop >/dev/null 2>&1 || true; ./svc.sh uninstall >/dev/null 2>&1 || true)
-    u="$(head -1 "$d/.service" 2>/dev/null | tr -d '\r' || true)"
-    if [[ "$u" == actions.runner.*.service ]] && command -v systemctl >/dev/null; then
-      systemctl stop "$u" >/dev/null 2>&1 || true; systemctl disable "$u" >/dev/null 2>&1 || true
-      rm -f "/etc/systemd/system/$u"; find /etc/systemd/system -type l -name "$u" -delete 2>/dev/null || true
-      systemctl daemon-reload >/dev/null 2>&1 || true
-    fi
-    [[ -n "$agent" ]] && remote_delete "/orgs/$OWNER/actions/runners" "$agent"
-    rm -rf "$d"
-  done < <(legacy_org_dirs)
-}
-
-legacy_repos(){
-  local roots=("$RUNNER_BASE"); [[ "$PROFILE" != default ]] && roots=("$RUNNER_BASE/profiles/$(san "$PROFILE")" "$RUNNER_BASE")
-  local r d repo url
-  for r in "${roots[@]}"; do
-    [[ -d "$r" ]] || continue
-    for d in "$r"/*; do
-      [[ -d "$d" ]] || continue; case "$(basename "$d")" in docker|profiles|organization) continue;; esac
-      [[ -f "$d/.runner" || -f "$d/.chrisscriptbase-runner" ]] || continue
-      repo="$(awk -F= '$1=="repo"{sub(/^repo=/,"");print;exit}' "$d/.chrisscriptbase-runner" 2>/dev/null || true)"
-      if [[ -z "$repo" ]]; then url="$(jq -r '.gitHubUrl//empty' "$d/.runner" 2>/dev/null || true)"; repo="${url%/}"; repo="${repo##*/}"; fi
-      [[ -n "$repo" ]] && echo "$repo"
+    while true; do
+        response="$(api GET "$endpoint?per_page=100&page=$page")" || return 1
+        id="$(jq -r --arg name "$runner_name" '.runners[]? | select(.name==$name) | .id' <<< "$response" | head -1)"
+        if [[ -n "$id" ]]; then
+            echo "$id"
+            return 0
+        fi
+        page_size="$(jq '.runners | length' <<< "$response")"
+        if (( page_size < 100 )); then
+            return 1
+        fi
+        ((page += 1))
     done
-  done | awk 'NF&&!s[tolower($0)]++'
-}
-local_repos(){
-  local d m repo p="$(root)/repositories"
-  { if [[ -d "$p" ]]; then for d in "$p"/*; do [[ -f "$d/metadata" ]] || continue; repo="$(meta_get "$d/metadata" repo)"; [[ -n "$repo" ]] && echo "$repo"; done; fi
-    legacy_repos
-  } | awk 'NF&&!s[tolower($0)]++'
 }
 
-run_container(){
-  local d="$1" scope="$2" repo="$3" rn="$4" cn="$5" w="$d/work" t="$d/github_token"; shift 5 || true
-  write_state "$d" "$repo" "$rn" "$cn"
-  docker inspect "$cn" >/dev/null 2>&1 && docker rm -f "$cn" >/dev/null || true
-  local a=(run -d --name "$cn" --restart unless-stopped
-    --label com.chrisscriptbase.github-runner=true --label "com.chrisscriptbase.profile=$PROFILE"
-    -e "RUNNER_SCOPE=$scope" -e "GITHUB_OWNER=$OWNER" -e "GITHUB_REPOSITORY=$repo"
-    -e "RUNNER_NAME=$rn" -e "RUNNER_LABELS=$LABELS" -e "RUNNER_WORKDIR=$w" -e "GITHUB_API_VERSION=$API_VERSION"
-    --mount "type=bind,src=$t,dst=/run/secrets/github_token,readonly"
-    --mount "type=bind,src=$w,dst=$w")
-  if [[ "$SOCKET" == true ]]; then
-    [[ -S /var/run/docker.sock ]] || die "Brak /var/run/docker.sock"
-    a+=(--mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock)
-  fi
-  a+=("$IMAGE"); docker "${a[@]}" >/dev/null
-  sleep 2; [[ "$(docker inspect -f '{{.State.Running}}' "$cn" 2>/dev/null || true)" == true ]] || { docker logs "$cn" | tail -100 >&2; return 1; }
-}
-
-install_repo(){
-  local r="$1" d="$(repo_state "$1")" rn="$(repo_runner "$1")" cn="$(repo_container "$1")"
-  legacy_cleanup "$r"
-  if docker inspect "$cn" >/dev/null 2>&1 && [[ "$(docker inspect -f '{{.State.Running}}' "$cn")" == true ]]; then echo "Już działa: $cn"; return 3; fi
-  log "Instalacja Docker runnera $OWNER/$r"; run_container "$d" repo "$r" "$rn" "$cn"
-}
-remove_repo(){
-  local r="$1" d="$(repo_state "$1")" m rn="$(repo_runner "$1")" cn="$(repo_container "$1")"
-  legacy_cleanup "$r"; m="$d/metadata"
-  [[ -f "$m" ]] && { rn="$(meta_get "$m" runner_name)"; cn="$(meta_get "$m" container_name)"; }
-  docker inspect "$cn" >/dev/null 2>&1 && { docker stop -t 30 "$cn" >/dev/null 2>&1 || true; docker rm -f "$cn" >/dev/null 2>&1 || true; }
-  remote_delete "/repos/$OWNER/$r/actions/runners" "$rn"; rm -rf "$d"
-}
-install_org(){
-  local d="$(org_state)" rn="$(org_runner)" cn="$(org_container)"
-  legacy_org_cleanup
-  docker inspect "$cn" >/dev/null 2>&1 && [[ "$(docker inspect -f '{{.State.Running}}' "$cn")" == true ]] && { echo "Już działa: $cn"; return 3; }
-  log "Instalacja Docker organization runnera $OWNER"; run_container "$d" org "" "$rn" "$cn"
-}
-remove_org(){
-  local d="$(org_state)" m="$d/metadata" rn="$(org_runner)" cn="$(org_container)"
-  legacy_org_cleanup
-  [[ -f "$m" ]] && { rn="$(meta_get "$m" runner_name)"; cn="$(meta_get "$m" container_name)"; }
-  docker inspect "$cn" >/dev/null 2>&1 && { docker stop -t 30 "$cn" >/dev/null 2>&1 || true; docker rm -f "$cn" >/dev/null 2>&1 || true; }
-  remote_delete "/orgs/$OWNER/actions/runners" "$rn"; rm -rf "$d"
-}
-
-norm(){ local x="$1"; [[ "$x" == *:* ]] && x="${x#*:}"; [[ "$x" == */* ]] && x="${x##*/}"; echo "$x"; }
-for_profile(){ [[ "$1" != *:* || "${1%%:*}" == "$PROFILE" ]]; }
-explicit(){
-  local -a avail=("$@"); local s n a
-  for s in "${REPOS[@]}"; do for_profile "$s" || continue; n="$(norm "$s")"; for a in "${avail[@]}"; do [[ "${a,,}" == "${n,,}" ]] && { echo "$a"; break; }; done; done | awk 'NF&&!s[tolower($0)]++'
-}
-interactive(){
-  local -a a=("$@") items=(); local x out rc=0
-  [[ -t 0 && -t 1 ]] || die "--select-repos wymaga TTY"
-  if [[ "$UI" == gui && -n "${DISPLAY:-}" ]] && command -v zenity >/dev/null; then
-    for x in "${a[@]}"; do items+=(FALSE "$x"); done
-    sudo -u "$CALLER" env DISPLAY="$DISPLAY" XAUTHORITY="${XAUTHORITY:-$CALLER_HOME/.Xauthority}" \
-      zenity --list --checklist --title="GitHub Docker Runners" --column="Wybierz" --column="Repo" --separator=$'\n' "${items[@]}" || true
-    return
-  fi
-  command -v dialog >/dev/null || command -v whiptail >/dev/null || { apt-get update; apt-get install -y dialog; }
-  for x in "${a[@]}"; do items+=("$x" "" off); done
-  if command -v dialog >/dev/null; then out="$(dialog --stdout --separate-output --checklist "Repozytoria" 24 100 16 "${items[@]}")" || rc=$?; clear || true
-  else out="$(whiptail --checklist "Repozytoria" 24 100 16 "${items[@]}" 3>&1 1>&2 2>&3)" || rc=$?; out="$(sed 's/" "/\n/g;s/^"//;s/"$//' <<<"$out")"; fi
-  ((rc==0)) && printf '%s\n' "$out"
-}
-resolve(){
-  local -a a=() c=()
-  [[ "$LIST_REPOS" == true ]] && { remote_repos; return; }
-  [[ "$ACTION" == uninstall ]] && mapfile -t a < <(local_repos) || mapfile -t a < <(remote_repos)
-  case "$SELECT_MODE" in
-    all) c=("${a[@]}");;
-    explicit)
-      mapfile -t c < <(explicit "${a[@]}")
-      if [[ "$ACTION" == uninstall && ${#c[@]} -eq 0 ]]; then local x; for x in "${REPOS[@]}"; do for_profile "$x" && c+=("$(norm "$x")"); done; fi;;
-    interactive) mapfile -t c < <(interactive "${a[@]}");;
-  esac
-  printf '%s\n' "${c[@]}"
-}
-
-process(){
-  if [[ "$MODE" == org ]]; then
-    [[ "$LIST_REPOS" == true ]] && { warn "org: --list-repos pominięte"; return; }
-    if [[ "$ACTION" == install ]]; then install_org; else remove_org; fi
-    return
-  fi
-  local -a rr=(); mapfile -t rr < <(resolve); [[ "$LIST_REPOS" == true ]] && { printf '%s\n' "${rr[@]}"; return; }
-  ((${#rr[@]})) || { warn "$PROFILE: brak repo"; return; }
-  local r rc ok=0 skip=0 fail=0
-  for r in "${rr[@]}"; do
-    if [[ "$ACTION" == install ]]; then
-      if install_repo "$r"; then ((ok += 1)); else rc=$?; if ((rc==3)); then ((skip += 1)); else ((fail += 1)); fi; fi
-    else
-      if remove_repo "$r"; then ((ok += 1)); else ((fail += 1)); fi
+remote_delete() {
+    local endpoint="$1"
+    local runner_name="$2"
+    local id=""
+    id="$(runner_id "$endpoint" "$runner_name" 2>/dev/null)" || return 0
+    if [[ -n "$id" ]]; then
+        api DELETE "$endpoint/$id" >/dev/null || true
     fi
-  done
-  echo "$PROFILE: sukces=$ok pominięte=$skip błędy=$fail"; ((fail==0))
 }
 
-main(){
-  args "$@"; caller_init
-  [[ "$LIST_PROFILES" == true ]] && { profiles; exit; }
-  [[ $EUID -eq 0 ]] || die "Uruchom przez sudo/root"
-  deps
-  [[ "$LIST_REPOS" == true ]] || docker_ready
-  ((${#PROFILES[@]})) || PROFILES=(default)
-  [[ "$ACTION" == install && "$LIST_REPOS" == false ]] && build_image
-  local p failed=0
-  for p in "${PROFILES[@]}"; do load_profile "$p"; auth; process || ((failed += 1)); done
-  [[ "$LIST_REPOS" == true ]] && exit "$failed"
-  if [[ "$PURGE" == true ]]; then
-    if ! docker ps -a --filter label=com.chrisscriptbase.github-runner=true --format '{{.ID}}' | grep -q .; then rm -rf "$STATE_BASE"; docker image rm "$IMAGE" >/dev/null 2>&1 || true; fi
-  fi
-  docker ps -a --filter label=com.chrisscriptbase.github-runner=true --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
-  exit "$failed"
+legacy_dirs() {
+    local repo_name="$1"
+    local default_dir=""
+    local profile_dir=""
+    default_dir="$RUNNER_BASE/$(san "$repo_name")"
+    profile_dir="$RUNNER_BASE/profiles/$(san "$PROFILE")/$(san "$repo_name")"
+
+    if [[ "$PROFILE" != "default" && -d "$profile_dir" ]]; then
+        echo "$profile_dir"
+    fi
+    if [[ -d "$default_dir" ]]; then
+        echo "$default_dir"
+    fi
 }
+
+cleanup_legacy_dir() {
+    local legacy_dir="$1"
+    local endpoint="$2"
+    local service_unit=""
+    local agent_name=""
+
+    [[ -d "$legacy_dir" ]] || return 0
+    if [[ ! -f "$legacy_dir/.runner" && ! -f "$legacy_dir/.service" && ! -f "$legacy_dir/.chrisscriptbase-runner" ]]; then
+        return 0
+    fi
+
+    log "Migracja systemd -> Docker: $legacy_dir"
+    agent_name="$(jq -r '.agentName // .name // empty' "$legacy_dir/.runner" 2>/dev/null || true)"
+
+    if [[ -x "$legacy_dir/svc.sh" ]]; then
+        (
+            cd "$legacy_dir"
+            ./svc.sh stop >/dev/null 2>&1 || true
+            ./svc.sh uninstall >/dev/null 2>&1 || true
+        )
+    fi
+
+    service_unit="$(head -1 "$legacy_dir/.service" 2>/dev/null | tr -d '\r' || true)"
+    if [[ "$service_unit" == actions.runner.*.service ]] && command -v systemctl >/dev/null 2>&1; then
+        systemctl stop "$service_unit" >/dev/null 2>&1 || true
+        systemctl disable "$service_unit" >/dev/null 2>&1 || true
+        rm -f "/etc/systemd/system/$service_unit"
+        find /etc/systemd/system -type l -name "$service_unit" -delete 2>/dev/null || true
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+
+    if [[ -n "$agent_name" ]]; then
+        remote_delete "$endpoint" "$agent_name"
+    fi
+    rm -rf "$legacy_dir"
+}
+
+legacy_cleanup() {
+    local repo_name="$1"
+    local legacy_dir=""
+    while IFS= read -r legacy_dir; do
+        [[ -n "$legacy_dir" ]] || continue
+        cleanup_legacy_dir "$legacy_dir" "/repos/$OWNER/$repo_name/actions/runners"
+    done < <(legacy_dirs "$repo_name")
+}
+
+legacy_org_dirs() {
+    local default_dir=""
+    local profile_dir=""
+    default_dir="$RUNNER_BASE/organization"
+    profile_dir="$RUNNER_BASE/profiles/$(san "$PROFILE")/organization"
+
+    if [[ "$PROFILE" != "default" && -d "$profile_dir" ]]; then
+        echo "$profile_dir"
+    fi
+    if [[ -d "$default_dir" ]]; then
+        echo "$default_dir"
+    fi
+}
+
+legacy_org_cleanup() {
+    local legacy_dir=""
+    while IFS= read -r legacy_dir; do
+        [[ -n "$legacy_dir" ]] || continue
+        cleanup_legacy_dir "$legacy_dir" "/orgs/$OWNER/actions/runners"
+    done < <(legacy_org_dirs)
+}
+
+legacy_repos() {
+    local root_dir=""
+    local runner_dir=""
+    local repo_name=""
+    local runner_url=""
+    local -a roots=("$RUNNER_BASE")
+
+    if [[ "$PROFILE" != "default" ]]; then
+        roots=("$RUNNER_BASE/profiles/$(san "$PROFILE")" "$RUNNER_BASE")
+    fi
+
+    for root_dir in "${roots[@]}"; do
+        [[ -d "$root_dir" ]] || continue
+        for runner_dir in "$root_dir"/*; do
+            [[ -d "$runner_dir" ]] || continue
+            case "$(basename "$runner_dir")" in
+                docker|profiles|organization) continue ;;
+            esac
+            if [[ ! -f "$runner_dir/.runner" && ! -f "$runner_dir/.chrisscriptbase-runner" ]]; then
+                continue
+            fi
+            repo_name="$(awk -F= '$1=="repo" {sub(/^repo=/, ""); print; exit}' "$runner_dir/.chrisscriptbase-runner" 2>/dev/null || true)"
+            if [[ -z "$repo_name" ]]; then
+                runner_url="$(jq -r '.gitHubUrl // empty' "$runner_dir/.runner" 2>/dev/null || true)"
+                runner_url="${runner_url%/}"
+                repo_name="${runner_url##*/}"
+            fi
+            if [[ -n "$repo_name" ]]; then
+                echo "$repo_name"
+            fi
+        done
+    done
+}
+
+local_repos() {
+    local repositories_root=""
+    local state_dir=""
+    local repo_name=""
+    repositories_root="$(profile_root)/repositories"
+
+    if [[ -d "$repositories_root" ]]; then
+        for state_dir in "$repositories_root"/*; do
+            [[ -f "$state_dir/metadata" ]] || continue
+            repo_name="$(meta_get "$state_dir/metadata" repo)"
+            if [[ -n "$repo_name" ]]; then
+                echo "$repo_name"
+            fi
+        done
+    fi
+    legacy_repos
+}
+
+run_container() {
+    local state_dir="$1"
+    local scope="$2"
+    local repo_name="$3"
+    local runner_name="$4"
+    local container_name="$5"
+    local work_dir=""
+    local token_file=""
+    local -a docker_args=()
+
+    work_dir="$state_dir/work"
+    token_file="$state_dir/github_token"
+    write_state "$state_dir" "$repo_name" "$runner_name" "$container_name"
+
+    if docker inspect "$container_name" >/dev/null 2>&1; then
+        docker rm -f "$container_name" >/dev/null
+    fi
+
+    docker_args=(
+        run -d
+        --name "$container_name"
+        --restart unless-stopped
+        --label com.chrisscriptbase.github-runner=true
+        --label "com.chrisscriptbase.profile=$PROFILE"
+        -e "RUNNER_SCOPE=$scope"
+        -e "GITHUB_OWNER=$OWNER"
+        -e "GITHUB_REPOSITORY=$repo_name"
+        -e "RUNNER_NAME=$runner_name"
+        -e "RUNNER_LABELS=$LABELS"
+        -e "RUNNER_WORKDIR=$work_dir"
+        -e "GITHUB_API_VERSION=$API_VERSION"
+        --mount "type=bind,src=$token_file,dst=/run/secrets/github_token,readonly"
+        --mount "type=bind,src=$work_dir,dst=$work_dir"
+    )
+
+    if [[ "$SOCKET" == true ]]; then
+        [[ -S /var/run/docker.sock ]] || die "Brak /var/run/docker.sock"
+        docker_args+=(--mount "type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock")
+    fi
+
+    docker_args+=("$IMAGE")
+    docker "${docker_args[@]}" >/dev/null
+    sleep 2
+
+    if [[ "$(docker inspect -f '{{.State.Running}}' "$container_name" 2>/dev/null || true)" != "true" ]]; then
+        docker logs "$container_name" | tail -100 >&2 || true
+        return 1
+    fi
+}
+
+install_repo() {
+    local repo_name="$1"
+    local state_dir=""
+    local runner_name=""
+    local container_name=""
+    state_dir="$(repo_state "$repo_name")"
+    runner_name="$(repo_runner "$repo_name")"
+    container_name="$(repo_container "$repo_name")"
+
+    legacy_cleanup "$repo_name"
+    if docker inspect "$container_name" >/dev/null 2>&1; then
+        if [[ "$(docker inspect -f '{{.State.Running}}' "$container_name")" == "true" ]]; then
+            echo "Już działa: $container_name"
+            return 3
+        fi
+    fi
+
+    log "Instalacja Docker runnera $OWNER/$repo_name"
+    run_container "$state_dir" "repo" "$repo_name" "$runner_name" "$container_name"
+}
+
+remove_repo() {
+    local repo_name="$1"
+    local state_dir=""
+    local metadata_file=""
+    local runner_name=""
+    local container_name=""
+    state_dir="$(repo_state "$repo_name")"
+    metadata_file="$state_dir/metadata"
+    runner_name="$(repo_runner "$repo_name")"
+    container_name="$(repo_container "$repo_name")"
+
+    legacy_cleanup "$repo_name"
+    if [[ -f "$metadata_file" ]]; then
+        runner_name="$(meta_get "$metadata_file" runner_name)"
+        container_name="$(meta_get "$metadata_file" container_name)"
+    fi
+
+    if docker inspect "$container_name" >/dev/null 2>&1; then
+        docker stop -t 30 "$container_name" >/dev/null 2>&1 || true
+        docker rm -f "$container_name" >/dev/null 2>&1 || true
+    fi
+    remote_delete "/repos/$OWNER/$repo_name/actions/runners" "$runner_name"
+    rm -rf "$state_dir"
+}
+
+install_org() {
+    local state_dir=""
+    local runner_name=""
+    local container_name=""
+    state_dir="$(org_state)"
+    runner_name="$(org_runner)"
+    container_name="$(org_container)"
+
+    legacy_org_cleanup
+    if docker inspect "$container_name" >/dev/null 2>&1; then
+        if [[ "$(docker inspect -f '{{.State.Running}}' "$container_name")" == "true" ]]; then
+            echo "Już działa: $container_name"
+            return 3
+        fi
+    fi
+
+    log "Instalacja Docker organization runnera $OWNER"
+    run_container "$state_dir" "org" "" "$runner_name" "$container_name"
+}
+
+remove_org() {
+    local state_dir=""
+    local metadata_file=""
+    local runner_name=""
+    local container_name=""
+    state_dir="$(org_state)"
+    metadata_file="$state_dir/metadata"
+    runner_name="$(org_runner)"
+    container_name="$(org_container)"
+
+    legacy_org_cleanup
+    if [[ -f "$metadata_file" ]]; then
+        runner_name="$(meta_get "$metadata_file" runner_name)"
+        container_name="$(meta_get "$metadata_file" container_name)"
+    fi
+
+    if docker inspect "$container_name" >/dev/null 2>&1; then
+        docker stop -t 30 "$container_name" >/dev/null 2>&1 || true
+        docker rm -f "$container_name" >/dev/null 2>&1 || true
+    fi
+    remote_delete "/orgs/$OWNER/actions/runners" "$runner_name"
+    rm -rf "$state_dir"
+}
+
+normalize_repo() {
+    local value="$1"
+    if [[ "$value" == *:* ]]; then
+        value="${value#*:}"
+    fi
+    if [[ "$value" == */* ]]; then
+        value="${value##*/}"
+    fi
+    echo "$value"
+}
+
+repo_for_profile() {
+    local value="$1"
+    if [[ "$value" != *:* ]]; then
+        return 0
+    fi
+    [[ "${value%%:*}" == "$PROFILE" ]]
+}
+
+explicit_repos() {
+    local spec=""
+    local requested=""
+    local candidate=""
+    local -a available=("$@")
+
+    for spec in "${REPOS[@]}"; do
+        repo_for_profile "$spec" || continue
+        requested="$(normalize_repo "$spec")"
+        for candidate in "${available[@]}"; do
+            if [[ "${candidate,,}" == "${requested,,}" ]]; then
+                echo "$candidate"
+                break
+            fi
+        done
+    done
+}
+
+terminal_select() {
+    local repo_name=""
+    local output=""
+    local rc=0
+    local -a available=("$@")
+    local -a items=()
+
+    [[ -t 0 && -t 1 ]] || die "--select-repos wymaga interaktywnego TTY"
+    if ! command -v dialog >/dev/null 2>&1 && ! command -v whiptail >/dev/null 2>&1; then
+        apt-get update
+        apt-get install -y dialog
+    fi
+
+    for repo_name in "${available[@]}"; do
+        items+=("$repo_name" "" off)
+    done
+
+    if command -v dialog >/dev/null 2>&1; then
+        output="$(dialog --stdout --separate-output --checklist "Repozytoria" 24 100 16 "${items[@]}")" || rc=$?
+        clear || true
+    else
+        output="$(whiptail --checklist "Repozytoria" 24 100 16 "${items[@]}" 3>&1 1>&2 2>&3)" || rc=$?
+        output="$(sed 's/" "/\n/g; s/^"//; s/"$//' <<< "$output")"
+    fi
+
+    if (( rc == 0 )) && [[ -n "$output" ]]; then
+        printf '%s\n' "$output"
+    fi
+}
+
+zenity_select() {
+    local repo_name=""
+    local -a available=("$@")
+    local -a rows=()
+
+    [[ -n "${DISPLAY:-}" || -n "${WAYLAND_DISPLAY:-}" ]] || die "Zenity wymaga X11/Wayland"
+    command -v zenity >/dev/null 2>&1 || die "Brak zenity"
+    for repo_name in "${available[@]}"; do
+        rows+=(FALSE "$repo_name")
+    done
+    sudo -u "$CALLER" env \
+        HOME="$CALLER_HOME" \
+        DISPLAY="${DISPLAY:-}" \
+        WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" \
+        XAUTHORITY="${XAUTHORITY:-$CALLER_HOME/.Xauthority}" \
+        zenity --list --checklist \
+        --title="GitHub Docker Runners" \
+        --column="Wybierz" --column="Repo" \
+        --separator=$'\n' "${rows[@]}" || true
+}
+
+interactive_repos() {
+    local -a available=("$@")
+    case "$UI" in
+        zenity)
+            zenity_select "${available[@]}"
+            ;;
+        gui)
+            if [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]] && command -v zenity >/dev/null 2>&1; then
+                zenity_select "${available[@]}"
+            else
+                terminal_select "${available[@]}"
+            fi
+            ;;
+        tui|auto)
+            terminal_select "${available[@]}"
+            ;;
+        *)
+            die "Nieznany UI: $UI"
+            ;;
+    esac
+}
+
+resolve() {
+    local spec=""
+    local -a available=()
+    local -a chosen=()
+
+    if [[ "$LIST_REPOS" == true ]]; then
+        remote_repos
+        return 0
+    fi
+
+    if [[ "$ACTION" == "uninstall" ]]; then
+        mapfile -t available < <(local_repos)
+    else
+        mapfile -t available < <(remote_repos)
+    fi
+
+    case "$SELECT_MODE" in
+        all)
+            chosen=("${available[@]}")
+            ;;
+        explicit)
+            mapfile -t chosen < <(explicit_repos "${available[@]}")
+            if [[ "$ACTION" == "uninstall" && ${#chosen[@]} -eq 0 ]]; then
+                for spec in "${REPOS[@]}"; do
+                    if repo_for_profile "$spec"; then
+                        chosen+=("$(normalize_repo "$spec")")
+                    fi
+                done
+            fi
+            ;;
+        interactive)
+            mapfile -t chosen < <(interactive_repos "${available[@]}")
+            ;;
+        *)
+            die "Nieznany tryb wyboru repo: $SELECT_MODE"
+            ;;
+    esac
+
+    printf '%s\n' "${chosen[@]}"
+}
+
+process() {
+    local repo_name=""
+    local rc=0
+    local success=0
+    local skipped=0
+    local failed=0
+    local -a repositories=()
+
+    if [[ "$MODE" == "org" ]]; then
+        if [[ "$LIST_REPOS" == true ]]; then
+            warn "MODE=org: --list-repos pominięte"
+            return 0
+        fi
+        if [[ "$ACTION" == "install" ]]; then
+            install_org
+        else
+            remove_org
+        fi
+        return $?
+    fi
+
+    mapfile -t repositories < <(resolve)
+    if [[ "$LIST_REPOS" == true ]]; then
+        printf '%s\n' "${repositories[@]}"
+        return 0
+    fi
+    if (( ${#repositories[@]} == 0 )); then
+        warn "$PROFILE: brak repozytoriów"
+        return 0
+    fi
+
+    for repo_name in "${repositories[@]}"; do
+        if [[ "$ACTION" == "install" ]]; then
+            if install_repo "$repo_name"; then
+                ((success += 1))
+            else
+                rc=$?
+                if (( rc == 3 )); then
+                    ((skipped += 1))
+                else
+                    ((failed += 1))
+                fi
+            fi
+        else
+            if remove_repo "$repo_name"; then
+                ((success += 1))
+            else
+                ((failed += 1))
+            fi
+        fi
+    done
+
+    echo "$PROFILE: sukces=$success pominięte=$skipped błędy=$failed"
+    (( failed == 0 ))
+}
+
+purge_if_empty() {
+    [[ "$PURGE" == true ]] || return 0
+    if docker ps -a --filter label=com.chrisscriptbase.github-runner=true --format '{{.ID}}' | grep -q .; then
+        warn "--purge: istnieją jeszcze kontenery runnerów"
+        return 0
+    fi
+    rm -rf "$STATE_BASE"
+    docker image rm "$IMAGE" >/dev/null 2>&1 || true
+}
+
+main() {
+    local profile_name=""
+    local failed_profiles=0
+
+    args "$@"
+    caller_init
+
+    if [[ "$LIST_PROFILES" == true ]]; then
+        profiles | awk 'NF && !seen[$0]++'
+        return 0
+    fi
+
+    [[ $EUID -eq 0 ]] || die "Uruchom przez sudo/root"
+    ensure_dependencies
+
+    if [[ "$LIST_REPOS" == false ]]; then
+        docker_ready
+    fi
+
+    if (( ${#PROFILES[@]} == 0 )); then
+        PROFILES=(default)
+    fi
+
+    if [[ "$ACTION" == "install" && "$LIST_REPOS" == false ]]; then
+        build_image
+    fi
+
+    for profile_name in "${PROFILES[@]}"; do
+        load_profile "$profile_name"
+        auth
+        if ! process; then
+            ((failed_profiles += 1))
+        fi
+    done
+
+    if [[ "$LIST_REPOS" == true ]]; then
+        return "$failed_profiles"
+    fi
+
+    purge_if_empty
+    docker ps -a --filter label=com.chrisscriptbase.github-runner=true \
+        --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
+    return "$failed_profiles"
+}
+
 main "$@"
