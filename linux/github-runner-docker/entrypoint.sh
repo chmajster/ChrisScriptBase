@@ -3,6 +3,11 @@ set -Eeuo pipefail
 
 cd /actions-runner
 
+[[ "$(id -u)" -eq 0 ]] || {
+    echo "ERROR: entrypoint must start as root so the token secret can remain root-only." >&2
+    exit 1
+}
+
 TOKEN_FILE="${GITHUB_TOKEN_FILE:-/run/secrets/github_token}"
 API_VERSION="${GITHUB_API_VERSION:-2022-11-28}"
 RUNNER_SCOPE="${RUNNER_SCOPE:-repo}"
@@ -24,6 +29,20 @@ GITHUB_PAT="$(cat "$TOKEN_FILE")"
     echo "ERROR: GitHub token file is empty." >&2
     exit 1
 }
+
+if [[ -S /var/run/docker.sock ]]; then
+    docker_gid="$(stat -c '%g' /var/run/docker.sock)"
+    docker_group="$(getent group "$docker_gid" | cut -d: -f1 || true)"
+    if [[ -z "$docker_group" ]]; then
+        docker_group="docker-host"
+        groupadd --gid "$docker_gid" "$docker_group"
+    fi
+    usermod -aG "$docker_group" runner
+fi
+
+chown -R runner:runner /actions-runner
+mkdir -p "$RUNNER_WORKDIR"
+chown -R runner:runner "$RUNNER_WORKDIR"
 
 case "$RUNNER_SCOPE" in
     repo)
@@ -64,7 +83,7 @@ remove_registration() {
         return 0
     }
     [[ -n "$remove_token" ]] || return 0
-    ./config.sh remove --unattended --token "$remove_token" || true
+    sudo -u runner -H ./config.sh remove --unattended --token "$remove_token" || true
 }
 
 child_pid=""
@@ -90,7 +109,7 @@ registration_token="$(github_api POST "$REG_ENDPOINT" | jq -r '.token // empty')
     exit 1
 }
 
-./config.sh --unattended \
+sudo -u runner -H ./config.sh --unattended \
     --url "$RUNNER_URL" \
     --token "$registration_token" \
     --name "$RUNNER_NAME" \
@@ -101,7 +120,7 @@ registration_token="$(github_api POST "$REG_ENDPOINT" | jq -r '.token // empty')
 
 unset registration_token
 
-./run.sh &
+sudo -u runner -H ./run.sh &
 child_pid="$!"
 set +e
 wait "$child_pid"
