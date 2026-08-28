@@ -180,7 +180,7 @@ docker_ready(){
 }
 build_image(){
   [[ -f "$CONTEXT/Dockerfile" && -f "$CONTEXT/entrypoint.sh" ]] || die "Brak plików obrazu w $CONTEXT"
-  [[ "$REBUILD" == true ]] || docker image inspect "$IMAGE" >/dev/null 2>&1 && return 0
+  if [[ "$REBUILD" == false ]] && docker image inspect "$IMAGE" >/dev/null 2>&1; then return 0; fi
   docker build --pull -t "$IMAGE" "$CONTEXT"
 }
 
@@ -338,13 +338,20 @@ resolve(){
 }
 
 process(){
-  if [[ "$MODE" == org ]]; then [[ "$LIST_REPOS" == true ]] && { warn "org: --list-repos pominięte"; return; }; [[ "$ACTION" == install ]] && install_org || remove_org; return; fi
+  if [[ "$MODE" == org ]]; then
+    [[ "$LIST_REPOS" == true ]] && { warn "org: --list-repos pominięte"; return; }
+    if [[ "$ACTION" == install ]]; then install_org; else remove_org; fi
+    return
+  fi
   local -a rr=(); mapfile -t rr < <(resolve); [[ "$LIST_REPOS" == true ]] && { printf '%s\n' "${rr[@]}"; return; }
   ((${#rr[@]})) || { warn "$PROFILE: brak repo"; return; }
   local r rc ok=0 skip=0 fail=0
   for r in "${rr[@]}"; do
-    if [[ "$ACTION" == install ]]; then install_repo "$r" && ((ok++)) || { rc=$?; ((rc==3)) && ((skip++)) || ((fail++)); }
-    else remove_repo "$r" && ((ok++)) || ((fail++)); fi
+    if [[ "$ACTION" == install ]]; then
+      if install_repo "$r"; then ((ok += 1)); else rc=$?; if ((rc==3)); then ((skip += 1)); else ((fail += 1)); fi; fi
+    else
+      if remove_repo "$r"; then ((ok += 1)); else ((fail += 1)); fi
+    fi
   done
   echo "$PROFILE: sukces=$ok pominięte=$skip błędy=$fail"; ((fail==0))
 }
@@ -358,7 +365,7 @@ main(){
   ((${#PROFILES[@]})) || PROFILES=(default)
   [[ "$ACTION" == install && "$LIST_REPOS" == false ]] && build_image
   local p failed=0
-  for p in "${PROFILES[@]}"; do load_profile "$p"; auth; process || ((failed++)); done
+  for p in "${PROFILES[@]}"; do load_profile "$p"; auth; process || ((failed += 1)); done
   [[ "$LIST_REPOS" == true ]] && exit "$failed"
   if [[ "$PURGE" == true ]]; then
     if ! docker ps -a --filter label=com.chrisscriptbase.github-runner=true --format '{{.ID}}' | grep -q .; then rm -rf "$STATE_BASE"; docker image rm "$IMAGE" >/dev/null 2>&1 || true; fi
