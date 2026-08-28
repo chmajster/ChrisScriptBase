@@ -1,10 +1,9 @@
-name: Test self-hosted runner help
+name: Test self-hosted runner
 
 on:
   pull_request:
     paths:
       - 'linux/install-github-selfhosted-runners.sh'
-      - 'linux/github-runner-docker/**'
       - 'linux/tests/test-install-github-selfhosted-runners.sh'
       - '.github/workflows/test-selfhosted-runner-help.yml'
   workflow_dispatch:
@@ -14,12 +13,36 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: ShellCheck
+
+      - name: ShellCheck single-file manager
         run: |
           shellcheck --version
-          shellcheck \
-            linux/install-github-selfhosted-runners.sh \
-            linux/github-runner-docker/manager.sh \
-            linux/github-runner-docker/entrypoint.sh
-      - name: Run Docker runner regression tests
+          # SC2155: intentional compact local declarations in the single-file manager.
+          # SC2015: guarded best-effort reads where failure intentionally falls back to true.
+          shellcheck -e SC2155,SC2015 linux/install-github-selfhosted-runners.sh
+          # SC2016 is intentional in tests: bash -c snippets expand variables in the child shell.
+          shellcheck -e SC2016 linux/tests/test-install-github-selfhosted-runners.sh
+
+      - name: Run single-file regression tests
         run: bash linux/tests/test-install-github-selfhosted-runners.sh
+
+      - name: Validate generated container entrypoint
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source linux/install-github-selfhosted-runners.sh
+          context="$(mktemp -d)"
+          trap 'rm -rf "$context"' EXIT
+          render_docker_context "$context"
+          bash -n "$context/runner-entrypoint.sh"
+          shellcheck "$context/runner-entrypoint.sh"
+
+      - name: Build embedded Docker image
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source linux/install-github-selfhosted-runners.sh
+          context="$(mktemp -d)"
+          trap 'rm -rf "$context"' EXIT
+          render_docker_context "$context"
+          docker build -t chrisscriptbase/github-actions-runner:ci "$context"
