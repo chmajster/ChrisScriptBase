@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'linux/install-github-selfhosted-runners.sh'
+      - 'linux/github-runner-docker/**'
       - 'linux/tests/test-install-github-selfhosted-runners.sh'
       - '.github/workflows/test-selfhosted-runner-help.yml'
   workflow_dispatch:
@@ -16,6 +17,9 @@ jobs:
       - name: ShellCheck
         run: |
           shellcheck --version
-          shellcheck linux/install-github-selfhosted-runners.sh
-      - name: Run CLI and help regression tests
+          shellcheck \
+            linux/install-github-selfhosted-runners.sh \
+            linux/github-runner-docker/manager.sh \
+            linux/github-runner-docker/entrypoint.sh
+      - name: Run Docker runner regression tests
         run: bash linux/tests/test-install-github-selfhosted-runners.sh
