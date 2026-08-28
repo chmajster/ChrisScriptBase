@@ -188,7 +188,7 @@ meta_get(){ awk -F= -v k="$2" '$1==k{sub(/^[^=]*=/,"");print;exit}' "$1"; }
 write_state(){
   local d="$1" repo="$2" rn="$3" cn="$4"
   mkdir -p "$d/work"; chown -R 1001:1001 "$d/work"
-  umask 077; printf '%s' "$TOKEN" >"$d/github_token"; chown 1001:1001 "$d/github_token"; chmod 600 "$d/github_token"
+  umask 077; printf '%s' "$TOKEN" >"$d/github_token"; chown root:root "$d/github_token"; chmod 600 "$d/github_token"
   cat >"$d/metadata" <<EOF
 profile=$PROFILE
 mode=$MODE
@@ -238,6 +238,29 @@ legacy_cleanup(){
     rm -rf "$d"
   done < <(legacy_dirs "$repo")
 }
+
+legacy_org_dirs(){
+  local a="$RUNNER_BASE/organization" b="$RUNNER_BASE/profiles/$(san "$PROFILE")/organization"
+  [[ "$PROFILE" != default && -d "$b" ]] && echo "$b"; [[ -d "$a" ]] && echo "$a"
+}
+legacy_org_cleanup(){
+  local d u agent
+  while read -r d; do
+    [[ -n "$d" && ( -f "$d/.runner" || -f "$d/.service" || -f "$d/.chrisscriptbase-runner" ) ]] || continue
+    log "Migracja organization systemd -> Docker: $d"
+    agent="$(jq -r '.agentName//.name//empty' "$d/.runner" 2>/dev/null || true)"
+    [[ -x "$d/svc.sh" ]] && (cd "$d"; ./svc.sh stop >/dev/null 2>&1 || true; ./svc.sh uninstall >/dev/null 2>&1 || true)
+    u="$(head -1 "$d/.service" 2>/dev/null | tr -d '\r' || true)"
+    if [[ "$u" == actions.runner.*.service ]] && command -v systemctl >/dev/null; then
+      systemctl stop "$u" >/dev/null 2>&1 || true; systemctl disable "$u" >/dev/null 2>&1 || true
+      rm -f "/etc/systemd/system/$u"; find /etc/systemd/system -type l -name "$u" -delete 2>/dev/null || true
+      systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+    [[ -n "$agent" ]] && remote_delete "/orgs/$OWNER/actions/runners" "$agent"
+    rm -rf "$d"
+  done < <(legacy_org_dirs)
+}
+
 legacy_repos(){
   local roots=("$RUNNER_BASE"); [[ "$PROFILE" != default ]] && roots=("$RUNNER_BASE/profiles/$(san "$PROFILE")" "$RUNNER_BASE")
   local r d repo url
@@ -271,7 +294,7 @@ run_container(){
     --mount "type=bind,src=$w,dst=$w")
   if [[ "$SOCKET" == true ]]; then
     [[ -S /var/run/docker.sock ]] || die "Brak /var/run/docker.sock"
-    a+=(--mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock --group-add "$(stat -c %g /var/run/docker.sock)")
+    a+=(--mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock)
   fi
   a+=("$IMAGE"); docker "${a[@]}" >/dev/null
   sleep 2; [[ "$(docker inspect -f '{{.State.Running}}' "$cn" 2>/dev/null || true)" == true ]] || { docker logs "$cn" | tail -100 >&2; return 1; }
@@ -292,11 +315,13 @@ remove_repo(){
 }
 install_org(){
   local d="$(org_state)" rn="$(org_runner)" cn="$(org_container)"
+  legacy_org_cleanup
   docker inspect "$cn" >/dev/null 2>&1 && [[ "$(docker inspect -f '{{.State.Running}}' "$cn")" == true ]] && { echo "Już działa: $cn"; return 3; }
   log "Instalacja Docker organization runnera $OWNER"; run_container "$d" org "" "$rn" "$cn"
 }
 remove_org(){
   local d="$(org_state)" m="$d/metadata" rn="$(org_runner)" cn="$(org_container)"
+  legacy_org_cleanup
   [[ -f "$m" ]] && { rn="$(meta_get "$m" runner_name)"; cn="$(meta_get "$m" container_name)"; }
   docker inspect "$cn" >/dev/null 2>&1 && { docker stop -t 30 "$cn" >/dev/null 2>&1 || true; docker rm -f "$cn" >/dev/null 2>&1 || true; }
   remote_delete "/orgs/$OWNER/actions/runners" "$rn"; rm -rf "$d"
