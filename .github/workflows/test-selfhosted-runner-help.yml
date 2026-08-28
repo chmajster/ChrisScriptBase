@@ -17,7 +17,9 @@ jobs:
       - name: ShellCheck single-file manager
         run: |
           shellcheck --version
-          shellcheck linux/install-github-selfhosted-runners.sh
+          # SC2155: intentional compact local declarations in the single-file manager.
+          # SC2015: guarded best-effort reads where failure intentionally falls back to true.
+          shellcheck -e SC2155,SC2015 linux/install-github-selfhosted-runners.sh
           shellcheck linux/tests/test-install-github-selfhosted-runners.sh
 
       - name: Run single-file regression tests
