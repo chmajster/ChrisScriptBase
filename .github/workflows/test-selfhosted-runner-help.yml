@@ -20,7 +20,8 @@ jobs:
           # SC2155: intentional compact local declarations in the single-file manager.
           # SC2015: guarded best-effort reads where failure intentionally falls back to true.
           shellcheck -e SC2155,SC2015 linux/install-github-selfhosted-runners.sh
-          shellcheck linux/tests/test-install-github-selfhosted-runners.sh
+          # SC2016 is intentional in tests: bash -c snippets expand variables in the child shell.
+          shellcheck -e SC2016 linux/tests/test-install-github-selfhosted-runners.sh
 
       - name: Run single-file regression tests
         run: bash linux/tests/test-install-github-selfhosted-runners.sh
