@@ -2,12 +2,18 @@
 set -Eeuo pipefail
 
 SCRIPT="${1:-linux/install-github-selfhosted-runners.sh}"
-[[ -f "$SCRIPT" ]] || { echo "Missing script: $SCRIPT" >&2; exit 1; }
+MANAGER="linux/github-runner-docker/manager.sh"
+ENTRYPOINT="linux/github-runner-docker/entrypoint.sh"
+DOCKERFILE="linux/github-runner-docker/Dockerfile"
+
+for file in "$SCRIPT" "$MANAGER" "$ENTRYPOINT" "$DOCKERFILE"; do
+    [[ -f "$file" ]] || { echo "Missing file: $file" >&2; exit 1; }
+done
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-LIB="$TMP/runner-manager-lib.sh"
-sed '/^main "\$@"$/d' "$SCRIPT" > "$LIB"
+LIB="$TMP/manager-lib.sh"
+sed '/^main "\$@"$/d' "$MANAGER" > "$LIB"
 
 pass=0
 fail=0
@@ -35,219 +41,205 @@ expect_failure() {
 }
 
 mkdir -p "$TMP/home"
-TOKEN="$(printf test-token | base64 | tr -d '\n')"
+TOKEN_B64="$(printf test-token | base64 | tr -d '\n')"
 cat > "$TMP/home/.gitconfig" <<EOF
 [github]
     mode = user
     username = chmajster
-    tokenBase64 = $TOKEN
+    tokenBase64 = $TOKEN_B64
     labels = homelab,linux
 [github "home"]
     mode = user
     username = chmajster
-    tokenBase64 = $TOKEN
-    labels = homelab,linux
+    tokenBase64 = $TOKEN_B64
+    labels = homelab,linux,docker
 [github "work"]
     mode = org
     organization = example-org
-    tokenBase64 = $TOKEN
+    tokenBase64 = $TOKEN_B64
 EOF
 
-expect_success "bash -n" bash -n "$SCRIPT"
-expect_success "--help" bash "$SCRIPT" --help
-expect_success "-h" bash "$SCRIPT" -h
+expect_success "bash -n wrapper" bash -n "$SCRIPT"
+expect_success "bash -n manager" bash -n "$MANAGER"
+expect_success "bash -n entrypoint" bash -n "$ENTRYPOINT"
 
-expect_failure "reject --all-repos + --select-repos" env LIB="$LIB" bash -c 'source "$LIB"; parse_args --all-repos --select-repos'
-expect_failure "reject --all-repos + --repo" env LIB="$LIB" bash -c 'source "$LIB"; parse_args --all-repos --repo Repo'
-expect_failure "reject --select-repos + --repo" env LIB="$LIB" bash -c 'source "$LIB"; parse_args --select-repos --repo Repo'
-expect_failure "reject --gui without --select-repos" env LIB="$LIB" bash -c 'source "$LIB"; parse_args --gui'
-expect_failure "reject --tui without --select-repos" env LIB="$LIB" bash -c 'source "$LIB"; parse_args --tui'
-expect_failure "reject --zenity without --select-repos" env LIB="$LIB" bash -c 'source "$LIB"; parse_args --zenity'
-expect_failure "reject --purge without --uninstall" env LIB="$LIB" bash -c 'source "$LIB"; parse_args --purge'
-expect_success "accept --uninstall --purge" env LIB="$LIB" bash -c 'source "$LIB"; parse_args --uninstall --purge'
-expect_success "accept repeated --repo" env LIB="$LIB" bash -c 'source "$LIB"; parse_args --repo A --repo B; [[ ${#SELECTED_REPOS[@]} -eq 2 ]]'
-expect_success "accept --repos CSV" env LIB="$LIB" bash -c 'source "$LIB"; parse_args --repos A,B; [[ ${#SELECTED_REPOS[@]} -eq 2 ]]'
-expect_success "accept --profiles CSV" env LIB="$LIB" bash -c 'source "$LIB"; parse_args --profiles home,work; [[ ${#SELECTED_PROFILES[@]} -eq 2 ]]'
-expect_success "accept -p alias" env LIB="$LIB" bash -c 'source "$LIB"; parse_args -p home; [[ ${SELECTED_PROFILES[0]} == home ]]'
-expect_success "accept -r alias" env LIB="$LIB" bash -c 'source "$LIB"; parse_args -r Repo; [[ ${SELECTED_REPOS[0]} == Repo ]]'
-expect_success "accept --select-repos --gui" env LIB="$LIB" bash -c 'source "$LIB"; parse_args --select-repos --gui; [[ $SELECTION_UI == gui ]]'
-expect_success "accept --select-repos -GUI" env LIB="$LIB" bash -c 'source "$LIB"; parse_args --select-repos -GUI; [[ $SELECTION_UI == gui ]]'
-expect_success "accept --select-repos --tui" env LIB="$LIB" bash -c 'source "$LIB"; parse_args --select-repos --tui; [[ $SELECTION_UI == tui ]]'
-expect_success "accept --select-repos --zenity" env LIB="$LIB" bash -c 'source "$LIB"; parse_args --select-repos --zenity; [[ $SELECTION_UI == zenity ]]'
-expect_success "purge_if_empty disabled returns 0" env LIB="$LIB" bash -c 'source "$LIB"; PURGE=false; purge_if_empty'
-
-run_main() {
-    : > "$TMP/actions"
-    : > "$TMP/sideeffects"
-    env LIB="$LIB" TEST_TMP="$TMP" bash -c '
-        source "$LIB"
-        init_invoking_user() { INVOKING_USER=tester; INVOKING_HOME="$TEST_TMP/home"; GITCONFIG_PATH="$TEST_TMP/home/.gitconfig"; }
-        require_root() { return 0; }
-        ensure_dependencies() { return 0; }
-        ensure_selection_ui_dependencies() { return 0; }
-        validate_github_token() { return 0; }
-        create_runner_user() { echo create_runner_user >> "$TEST_TMP/sideeffects"; return 0; }
-        get_runner_version() { echo get_runner_version >> "$TEST_TMP/sideeffects"; echo 9.9.9; }
-        detect_arch() { echo detect_arch >> "$TEST_TMP/sideeffects"; echo x64; }
-        get_user_repositories() { printf "%s\n" HomeLAB-DNS Algen-server-web-explorer-panel; }
-        get_local_repositories() { printf "%s\n" HomeLAB-DNS Algen-server-web-explorer-panel; }
-        interactive_select_repositories() { echo HomeLAB-DNS; }
-        install_repo_runner() { echo "install:$ACTIVE_PROFILE:$1" >> "$TEST_TMP/actions"; return 0; }
-        uninstall_repo_runner() { echo "uninstall:$ACTIVE_PROFILE:$1" >> "$TEST_TMP/actions"; return 0; }
-        install_org_runner() { echo "install-org:$ACTIVE_PROFILE" >> "$TEST_TMP/actions"; return 0; }
-        uninstall_org_runner() { echo "uninstall-org:$ACTIVE_PROFILE" >> "$TEST_TMP/actions"; return 0; }
-        purge_if_empty() { echo purge >> "$TEST_TMP/actions"; return 0; }
-        systemctl() { return 0; }
-        main "$@"
-    ' _ "$@"
-}
-
-if run_main --profile home --list-repos >"$TMP/list.out" 2>"$TMP/list.err" &&
-   grep -Fx HomeLAB-DNS "$TMP/list.out" >/dev/null &&
-   grep -Fx Algen-server-web-explorer-panel "$TMP/list.out" >/dev/null; then
-    ok "--list-repos prints repositories"
+if bash "$SCRIPT" --help | grep -Fq 'GitHub Self-Hosted Runner Manager (Docker)'; then
+    ok "--help describes Docker manager"
 else
-    not_ok "--list-repos prints repositories"
-    cat "$TMP/list.out" >&2 || true
-    cat "$TMP/list.err" >&2 || true
-fi
-if [[ ! -s "$TMP/sideeffects" ]]; then ok "--list-repos has no install side effects"; else not_ok "--list-repos has no install side effects"; cat "$TMP/sideeffects" >&2; fi
-
-if run_main --profile work --list-repos >/dev/null 2>&1 && [[ ! -s "$TMP/actions" && ! -s "$TMP/sideeffects" ]]; then
-    ok "org --list-repos has no runner side effects"
-else
-    not_ok "org --list-repos has no runner side effects"
-    cat "$TMP/actions" >&2 || true
-    cat "$TMP/sideeffects" >&2 || true
+    not_ok "--help describes Docker manager"
 fi
 
-if run_main --profile home --select-repos --gui >/dev/null 2>&1 && grep -Fqx 'install:home:HomeLAB-DNS' "$TMP/actions"; then ok "HELP: SSH GUI install"; else not_ok "HELP: SSH GUI install"; fi
-if run_main --uninstall --profile home --select-repos --gui >/dev/null 2>&1 && grep -Fqx 'uninstall:home:HomeLAB-DNS' "$TMP/actions"; then ok "HELP: SSH GUI uninstall"; else not_ok "HELP: SSH GUI uninstall"; fi
-if run_main --uninstall --profile home --all-repos >/dev/null 2>&1 && [[ $(grep -c '^uninstall:home:' "$TMP/actions" || true) -eq 2 ]]; then ok "HELP: uninstall all"; else not_ok "HELP: uninstall all"; fi
-if run_main --uninstall --profile home --all-repos --purge >/dev/null 2>&1 && grep -Fqx purge "$TMP/actions"; then ok "HELP: uninstall all + purge"; else not_ok "HELP: uninstall all + purge"; fi
-if run_main --profile home --select-repos --zenity >/dev/null 2>&1 && grep -Fqx 'install:home:HomeLAB-DNS' "$TMP/actions"; then ok "HELP: forced Zenity selection"; else not_ok "HELP: forced Zenity selection"; fi
+expect_failure "reject --all-repos + --select-repos" env LIB="$LIB" bash -c 'source "$LIB"; args --all-repos --select-repos'
+expect_failure "reject --all-repos + --repo" env LIB="$LIB" bash -c 'source "$LIB"; args --all-repos --repo Repo'
+expect_failure "reject --select-repos + --repo" env LIB="$LIB" bash -c 'source "$LIB"; args --select-repos --repo Repo'
+expect_failure "reject --purge without --uninstall" env LIB="$LIB" bash -c 'source "$LIB"; args --purge'
+expect_success "accept --uninstall --purge" env LIB="$LIB" bash -c 'source "$LIB"; args --uninstall --purge; [[ $ACTION == uninstall && $PURGE == true ]]'
+expect_success "accept repeated --repo" env LIB="$LIB" bash -c 'source "$LIB"; args --repo A --repo B; [[ ${#REPOS[@]} -eq 2 ]]'
+expect_success "accept --repos CSV" env LIB="$LIB" bash -c 'source "$LIB"; args --repos A,B; [[ ${#REPOS[@]} -eq 2 ]]'
+expect_success "accept --profiles CSV" env LIB="$LIB" bash -c 'source "$LIB"; args --profiles home,work; [[ ${#PROFILES[@]} -eq 2 ]]'
+expect_success "accept -p alias" env LIB="$LIB" bash -c 'source "$LIB"; args -p home; [[ ${PROFILES[0]} == home ]]'
+expect_success "accept -r alias" env LIB="$LIB" bash -c 'source "$LIB"; args -r Repo; [[ ${REPOS[0]} == Repo ]]'
+expect_success "accept --select-repos --gui" env LIB="$LIB" bash -c 'source "$LIB"; args --select-repos --gui; [[ $SELECT_MODE == interactive && $UI == gui ]]'
+expect_success "accept --select-repos -GUI" env LIB="$LIB" bash -c 'source "$LIB"; args --select-repos -GUI; [[ $SELECT_MODE == interactive && $UI == gui ]]'
+expect_success "accept --select-repos --tui" env LIB="$LIB" bash -c 'source "$LIB"; args --select-repos --tui; [[ $SELECT_MODE == interactive && $UI == tui ]]'
+expect_success "accept --docker-socket" env LIB="$LIB" bash -c 'source "$LIB"; args --docker-socket; [[ $SOCKET == true ]]'
+expect_success "accept --no-docker-socket" env LIB="$LIB" bash -c 'source "$LIB"; SOCKET=true; args --no-docker-socket; [[ $SOCKET == false ]]'
+expect_success "accept --rebuild-image" env LIB="$LIB" bash -c 'source "$LIB"; args --rebuild-image; [[ $REBUILD == true ]]'
 
-if run_main --install --profile home --repo HomeLAB-DNS >/dev/null 2>&1 && grep -Fqx 'install:home:HomeLAB-DNS' "$TMP/actions"; then ok "single repo install"; else not_ok "single repo install"; fi
-if run_main --install --profile home --repos HomeLAB-DNS,Algen-server-web-explorer-panel >/dev/null 2>&1 && [[ $(grep -c '^install:home:' "$TMP/actions" || true) -eq 2 ]]; then ok "multiple repo install"; else not_ok "multiple repo install"; fi
-
-expect_success "list profiles" env LIB="$LIB" TEST_TMP="$TMP" bash -c '
+expect_success "load user profile from gitconfig" env LIB="$LIB" TEST_TMP="$TMP" bash -c '
     source "$LIB"
-    init_invoking_user() { INVOKING_USER=tester; INVOKING_HOME="$TEST_TMP/home"; GITCONFIG_PATH="$TEST_TMP/home/.gitconfig"; }
-    main --list-profiles | grep -Fx home >/dev/null
+    GITCONFIG="$TEST_TMP/home/.gitconfig"
+    load_profile home
+    [[ $PROFILE == home ]]
+    [[ $MODE == user ]]
+    [[ $OWNER == chmajster ]]
+    [[ $TOKEN == test-token ]]
+    [[ $LABELS == homelab,linux,docker ]]
 '
 
-
-expect_success "legacy service is discovered for named profile" env LIB="$LIB" TEST_TMP="$TMP" bash -c '
+expect_success "load org profile from gitconfig" env LIB="$LIB" TEST_TMP="$TMP" bash -c '
     source "$LIB"
-    ACTIVE_PROFILE=home
-    GITHUB_OWNER=chmajster
-    hostname() { echo kynlab01; }
-    systemctl() {
-        if [[ "$1" == list-units ]]; then
-  printf "%s\n" "actions.runner.chmajster-HomeLAB-DNS.kynlab01-homelab-dns.service loaded active running"
+    GITCONFIG="$TEST_TMP/home/.gitconfig"
+    load_profile work
+    [[ $PROFILE == work ]]
+    [[ $MODE == org ]]
+    [[ $OWNER == example-org ]]
+    [[ $TOKEN == test-token ]]
+'
+
+expect_success "deterministic Docker names" env LIB="$LIB" bash -c '
+    source "$LIB"
+    PROFILE=home
+    OWNER=chmajster
+    hostname() { echo KynLab01; }
+    [[ $(repo_runner HomeLAB-DNS) == kynlab01-home-homelab-dns ]]
+    [[ $(repo_container HomeLAB-DNS) == github-runner-home-homelab-dns ]]
+    [[ $(org_container) == github-runner-home-org ]]
+'
+
+expect_success "state token is mode 600" env LIB="$LIB" TEST_TMP="$TMP" bash -c '
+    source "$LIB"
+    PROFILE=home
+    MODE=user
+    OWNER=chmajster
+    LABELS=homelab,docker
+    IMAGE=test/image:local
+    SOCKET=false
+    TOKEN=test-token
+    chown() { return 0; }
+    write_state "$TEST_TMP/state" HomeLAB-DNS runner-name container-name
+    [[ $(stat -c %a "$TEST_TMP/state/github_token") == 600 ]]
+    [[ $(cat "$TEST_TMP/state/github_token") == test-token ]]
+    grep -Fqx "container_name=container-name" "$TEST_TMP/state/metadata"
+'
+
+expect_success "docker run uses restart policy and persistent workdir" env LIB="$LIB" TEST_TMP="$TMP" bash -c '
+    source "$LIB"
+    PROFILE=home
+    MODE=user
+    OWNER=chmajster
+    LABELS=homelab,docker
+    IMAGE=test/image:local
+    SOCKET=false
+    TOKEN=test-token
+    chown() { return 0; }
+    sleep() { return 0; }
+    docker() {
+        if [[ $1 == inspect && ${2:-} == -f ]]; then
+            echo true
+            return 0
+        fi
+        if [[ $1 == inspect ]]; then
+            return 1
+        fi
+        if [[ $1 == run ]]; then
+            printf "%s\n" "$*" > "$TEST_TMP/docker-run"
+            return 0
         fi
         return 0
     }
-    [[ $(get_service_repositories) == homelab-dns ]]
+    run_container "$TEST_TMP/docker-state" repo HomeLAB-DNS runner-name container-name
+    grep -Fq -- "--restart unless-stopped" "$TEST_TMP/docker-run"
+    grep -Fq -- "com.chrisscriptbase.github-runner=true" "$TEST_TMP/docker-run"
+    grep -Fq -- "RUNNER_SCOPE=repo" "$TEST_TMP/docker-run"
+    grep -Fq -- "RUNNER_NAME=runner-name" "$TEST_TMP/docker-run"
+    grep -Fq -- "$TEST_TMP/docker-state/work" "$TEST_TMP/docker-run"
+    grep -Fq -- "/run/secrets/github_token" "$TEST_TMP/docker-run"
 '
 
-expect_success "orphan legacy service is removed without runner directory" env LIB="$LIB" TEST_TMP="$TMP" bash -c '
+expect_success "legacy runner is removed before Docker migration" env LIB="$LIB" TEST_TMP="$TMP" bash -c '
     source "$LIB"
-    ACTIVE_PROFILE=home
-    GITHUB_OWNER=chmajster
-    RUNNER_BASE="$TEST_TMP/runners"
-    hostname() { echo kynlab01; }
-    list_action_runner_service_units() {
-        [[ -f "$TEST_TMP/service-removed" ]] || echo actions.runner.chmajster-HomeLAB-DNS.kynlab01-homelab-dns.service
-    }
-    remove_runner_service_unit() {
-        echo "$1" > "$TEST_TMP/service-removed"
-        return 0
-    }
-    uninstall_repo_runner HomeLAB-DNS
-    grep -Fqx actions.runner.chmajster-HomeLAB-DNS.kynlab01-homelab-dns.service "$TEST_TMP/service-removed"
-'
-
-expect_success "svc uninstall failure falls back to forced service cleanup" env LIB="$LIB" TEST_TMP="$TMP" bash -c '
-    source "$LIB"
-    ACTIVE_PROFILE=home
-    GITHUB_OWNER=chmajster
-    RUNNER_BASE="$TEST_TMP/runners-fallback"
+    PROFILE=home
+    OWNER=chmajster
+    RUNNER_BASE="$TEST_TMP/legacy-root"
     dir="$RUNNER_BASE/profiles/home/homelab-dns"
     mkdir -p "$dir"
-    printf "%s\n" actions.runner.chmajster-HomeLAB-DNS.kynlab01-home-homelab-dns.service > "$dir/.service"
-    printf "#!/usr/bin/env bash\nexit 1\n" > "$dir/svc.sh"
-    chmod +x "$dir/svc.sh"
-    list_action_runner_service_units() { return 0; }
-    remove_runner_service_unit() { echo "$1" > "$TEST_TMP/forced-service"; return 0; }
-    uninstall_repo_runner HomeLAB-DNS
+    printf "%s\n" "{\"agentName\":\"old-runner\"}" > "$dir/.runner"
+    remote_delete() { printf "%s %s\n" "$1" "$2" > "$TEST_TMP/remote-delete"; }
+    legacy_cleanup HomeLAB-DNS
     [[ ! -d "$dir" ]]
-    grep -Fqx actions.runner.chmajster-HomeLAB-DNS.kynlab01-home-homelab-dns.service "$TEST_TMP/forced-service"
+    grep -Fqx "/repos/chmajster/HomeLAB-DNS/actions/runners old-runner" "$TEST_TMP/remote-delete"
 '
 
-expect_success "purge keeps runner user when services still exist" env LIB="$LIB" TEST_TMP="$TMP" bash -c '
+expect_success "local repo discovery includes Docker state" env LIB="$LIB" TEST_TMP="$TMP" bash -c '
     source "$LIB"
-    PURGE=true
-    RUNNER_BASE="$TEST_TMP/purge-root"
-    RUNNER_USER=github-runner
-    mkdir -p "$RUNNER_BASE"
-    list_action_runner_service_units() { echo actions.runner.chmajster-Repo.host-repo.service; }
-    id() { echo "id should not be called" > "$TEST_TMP/id-called"; return 0; }
-    purge_if_empty
-    [[ -d "$RUNNER_BASE" && ! -e "$TEST_TMP/id-called" ]]
-'
-
-
-expect_success "uninstall order is stop then service removal then files" env LIB="$LIB" TEST_TMP="$TMP" bash -c '
-    source "$LIB"
-    ACTIVE_PROFILE=home
-    GITHUB_OWNER=chmajster
-    RUNNER_BASE="$TEST_TMP/order-runners"
-    dir="$RUNNER_BASE/profiles/home/homelab-dns"
-    mkdir -p "$dir"
-    printf "%s\n" actions.runner.chmajster-HomeLAB-DNS.kynlab01-home-homelab-dns.service > "$dir/.service"
-    set -- "\$1"
-    cat > "$dir/svc.sh" <<EOF
-#!/usr/bin/env bash
-echo "svc-$1" >> "$TEST_TMP/order.log"
-exit 0
+    PROFILE=home
+    STATE_BASE="$TEST_TMP/docker-root"
+    RUNNER_BASE="$TEST_TMP/legacy-none"
+    d="$(repo_state HomeLAB-DNS)"
+    mkdir -p "$d"
+    cat > "$d/metadata" <<EOF
+profile=home
+mode=user
+owner=chmajster
+repo=HomeLAB-DNS
+runner_name=test
+container_name=test
 EOF
-    chmod +x "$dir/svc.sh"
-    list_action_runner_service_units() {
-        [[ -f "$TEST_TMP/unit-removed" ]] || echo actions.runner.chmajster-HomeLAB-DNS.kynlab01-home-homelab-dns.service
-    }
-    hostname() { echo kynlab01; }
-    stop_runner_service_unit() { echo systemd-stop >> "$TEST_TMP/order.log"; return 0; }
-    remove_runner_service_unit() { echo systemd-remove >> "$TEST_TMP/order.log"; touch "$TEST_TMP/unit-removed"; return 0; }
-    rm() {
-        if [[ "$*" == *"$dir"* ]]; then echo files-remove >> "$TEST_TMP/order.log"; fi
-        command rm "$@"
-    }
-    : > "$TEST_TMP/order.log"
-    uninstall_repo_runner HomeLAB-DNS
-    mapfile -t order < "$TEST_TMP/order.log"
-    [[ "${order[0]}" == svc-stop ]]
-    [[ "${order[1]}" == systemd-stop ]]
-    [[ "${order[2]}" == svc-uninstall ]]
-    [[ "${order[3]}" == systemd-remove ]]
-    [[ "${order[4]}" == files-remove ]]
+    local_repos | grep -Fx HomeLAB-DNS >/dev/null
 '
 
-expect_success "service cleanup failure keeps runner files" env LIB="$LIB" TEST_TMP="$TMP" bash -c '
+expect_success "user process installs selected Docker runners" env LIB="$LIB" TEST_TMP="$TMP" bash -c '
     source "$LIB"
-    ACTIVE_PROFILE=home
-    GITHUB_OWNER=chmajster
-    RUNNER_BASE="$TEST_TMP/keep-runners"
-    dir="$RUNNER_BASE/profiles/home/homelab-dns"
-    mkdir -p "$dir"
-    printf "%s\n" actions.runner.chmajster-HomeLAB-DNS.kynlab01-home-homelab-dns.service > "$dir/.service"
-    list_action_runner_service_units() { echo actions.runner.chmajster-HomeLAB-DNS.kynlab01-home-homelab-dns.service; }
-    hostname() { echo kynlab01; }
-    stop_runner_service_unit() { return 0; }
-    remove_runner_service_unit() { return 0; }
-    if uninstall_repo_runner HomeLAB-DNS; then exit 1; fi
-    [[ -d "$dir" ]]
+    MODE=user
+    PROFILE=home
+    ACTION=install
+    LIST_REPOS=false
+    resolve() { printf "%s\n" HomeLAB-DNS Algen-server-web-explorer-panel; }
+    install_repo() { echo "install:$1" >> "$TEST_TMP/actions"; return 0; }
+    : > "$TEST_TMP/actions"
+    process
+    [[ $(grep -c "^install:" "$TEST_TMP/actions") -eq 2 ]]
 '
+
+expect_success "org process installs organization Docker runner" env LIB="$LIB" TEST_TMP="$TMP" bash -c '
+    source "$LIB"
+    MODE=org
+    PROFILE=work
+    ACTION=install
+    LIST_REPOS=false
+    install_org() { echo install-org > "$TEST_TMP/org-action"; return 0; }
+    process
+    grep -Fqx install-org "$TEST_TMP/org-action"
+'
+
+if grep -Fq 'restart unless-stopped' "$MANAGER" && grep -Fq 'docker.sock' "$MANAGER"; then
+    ok "manager contains Docker restart and socket support"
+else
+    not_ok "manager contains Docker restart and socket support"
+fi
+
+if grep -Fq 'USER runner' "$DOCKERFILE"; then
+    not_ok "Dockerfile must not start entrypoint as runner"
+else
+    ok "Dockerfile starts privileged bootstrap for root-only secret"
+fi
+
+if grep -Fq 'sudo -u runner -H ./run.sh' "$ENTRYPOINT"; then
+    ok "runner process drops privileges"
+else
+    not_ok "runner process drops privileges"
+fi
 
 printf '\nRESULT: pass=%d fail=%d\n' "$pass" "$fail"
 [[ "$fail" -eq 0 ]]
