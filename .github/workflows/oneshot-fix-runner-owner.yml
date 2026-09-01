@@ -1,0 +1,65 @@
+name: One-shot fix runner owner
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/oneshot-fix-runner-owner.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Patch automatic user owner detection
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('linux/install-github-selfhosted-runners.sh')
+          text = path.read_text()
+          old = '''    configured_labels="$(cfg "github.${prefix}labels")"; [[ -z "$configured_labels" ]] || LABELS="$configured_labels"
+              case "$MODE" in user|org) ;; *) die "$PROFILE: mode musi być user albo org" ;; esac
+              [[ -n "$OWNER" ]] || die "$PROFILE: brak ownera"
+              [[ -n "$TOKEN" ]] || die "$PROFILE: brak tokenu"
+          '''.replace('              ', '    ')
+          new = '''    configured_labels="$(cfg "github.${prefix}labels")"; [[ -z "$configured_labels" ]] || LABELS="$configured_labels"
+              case "$MODE" in user|org) ;; *) die "$PROFILE: mode musi być user albo org" ;; esac
+              [[ -n "$TOKEN" ]] || die "$PROFILE: brak tokenu"
+              if [[ -z "$OWNER" && "$MODE" == user ]]; then
+                  OWNER="$(api GET /user | jq -r '.login // empty')" || die "$PROFILE: token odrzucony"
+              fi
+              [[ -n "$OWNER" ]] || die "$PROFILE: brak ownera"
+          '''.replace('              ', '    ')
+          if old not in text:
+              raise SystemExit('Expected load_profile block not found; refusing to modify file')
+          path.write_text(text.replace(old, new, 1))
+          PY
+          bash -n linux/install-github-selfhosted-runners.sh
+
+      - name: Run regression tests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash linux/tests/test-install-github-selfhosted-runners.sh
+
+      - name: Commit fix to main
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add linux/install-github-selfhosted-runners.sh
+          git diff --cached --quiet && exit 0
+          git commit -m 'fix: auto-detect runner owner from GitHub token'
+          git push origin HEAD:main
