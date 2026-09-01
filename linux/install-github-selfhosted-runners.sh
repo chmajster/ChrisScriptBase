@@ -207,8 +207,11 @@ load_profile(){
     fi
     configured_labels="$(cfg "github.${prefix}labels")"; [[ -z "$configured_labels" ]] || LABELS="$configured_labels"
     case "$MODE" in user|org) ;; *) die "$PROFILE: mode musi być user albo org" ;; esac
-    [[ -n "$OWNER" ]] || die "$PROFILE: brak ownera"
     [[ -n "$TOKEN" ]] || die "$PROFILE: brak tokenu"
+    if [[ -z "$OWNER" && "$MODE" == user ]]; then
+        OWNER="$(api GET /user | jq -r '.login // empty')" || die "$PROFILE: token odrzucony"
+    fi
+    [[ -n "$OWNER" ]] || die "$PROFILE: brak ownera"
 }
 
 effective_labels(){
