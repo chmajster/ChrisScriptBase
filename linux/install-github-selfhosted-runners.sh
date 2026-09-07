@@ -5,6 +5,8 @@ set -Eeuo pipefail
 # Single-file implementation: manager + generated Dockerfile + generated container entrypoint.
 
 ACTION="install"
+ACTION_EXPLICIT=false
+REINSTALL_ONLY=false
 MODE_DEFAULT="${MODE:-user}"
 OWNER_ENV="${GITHUB_OWNER:-}"
 TOKEN_ENV="${GITHUB_TOKEN:-}"
@@ -77,6 +79,8 @@ REPOZYTORIA
 
 UI
   -g, --gui                 Terminalowy interfejs GUI/TUI oparty o dialog.
+                            Bez jawnej akcji wykrywa istniejące runnery i pokazuje
+                            Install / Reinstall / Uninstall.
                             Bez jawnego trybu repo automatycznie włącza --select-repos.
   --tui                     Alias terminalowego interfejsu dialog.
   --zenity                  Wymuś osobny graficzny interfejs Zenity.
@@ -140,8 +144,8 @@ args(){
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -h|--help) help; exit 0 ;;
-            --install) ACTION="install"; shift ;;
-            --uninstall) ACTION="uninstall"; shift ;;
+            --install) ACTION="install"; ACTION_EXPLICIT=true; shift ;;
+            --uninstall) ACTION="uninstall"; ACTION_EXPLICIT=true; shift ;;
             --purge) PURGE=true; shift ;;
             --docker-socket) SOCKET=true; shift ;;
             --no-docker-socket) SOCKET=false; shift ;;
@@ -559,6 +563,60 @@ ensure_dialog(){
     command -v dialog >/dev/null 2>&1 || die "Nie udało się zainstalować programu dialog"
 }
 
+runner_installation_detected(){
+    if command -v docker >/dev/null 2>&1 && docker ps -a --filter label=com.chrisscriptbase.github-runner=true --format '{{.ID}}' 2>/dev/null | grep -q .; then
+        return 0
+    fi
+    if [[ -d "$STATE_BASE" ]] && find "$STATE_BASE" -type f -name metadata -print -quit 2>/dev/null | grep -q .; then
+        return 0
+    fi
+    if [[ -d "$RUNNER_BASE" ]] && find "$RUNNER_BASE" -maxdepth 5 -type f \( -name '.runner' -o -name '.chrisscriptbase-runner' \) -print -quit 2>/dev/null | grep -q .; then
+        return 0
+    fi
+    return 1
+}
+
+gui_choose_action(){
+    local choice="" rc=0 message=""
+    [[ "$UI" == dialog ]] || return 0
+    [[ "$ACTION_EXPLICIT" == false ]] || return 0
+    runner_installation_detected || return 0
+    [[ -r /dev/tty && -w /dev/tty ]] || die "-g/--gui wymaga interaktywnego terminala"
+    ensure_dialog
+    message="Wykryto istniejącą instalację GitHub Self-Hosted Runner.\n\nWybierz operację:"
+    choice="$(
+        exec 3>&1
+        dialog --clear \
+          --output-fd 3 \
+          --backtitle "ChrisScriptBase • GitHub Self-Hosted Runner Manager" \
+          --title " Zarządzanie runnerami " \
+          --ok-label "Wybierz" --cancel-label "Anuluj" \
+          --menu "$message" 16 78 6 \
+          install "Install    - dodaj nowy runner / wykonaj reconciliation" \
+          reinstall "Reinstall  - przeinstaluj wybrane zainstalowane runnery" \
+          uninstall "Uninstall  - usuń wybrane zainstalowane runnery" \
+          </dev/tty >/dev/tty 2>/dev/tty
+    )" || rc=$?
+    clear >/dev/tty 2>/dev/null || true
+    (( rc == 0 )) || return 130
+    case "$choice" in
+        install)
+            ACTION="install"
+            REINSTALL_ONLY=false
+            ;;
+        reinstall)
+            ACTION="install"
+            FORCE_RECREATE=true
+            REINSTALL_ONLY=true
+            ;;
+        uninstall)
+            ACTION="uninstall"
+            REINSTALL_ONLY=false
+            ;;
+        *) return 130 ;;
+    esac
+}
+
 terminal_select(){
     local repo_name="" output="" rc=0 message=""; local -a available=("$@") items=()
     [[ -r /dev/tty && -w /dev/tty ]] || die "-g/--gui wymaga interaktywnego terminala"
@@ -572,7 +630,7 @@ terminal_select(){
         return 0
     fi
     for repo_name in "${available[@]}"; do items+=("$repo_name" "" off); done
-    message="Profil: $PROFILE\nOwner: $OWNER\n\nSpacja: zaznacz/odznacz   Enter: zatwierdź"
+    message="Profil: $PROFILE\nOwner: $OWNER\nAkcja: $([[ "$ACTION" == uninstall ]] && echo Uninstall || { [[ "$REINSTALL_ONLY" == true ]] && echo Reinstall || echo Install; })\n\nSpacja: zaznacz/odznacz   Enter: zatwierdź"
     output="$(
         exec 3>&1
         dialog --clear --colors \
@@ -599,7 +657,7 @@ interactive_repos(){ local -a available=("$@"); case "$UI" in zenity) zenity_sel
 resolve(){
     local spec=""; local -a available=() chosen=()
     if [[ "$LIST_REPOS" == true ]]; then remote_repos; return 0; fi
-    if [[ "$ACTION" == uninstall ]]; then mapfile -t available < <(local_repos | awk 'NF && !seen[tolower($0)]++'); else mapfile -t available < <(remote_repos | awk 'NF && !seen[tolower($0)]++'); fi
+    if [[ "$ACTION" == uninstall || "$REINSTALL_ONLY" == true ]]; then mapfile -t available < <(local_repos | awk 'NF && !seen[tolower($0)]++'); else mapfile -t available < <(remote_repos | awk 'NF && !seen[tolower($0)]++'); fi
     case "$SELECT_MODE" in
       all) chosen=("${available[@]}") ;;
       explicit) mapfile -t chosen < <(explicit_repos "${available[@]}"); if [[ "$ACTION" == uninstall && ${#chosen[@]} -eq 0 ]]; then for spec in "${REPOS[@]}"; do repo_for_profile "$spec" || continue; chosen+=("$(normalize_repo "$spec")"); done; fi ;;
@@ -643,6 +701,7 @@ main(){
     ensure_dependencies
     if [[ "$LIST_REPOS" == false ]]; then docker_ready; fi
     (( ${#PROFILES[@]} > 0 )) || PROFILES=(default)
+    if [[ "$LIST_REPOS" == false ]] && ! gui_choose_action; then return 0; fi
     if [[ "$ACTION" == install && "$LIST_REPOS" == false ]]; then build_image || die "Nie udało się zbudować obrazu runnera."; fi
     [[ "$SOCKET" != true ]] || warn "--docker-socket daje workflow kontrolę nad Docker daemonem hosta."
     [[ "$INCLUDE_PUBLIC" != true ]] || warn "--include-public: self-hosted runner w publicznym repo może wykonać niezaufany kod."
