@@ -15,7 +15,7 @@ RUNNER_VERSION="${RUNNER_VERSION:-}"
 LABELS_DEFAULT="${CUSTOM_LABELS:-homelab}"
 API_VERSION="${GITHUB_API_VERSION:-2026-03-10}"
 SOCKET="${RUNNER_DOCKER_SOCKET:-false}"
-ALLOW_SUDO="${RUNNER_ALLOW_SUDO:-false}"
+ALLOW_SUDO="${RUNNER_ALLOW_SUDO:-true}"
 INCLUDE_PUBLIC="${RUNNER_INCLUDE_PUBLIC:-false}"
 REBUILD=false
 FORCE_RECREATE=false
@@ -83,8 +83,8 @@ UI
 DOCKER / RUNNER
   --docker-socket           Udostępnij /var/run/docker.sock jobom.
   --no-docker-socket        Nie udostępniaj Docker socketa. Domyślne.
-  --allow-sudo              Runner ma NOPASSWD sudo wewnątrz kontenera.
-  --no-sudo                 Usuń NOPASSWD sudo. Domyślne.
+  --allow-sudo              Runner ma NOPASSWD sudo wewnątrz kontenera. Domyślne.
+  --no-sudo                 Usuń NOPASSWD sudo.
   --rebuild-image           Wymuś ponowny docker build.
   --force-recreate          Wymuś odtworzenie wybranych kontenerów.
   --cpus N                  Limit CPU kontenera, np. 2 lub 1.5.
@@ -96,6 +96,7 @@ BEZPIECZEŃSTWO
   Długoterminowy GitHub PAT pozostaje wyłącznie na hoście.
   Kontener otrzymuje tylko krótkotrwały registration token.
   Publiczne repozytoria są domyślnie wyłączone.
+  NOPASSWD sudo dotyczy kontenera runnera; --no-sudo wyłącza tę zgodność z akcjami wymagającymi sudo.
   --docker-socket daje workflow praktycznie uprawnienia root na hoście Docker.
 
 KONFIGURACJA ~/.gitconfig
@@ -291,7 +292,7 @@ ARG RUNNER_VERSION=""
 ENV DEBIAN_FRONTEND=noninteractive
 ENV RUNNER_HOME=/actions-runner
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl git jq sudo tar gzip docker.io \
+ && apt-get install -y --no-install-recommends ca-certificates curl git jq sudo tar gzip zip unzip docker.io \
  && rm -rf /var/lib/apt/lists/*
 RUN useradd --create-home --uid 1001 --shell /bin/bash runner \
  && mkdir -p "${RUNNER_HOME}" "${RUNNER_HOME}/_work" \
@@ -321,7 +322,7 @@ RUNNER_SCOPE="${RUNNER_SCOPE:-repo}"
 RUNNER_NAME="${RUNNER_NAME:-$(hostname)}"
 RUNNER_LABELS="${RUNNER_LABELS:-docker}"
 RUNNER_WORKDIR="${RUNNER_WORKDIR:-_work}"
-ALLOW_SUDO="${RUNNER_ALLOW_SUDO:-false}"
+ALLOW_SUDO="${RUNNER_ALLOW_SUDO:-true}"
 [[ -n "${GITHUB_OWNER:-}" ]] || { echo "ERROR: GITHUB_OWNER is required." >&2; exit 1; }
 if [[ -S /var/run/docker.sock ]]; then
     docker_gid="$(stat -c '%g' /var/run/docker.sock)"
