@@ -50,6 +50,8 @@ expect_failure "reject --all-repos + --select-repos" bash -c 'source "$1"; args 
 expect_failure "reject --purge without --uninstall" bash -c 'source "$1"; args --purge' _ "$SCRIPT"
 expect_success "accept --include-public" bash -c 'source "$1"; args --include-public; [[ $INCLUDE_PUBLIC == true ]]' _ "$SCRIPT"
 expect_success "private-only default" bash -c 'source "$1"; [[ $INCLUDE_PUBLIC == false ]]' _ "$SCRIPT"
+expect_success "sudo enabled by default for Actions compatibility" bash -c 'source "$1"; [[ $ALLOW_SUDO == true ]]' _ "$SCRIPT"
+expect_success "accept --no-sudo override" bash -c 'source "$1"; args --no-sudo; [[ $ALLOW_SUDO == false ]]' _ "$SCRIPT"
 expect_success "accept --force-recreate" bash -c 'source "$1"; args --force-recreate; [[ $FORCE_RECREATE == true ]]' _ "$SCRIPT"
 expect_success "accept resource limits" bash -c 'source "$1"; args --cpus 2 --memory 4g --pids-limit 256; [[ $RUNNER_CPUS == 2 && $RUNNER_MEMORY == 4g && $RUNNER_PIDS_LIMIT == 256 ]]' _ "$SCRIPT"
 
@@ -62,6 +64,8 @@ expect_success "render embedded Docker context" env SCRIPT="$SCRIPT" TEST_TMP="$
     bash -n "$TEST_TMP/context/runner-entrypoint.sh"
     grep -Fq "FROM ubuntu:24.04" "$TEST_TMP/context/Dockerfile"
     grep -Fq "actions-runner-linux-" "$TEST_TMP/context/Dockerfile"
+    grep -Fq "zip unzip" "$TEST_TMP/context/Dockerfile"
+    grep -Fq "ALLOW_SUDO=\"\${RUNNER_ALLOW_SUDO:-true}\"" "$TEST_TMP/context/runner-entrypoint.sh"
 '
 
 expect_success "PAT is not passed to container entrypoint" env SCRIPT="$SCRIPT" TEST_TMP="$TMP" bash -c '
