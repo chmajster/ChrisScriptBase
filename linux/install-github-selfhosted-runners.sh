@@ -76,9 +76,10 @@ REPOZYTORIA
   --include-public          Pozwól również na publiczne repozytoria.
 
 UI
-  --gui|-GUI                Zenity lokalnie, dialog/whiptail przez SSH.
-  --tui                     Wymuś dialog/whiptail.
-  --zenity                  Wymuś Zenity.
+  -g, --gui                 Terminalowy interfejs GUI/TUI oparty o dialog.
+                            Bez jawnego trybu repo automatycznie włącza --select-repos.
+  --tui                     Alias terminalowego interfejsu dialog.
+  --zenity                  Wymuś osobny graficzny interfejs Zenity.
 
 DOCKER / RUNNER
   --docker-socket           Udostępnij /var/run/docker.sock jobom.
@@ -107,8 +108,10 @@ KONFIGURACJA ~/.gitconfig
       labels = homelab,linux
 
 PRZYKŁAD
+  sudo bash install-github-selfhosted-runners.sh -g
+
   sudo bash install-github-selfhosted-runners.sh \
-    --profile home --select-repos --gui --docker-socket
+    --profile home --gui --docker-socket
 
 DIAGNOSTYKA
   docker ps -a --filter label=com.chrisscriptbase.github-runner=true
@@ -158,17 +161,23 @@ args(){
             --repos) [[ $# -ge 2 ]] || die "$1 wymaga listy repozytoriów."; set_selection_mode explicit; append_csv REPOS "$2"; shift 2 ;;
             --all-repos) set_selection_mode all; shift ;;
             --select-repos) set_selection_mode interactive; shift ;;
-            --gui|-GUI) UI="gui"; shift ;;
-            --tui) UI="tui"; shift ;;
+            -g|--gui|-GUI) UI="dialog"; shift ;;
+            --tui) UI="dialog"; shift ;;
             --zenity) UI="zenity"; shift ;;
             --list-profiles) LIST_PROFILES=true; shift ;;
             --list-repos) LIST_REPOS=true; shift ;;
             *) die "Nieznana opcja: $1" ;;
         esac
     done
+    if [[ "$UI" == dialog || "$UI" == zenity ]]; then
+        if [[ -z "$SELECT_MODE" ]]; then
+            SELECT_MODE="interactive"
+        elif [[ "$SELECT_MODE" != interactive ]]; then
+            die "-g/--gui, --tui i --zenity nie mogą być łączone z --all-repos, --repo ani --repos"
+        fi
+    fi
     [[ -n "$SELECT_MODE" ]] || SELECT_MODE="all"
     [[ "$PURGE" != true || "$ACTION" == uninstall ]] || die "--purge wymaga --uninstall"
-    [[ "$UI" == auto || "$SELECT_MODE" == interactive ]] || die "--gui/-GUI, --tui i --zenity wymagają --select-repos"
     case "$SOCKET" in true|false) ;; *) die "RUNNER_DOCKER_SOCKET musi być true/false." ;; esac
     case "$ALLOW_SUDO" in true|false) ;; *) die "RUNNER_ALLOW_SUDO musi być true/false." ;; esac
     case "$INCLUDE_PUBLIC" in true|false) ;; *) die "RUNNER_INCLUDE_PUBLIC musi być true/false." ;; esac
@@ -529,12 +538,51 @@ normalize_repo(){ local value="$1"; [[ "$value" != *:* ]] || value="${value#*:}"
 repo_for_profile(){ local value="$1"; [[ "$value" == *:* ]] || return 0; [[ "${value%%:*}" == "$PROFILE" ]]; }
 explicit_repos(){ local spec="" requested="" candidate=""; local -a available=("$@"); for spec in "${REPOS[@]}"; do repo_for_profile "$spec" || continue; requested="$(normalize_repo "$spec")"; for candidate in "${available[@]}"; do if [[ "${candidate,,}" == "${requested,,}" ]]; then echo "$candidate"; break; fi; done; done; }
 
+ensure_dialog(){
+    command -v dialog >/dev/null 2>&1 && return 0
+    [[ -r /dev/tty && -w /dev/tty ]] || die "Brak interaktywnego terminala /dev/tty dla interfejsu dialog"
+    echo "Instaluję wymagany pakiet 'dialog'..." >/dev/tty
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update >/dev/tty 2>&1
+        DEBIAN_FRONTEND=noninteractive apt-get install -y dialog >/dev/tty 2>&1
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y dialog >/dev/tty 2>&1
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y dialog >/dev/tty 2>&1
+    elif command -v zypper >/dev/null 2>&1; then
+        zypper --non-interactive install dialog >/dev/tty 2>&1
+    elif command -v pacman >/dev/null 2>&1; then
+        pacman -Sy --noconfirm dialog >/dev/tty 2>&1
+    else
+        die "Brak programu dialog i nie rozpoznano obsługiwanego managera pakietów"
+    fi
+    command -v dialog >/dev/null 2>&1 || die "Nie udało się zainstalować programu dialog"
+}
+
 terminal_select(){
-    local repo_name="" output="" rc=0; local -a available=("$@") items=()
-    [[ -t 0 && -t 1 ]] || die "--select-repos wymaga interaktywnego TTY"
-    if ! command -v dialog >/dev/null 2>&1 && ! command -v whiptail >/dev/null 2>&1; then apt-get update; apt-get install -y dialog; fi
+    local repo_name="" output="" rc=0 message=""; local -a available=("$@") items=()
+    [[ -r /dev/tty && -w /dev/tty ]] || die "-g/--gui wymaga interaktywnego terminala"
+    ensure_dialog
+    if (( ${#available[@]} == 0 )); then
+        dialog --clear \
+          --backtitle "ChrisScriptBase • GitHub Self-Hosted Runner Manager" \
+          --title " Brak repozytoriów " \
+          --msgbox "Nie znaleziono repozytoriów dostępnych dla profilu: $PROFILE" 9 70 \
+          </dev/tty >/dev/tty 2>/dev/tty || true
+        return 0
+    fi
     for repo_name in "${available[@]}"; do items+=("$repo_name" "" off); done
-    if command -v dialog >/dev/null 2>&1; then output="$(dialog --stdout --separate-output --checklist "Repozytoria" 24 100 16 "${items[@]}")" || rc=$?; clear || true; else output="$(whiptail --checklist "Repozytoria" 24 100 16 "${items[@]}" 3>&1 1>&2 2>&3)" || rc=$?; output="$(sed 's/" "/\n/g; s/^"//; s/"$//' <<< "$output")"; fi
+    message="Profil: $PROFILE\nOwner: $OWNER\n\nSpacja: zaznacz/odznacz   Enter: zatwierdź"
+    output="$(
+        exec 3>&1
+        dialog --clear --colors \
+          --output-fd 3 --separate-output \
+          --backtitle "ChrisScriptBase • GitHub Self-Hosted Runner Manager" \
+          --title " Wybór repozytoriów " \
+          --ok-label "Zatwierdź" --cancel-label "Anuluj" \
+          --checklist "$message" 24 100 16 "${items[@]}" \
+          </dev/tty >/dev/tty 2>/dev/tty
+    )" || rc=$?
     if (( rc == 0 )) && [[ -n "$output" ]]; then printf '%s\n' "$output"; fi
 }
 
@@ -546,7 +594,7 @@ zenity_select(){
     sudo -u "$CALLER" env HOME="$CALLER_HOME" DISPLAY="${DISPLAY:-}" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" XAUTHORITY="${XAUTHORITY:-$CALLER_HOME/.Xauthority}" zenity --list --checklist --title="GitHub Docker Runners" --column="Wybierz" --column="Repo" --separator=$'\n' "${rows[@]}" || true
 }
 
-interactive_repos(){ local -a available=("$@"); case "$UI" in zenity) zenity_select "${available[@]}" ;; gui) if [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]]; then zenity_select "${available[@]}"; else terminal_select "${available[@]}"; fi ;; tui|auto) terminal_select "${available[@]}" ;; *) die "Nieznany UI: $UI" ;; esac; }
+interactive_repos(){ local -a available=("$@"); case "$UI" in zenity) zenity_select "${available[@]}" ;; dialog|auto) terminal_select "${available[@]}" ;; *) die "Nieznany UI: $UI" ;; esac; }
 
 resolve(){
     local spec=""; local -a available=() chosen=()
