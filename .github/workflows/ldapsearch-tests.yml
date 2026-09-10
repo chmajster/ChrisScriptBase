@@ -1,0 +1,39 @@
+name: LDAP lookup tests
+
+on:
+  push:
+    branches:
+      - feature/ldap-user-search
+    paths:
+      - linux/ldapsearch.sh
+      - linux/tests/ldapsearch.bats
+      - .github/workflows/ldapsearch-tests.yml
+  pull_request:
+    paths:
+      - linux/ldapsearch.sh
+      - linux/tests/ldapsearch.bats
+      - .github/workflows/ldapsearch-tests.yml
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Bats
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bats
+
+      - name: Bash syntax
+        run: bash -n linux/ldapsearch.sh
+
+      - name: ShellCheck
+        run: shellcheck linux/ldapsearch.sh
+
+      - name: Bats
+        run: bats linux/tests/ldapsearch.bats
