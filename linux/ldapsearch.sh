@@ -206,7 +206,13 @@ filter_ldif_secrets() {
     awk 'BEGIN{skip=0} /^[[:space:]]/{if(skip)next;print;next} {skip=0;p=index($0,":");if(!p){print;next};k=tolower(substr($0,1,p-1));if(k~/(password|passwd|unicodepwd|krbprincipalkey|authtok|secret|token|privatekey|credential)/){skip=1;next};print}'
 }
 
-command_timeout() { command -v timeout >/dev/null 2>&1 && timeout --preserve-status "${LDAP_TIMEOUT}s" "$@" || "$@"; }
+command_timeout() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout --preserve-status "${LDAP_TIMEOUT}s" "$@"
+    else
+        "$@"
+    fi
+}
 
 make_password_file() {
     PASSWORD_FILE="$(mktemp)"; chmod 600 "$PASSWORD_FILE"; printf '%s' "$LDAP_BIND_PASSWORD" >"$PASSWORD_FILE"; TMP_FILES+=("$PASSWORD_FILE")
