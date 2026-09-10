@@ -17,6 +17,7 @@ Repository: [chmajster/ChrisScriptBase](https://github.com/chmajster/ChrisScript
 | `linux/swam_mem_usage.sh` | Shows swap usage and lists processes currently using swap. |
 | `linux/konfiguracja_samba_www_ubuntu.sh` | Installs and configures Apache, PHP, MariaDB, phpMyAdmin, and Samba on Ubuntu. |
 | `linux/web-hosts-file-manager.sh` | Installs a Flask-based web manager for `/etc/hosts`. |
+| `linux/ldapsearch.sh` | Discovers SSSD/LDAP settings and looks up LDAP/AD users, groups and netgroups with NSS/SSSD fallback. |
 | `snow/watchdog-dashboard.js` | Browser-based ServiceNow watchdog dashboard snippet. |
 
 ## Usage
@@ -28,7 +29,20 @@ Most Linux scripts should be run with Bash:
 ```bash
 bash linux/detect_os.sh
 bash linux/swam_mem_usage.sh
+bash linux/ldapsearch.sh USER
 ```
+
+LDAP lookup examples:
+
+```bash
+bash linux/ldapsearch.sh krzysztof
+bash linux/ldapsearch.sh --groups krzysztof
+bash linux/ldapsearch.sh --netgroups krzysztof
+bash linux/ldapsearch.sh --json krzysztof
+bash linux/ldapsearch.sh --config
+```
+
+The LDAP utility reads existing system LDAP/SSSD configuration. It never prints configured bind passwords and does not install LDAP client packages automatically.
 
 Scripts that modify the system usually require root privileges:
 
@@ -43,8 +57,9 @@ The ServiceNow dashboard script is intended to run inside an authenticated Servi
 ## Notes
 
 - Test scripts in a safe environment before using them on production systems.
-- Adjust configuration values inside the scripts before running them.
+- Adjust configuration values inside scripts that require local settings.
 - Some scripts are distribution-specific; check comments and detected OS support first.
+- `linux/ldapsearch.sh` supports SSSD, OpenLDAP and nslcd-style configuration discovery and can fall back to NSS/SSSD when direct LDAP access is unavailable.
 
 ---
 
@@ -63,6 +78,7 @@ Repozytorium: [chmajster/ChrisScriptBase](https://github.com/chmajster/ChrisScri
 | `linux/swam_mem_usage.sh` | Pokazuje uzycie swap oraz procesy, ktore aktualnie korzystaja ze swap. |
 | `linux/konfiguracja_samba_www_ubuntu.sh` | Instaluje i konfiguruje Apache, PHP, MariaDB, phpMyAdmin oraz Sambe na Ubuntu. |
 | `linux/web-hosts-file-manager.sh` | Instaluje webowy manager pliku `/etc/hosts` oparty o Flask. |
+| `linux/ldapsearch.sh` | Wykrywa konfiguracje SSSD/LDAP i wyszukuje uzytkownikow LDAP/AD, grupy oraz netgroupy z fallbackiem NSS/SSSD. |
 | `snow/watchdog-dashboard.js` | Dashboard watchdog dla ServiceNow uruchamiany w przegladarce. |
 
 ## Uzycie
@@ -74,7 +90,20 @@ Wiekszosc skryptow Linux uruchomisz przez Bash:
 ```bash
 bash linux/detect_os.sh
 bash linux/swam_mem_usage.sh
+bash linux/ldapsearch.sh USER
 ```
+
+Przyklady wyszukiwania LDAP:
+
+```bash
+bash linux/ldapsearch.sh krzysztof
+bash linux/ldapsearch.sh --groups krzysztof
+bash linux/ldapsearch.sh --netgroups krzysztof
+bash linux/ldapsearch.sh --json krzysztof
+bash linux/ldapsearch.sh --config
+```
+
+Skrypt LDAP korzysta z istniejacej konfiguracji LDAP/SSSD systemu. Nie wyswietla skonfigurowanych hasel bind i nie instaluje automatycznie pakietow klienta LDAP.
 
 Skrypty modyfikujace system zwykle wymagaja uprawnien root:
 
@@ -89,5 +118,6 @@ Skrypt dashboardu ServiceNow jest przeznaczony do uruchomienia w zalogowanej ses
 ## Uwagi
 
 - Testuj skrypty w bezpiecznym srodowisku przed uzyciem na produkcji.
-- Dostosuj wartosci konfiguracyjne w skryptach przed uruchomieniem.
+- Dostosuj wartosci konfiguracyjne w skryptach, ktore wymagaja lokalnych ustawien.
 - Czesc skryptow jest przeznaczona dla konkretnych dystrybucji; najpierw sprawdz komentarze i obslugiwane systemy.
+- `linux/ldapsearch.sh` obsluguje wykrywanie konfiguracji SSSD, OpenLDAP i nslcd oraz fallback NSS/SSSD, gdy bezposrednie zapytanie LDAP jest niedostepne.
