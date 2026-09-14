@@ -6,17 +6,15 @@ SCRIPT="${1:-linux/install-github-selfhosted-runners.sh}"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-LIB="$TMP/runner-manager-lib.sh"
-sed '/^main "\$@"$/d' "$SCRIPT" > "$LIB"
 
 pass=0
 fail=0
-ok() { echo "PASS: $*"; ((pass += 1)); }
-not_ok() { echo "FAIL: $*" >&2; ((fail += 1)); }
+ok(){ echo "PASS: $*"; ((pass += 1)); }
+not_ok(){ echo "FAIL: $*" >&2; ((fail += 1)); }
 
-run_case() {
+run_case(){
     local name="$1" code="$2"
-    if TEST_TMP="$TMP" LIB="$LIB" bash -c "$code" >"$TMP/out" 2>"$TMP/err"; then
+    if TEST_TMP="$TMP" SCRIPT="$SCRIPT" bash -c "$code" >"$TMP/out" 2>"$TMP/err"; then
         ok "$name"
     else
         not_ok "$name"
@@ -26,42 +24,54 @@ run_case() {
 }
 
 run_case "parse legacy service without runner-name suffix" '
-    source "$LIB"
-    GITHUB_OWNER=chmajster
-    ACTIVE_PROFILE=home
-    hostname() { echo kynlab01; }
+    source "$SCRIPT"
+    OWNER=chmajster
+    PROFILE=home
+    hostname(){ echo kynlab01; }
     repo="$(repo_from_service_unit actions.runner.chmajster-Knightly.kynlab01.service)"
     [[ "$repo" == knightly ]]
 '
 
 run_case "legacy service is discoverable for explicit repo" '
-    source "$LIB"
-    GITHUB_OWNER=chmajster
-    ACTIVE_PROFILE=home
-    hostname() { echo kynlab01; }
-    list_action_runner_service_units() {
+    source "$SCRIPT"
+    OWNER=chmajster
+    PROFILE=home
+    hostname(){ echo kynlab01; }
+    list_action_runner_service_units(){
         echo actions.runner.chmajster-Knightly.kynlab01.service
     }
     unit="$(runner_service_units_for_repo Knightly)"
     [[ "$unit" == actions.runner.chmajster-Knightly.kynlab01.service ]]
 '
 
-run_case "uninstall removes orphan legacy service without runner directory" '
-    source "$LIB"
-    GITHUB_OWNER=chmajster
-    ACTIVE_PROFILE=home
+run_case "legacy service appears in local repository discovery" '
+    source "$SCRIPT"
+    OWNER=chmajster
+    PROFILE=home
     RUNNER_BASE="$TEST_TMP/runners"
-    hostname() { echo kynlab01; }
-    list_action_runner_service_units() {
-        [[ ! -f "$TEST_TMP/legacy-unit-removed" ]] &&
-            echo actions.runner.chmajster-Knightly.kynlab01.service
+    STATE_BASE="$TEST_TMP/state"
+    hostname(){ echo kynlab01; }
+    list_action_runner_service_units(){
+        echo actions.runner.chmajster-Knightly.kynlab01.service
     }
-    remove_runner_service_unit() {
+    repo="$(local_repos)"
+    [[ "$repo" == knightly ]]
+'
+
+run_case "uninstall cleanup removes orphan legacy service without runner directory" '
+    source "$SCRIPT"
+    OWNER=chmajster
+    PROFILE=home
+    RUNNER_BASE="$TEST_TMP/runners"
+    hostname(){ echo kynlab01; }
+    list_action_runner_service_units(){
+        [[ ! -f "$TEST_TMP/legacy-unit-removed" ]] && echo actions.runner.chmajster-Knightly.kynlab01.service
+    }
+    remove_runner_service_unit(){
         [[ "$1" == actions.runner.chmajster-Knightly.kynlab01.service ]]
         touch "$TEST_TMP/legacy-unit-removed"
-        return 0
     }
-    uninstall_repo_runner Knightly
+    legacy_cleanup Knightly
     [[ -f "$TEST_TMP/legacy-unit-removed" ]]
 '
 
