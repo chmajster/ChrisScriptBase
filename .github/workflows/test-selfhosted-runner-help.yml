@@ -5,6 +5,7 @@ on:
     paths:
       - 'linux/install-github-selfhosted-runners.sh'
       - 'linux/tests/test-install-github-selfhosted-runners.sh'
+      - 'linux/tests/test-install-github-selfhosted-runners-legacy-service.sh'
       - '.github/workflows/test-selfhosted-runner-help.yml'
   workflow_dispatch:
 
@@ -22,9 +23,13 @@ jobs:
           shellcheck -e SC2155,SC2015 linux/install-github-selfhosted-runners.sh
           # SC2016 is intentional in tests: bash -c snippets expand variables in the child shell.
           shellcheck -e SC2016 linux/tests/test-install-github-selfhosted-runners.sh
+          shellcheck -e SC2016 linux/tests/test-install-github-selfhosted-runners-legacy-service.sh
 
       - name: Run single-file regression tests
         run: bash linux/tests/test-install-github-selfhosted-runners.sh
+
+      - name: Run legacy service regression tests
+        run: bash linux/tests/test-install-github-selfhosted-runners-legacy-service.sh
 
       - name: Validate generated container entrypoint
         shell: bash

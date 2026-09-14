@@ -438,6 +438,89 @@ EOF
 
 legacy_metadata_profile(){ local legacy_dir="$1" metadata="$1/.chrisscriptbase-runner"; [[ -f "$metadata" ]] || return 1; awk -F= '$1=="profile" {sub(/^profile=/,""); print; exit}' "$metadata"; }
 legacy_dir_allowed(){ local legacy_dir="$1" legacy_profile=""; [[ "$legacy_dir" != "$RUNNER_BASE/profiles/"* ]] || return 0; [[ "$PROFILE" != default ]] || return 0; legacy_profile="$(legacy_metadata_profile "$legacy_dir" 2>/dev/null || true)"; [[ "$legacy_profile" == "$PROFILE" ]]; }
+
+list_action_runner_service_units(){
+    command -v systemctl >/dev/null 2>&1 || return 0
+    {
+        systemctl list-unit-files --type=service --no-legend --no-pager 'actions.runner.*.service' 2>/dev/null | awk '{print $1}' || true
+        systemctl list-units --type=service --all --no-legend --no-pager 'actions.runner.*.service' 2>/dev/null | awk '{print $1}' || true
+        find /etc/systemd/system -maxdepth 1 -type f -name 'actions.runner.*.service' -printf '%f\n' 2>/dev/null || true
+    } | awk '/^actions\.runner\..*\.service$/ && !seen[$0]++'
+}
+
+repo_from_service_unit(){
+    local unit="$1" prefix="" rest="" host="" marker="" legacy_marker="" repo="" runner="" repo_sanitized="" profile_sanitized=""
+    unit="${unit,,}"
+    prefix="actions.runner.${OWNER,,}-"
+    [[ "$unit" == "$prefix"*".service" ]] || return 1
+    rest="${unit#"$prefix"}"
+    rest="${rest%.service}"
+    host="$(hostname -s | tr '[:upper:]' '[:lower:]')"
+    marker=".${host}-"
+    legacy_marker=".${host}"
+
+    if [[ "$rest" == *"$marker"* ]]; then
+        repo="${rest%%"$marker"*}"
+        runner="${rest#*"$marker"}"
+        [[ -n "$repo" && -n "$runner" ]] || return 1
+        repo_sanitized="$(san "$repo")"
+        if [[ "$PROFILE" == default ]]; then
+            [[ "$runner" == "$repo_sanitized" ]] || return 1
+        else
+            profile_sanitized="$(san "$PROFILE")"
+            [[ "$runner" == "${profile_sanitized}-${repo_sanitized}" || "$runner" == "$repo_sanitized" ]] || return 1
+        fi
+    elif [[ "$rest" == *"$legacy_marker" ]]; then
+        # Najstarszy format nie zawiera suffixu runnera po hostname:
+        # actions.runner.<owner>-<repo>.<host>.service
+        repo="${rest%"$legacy_marker"}"
+        [[ -n "$repo" ]] || return 1
+    else
+        return 1
+    fi
+
+    printf '%s\n' "$repo"
+}
+
+legacy_service_repos(){
+    local unit="" repo_name=""
+    while IFS= read -r unit; do
+        [[ -n "$unit" ]] || continue
+        repo_name="$(repo_from_service_unit "$unit" 2>/dev/null || true)"
+        [[ -n "$repo_name" ]] && printf '%s\n' "$repo_name"
+    done < <(list_action_runner_service_units)
+}
+
+runner_service_units_for_repo(){
+    local requested="${1,,}" unit="" repo_name=""
+    while IFS= read -r unit; do
+        [[ -n "$unit" ]] || continue
+        repo_name="$(repo_from_service_unit "$unit" 2>/dev/null || true)"
+        [[ -n "$repo_name" && "$repo_name" == "$requested" ]] && printf '%s\n' "$unit"
+    done < <(list_action_runner_service_units)
+}
+
+remove_runner_service_unit(){
+    local unit="$1"
+    [[ "$unit" == actions.runner.*.service ]] || return 1
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl stop "$unit" >/dev/null 2>&1 || true
+        systemctl disable "$unit" >/dev/null 2>&1 || true
+    fi
+    rm -f "/etc/systemd/system/$unit"
+    find /etc/systemd/system -type l -name "$unit" -delete 2>/dev/null || true
+    if command -v systemctl >/dev/null 2>&1; then systemctl daemon-reload >/dev/null 2>&1 || true; fi
+}
+
+cleanup_legacy_service_units_for_repo(){
+    local repo_name="$1" unit=""
+    while IFS= read -r unit; do
+        [[ -n "$unit" ]] || continue
+        log "Usuwanie osieroconej usługi legacy: $unit"
+        remove_runner_service_unit "$unit" || return 1
+    done < <(runner_service_units_for_repo "$repo_name")
+}
+
 legacy_dirs(){ local repo_name="$1" default_dir="$RUNNER_BASE/$(san "$1")" profile_dir="$RUNNER_BASE/profiles/$(san "$PROFILE")/$(san "$1")"; [[ "$PROFILE" == default || ! -d "$profile_dir" ]] || echo "$profile_dir"; if [[ -d "$default_dir" ]]; then if legacy_dir_allowed "$default_dir"; then echo "$default_dir"; else warn "Pomijam niejednoznaczny legacy runner $default_dir dla profilu $PROFILE."; fi; fi; }
 
 cleanup_legacy_dir(){
@@ -448,14 +531,19 @@ cleanup_legacy_dir(){
     agent_name="$(jq -r '.agentName // .name // empty' "$legacy_dir/.runner" 2>/dev/null || true)"
     if [[ -x "$legacy_dir/svc.sh" ]]; then (cd "$legacy_dir"; ./svc.sh stop >/dev/null 2>&1 || true; ./svc.sh uninstall >/dev/null 2>&1 || true); fi
     service_unit="$(head -1 "$legacy_dir/.service" 2>/dev/null | tr -d '\r' || true)"
-    if [[ "$service_unit" == actions.runner.*.service ]] && command -v systemctl >/dev/null 2>&1; then
-        systemctl stop "$service_unit" >/dev/null 2>&1 || true; systemctl disable "$service_unit" >/dev/null 2>&1 || true; rm -f "/etc/systemd/system/$service_unit"; find /etc/systemd/system -type l -name "$service_unit" -delete 2>/dev/null || true; systemctl daemon-reload >/dev/null 2>&1 || true
-    fi
+    if [[ "$service_unit" == actions.runner.*.service ]]; then remove_runner_service_unit "$service_unit" || true; fi
     if [[ -n "$agent_name" ]] && ! remote_delete "$endpoint" "$agent_name"; then warn "Nie udało się usunąć legacy runnera $agent_name z GitHub. Zachowuję katalog do ponowienia."; return 1; fi
     rm -rf "$legacy_dir"
 }
 
-legacy_cleanup(){ local repo_name="$1" legacy_dir="" endpoint="/repos/$OWNER/$1/actions/runners"; while IFS= read -r legacy_dir; do [[ -n "$legacy_dir" ]] || continue; cleanup_legacy_dir "$legacy_dir" "$endpoint" || return 1; done < <(legacy_dirs "$repo_name"); }
+legacy_cleanup(){
+    local repo_name="$1" legacy_dir="" endpoint="/repos/$OWNER/$1/actions/runners"
+    while IFS= read -r legacy_dir; do
+        [[ -n "$legacy_dir" ]] || continue
+        cleanup_legacy_dir "$legacy_dir" "$endpoint" || return 1
+    done < <(legacy_dirs "$repo_name")
+    cleanup_legacy_service_units_for_repo "$repo_name"
+}
 legacy_org_dirs(){ local default_dir="$RUNNER_BASE/organization" profile_dir="$RUNNER_BASE/profiles/$(san "$PROFILE")/organization"; [[ "$PROFILE" == default || ! -d "$profile_dir" ]] || echo "$profile_dir"; if [[ -d "$default_dir" ]]; then if legacy_dir_allowed "$default_dir"; then echo "$default_dir"; else warn "Pomijam niejednoznaczny legacy organization runner $default_dir dla profilu $PROFILE."; fi; fi; }
 legacy_org_cleanup(){ local legacy_dir=""; while IFS= read -r legacy_dir; do [[ -n "$legacy_dir" ]] || continue; cleanup_legacy_dir "$legacy_dir" "/orgs/$OWNER/actions/runners" || return 1; done < <(legacy_org_dirs); }
 
@@ -475,7 +563,7 @@ legacy_repos(){
     done
 }
 
-local_repos(){ local repositories_root="$(profile_root)/repositories" state_dir="" repo_name=""; if [[ -d "$repositories_root" ]]; then for state_dir in "$repositories_root"/*; do [[ -f "$state_dir/metadata" ]] || continue; repo_name="$(meta_get "$state_dir/metadata" repo)"; [[ -z "$repo_name" ]] || echo "$repo_name"; done; fi; legacy_repos; }
+local_repos(){ local repositories_root="$(profile_root)/repositories" state_dir="" repo_name=""; if [[ -d "$repositories_root" ]]; then for state_dir in "$repositories_root"/*; do [[ -f "$state_dir/metadata" ]] || continue; repo_name="$(meta_get "$state_dir/metadata" repo)"; [[ -z "$repo_name" ]] || echo "$repo_name"; done; fi; legacy_repos; legacy_service_repos; }
 
 run_container(){
     local state_dir="$1" scope="$2" repo_name="$3" runner_name="$4" container_name="$5"
@@ -571,6 +659,9 @@ runner_installation_detected(){
         return 0
     fi
     if [[ -d "$RUNNER_BASE" ]] && find "$RUNNER_BASE" -maxdepth 5 -type f \( -name '.runner' -o -name '.chrisscriptbase-runner' \) -print -quit 2>/dev/null | grep -q .; then
+        return 0
+    fi
+    if list_action_runner_service_units | grep -q .; then
         return 0
     fi
     return 1
