@@ -1,0 +1,2 @@
+# Keep shell scripts executable on Linux without CRLF shebang issues.
+*.sh text eol=lf
