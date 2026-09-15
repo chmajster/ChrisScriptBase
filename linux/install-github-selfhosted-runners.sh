@@ -16,7 +16,7 @@ IMAGE="${DOCKER_IMAGE:-chrisscriptbase/github-actions-runner:local}"
 RUNNER_VERSION="${RUNNER_VERSION:-}"
 LABELS_DEFAULT="${CUSTOM_LABELS:-homelab}"
 API_VERSION="${GITHUB_API_VERSION:-2026-03-10}"
-SOCKET="${RUNNER_DOCKER_SOCKET:-false}"
+SOCKET="${RUNNER_DOCKER_SOCKET:-true}"
 ALLOW_SUDO="${RUNNER_ALLOW_SUDO:-true}"
 INCLUDE_PUBLIC="${RUNNER_INCLUDE_PUBLIC:-false}"
 REBUILD=false
@@ -29,8 +29,8 @@ UI="auto"
 RUNNER_CPUS="${RUNNER_CPUS:-}"
 RUNNER_MEMORY="${RUNNER_MEMORY:-}"
 RUNNER_PIDS_LIMIT="${RUNNER_PIDS_LIMIT:-512}"
-LOG_MAX_SIZE="${RUNNER_LOG_MAX_SIZE:-20m}"
-LOG_MAX_FILE="${RUNNER_LOG_MAX_FILE:-3}"
+LOG_MAX_SIZE="${LOG_MAX_SIZE:-20m}"
+LOG_MAX_FILE="${LOG_MAX_FILE:-3}"
 PROFILES=()
 REPOS=()
 PROFILE="default"
@@ -86,8 +86,8 @@ UI
   --zenity                  Wymuś osobny graficzny interfejs Zenity.
 
 DOCKER / RUNNER
-  --docker-socket           Udostępnij /var/run/docker.sock jobom.
-  --no-docker-socket        Nie udostępniaj Docker socketa. Domyślne.
+  --docker-socket           Udostępnij /var/run/docker.sock jobom. Domyślne.
+  --no-docker-socket        Nie udostępniaj Docker socketa.
   --allow-sudo              Runner ma NOPASSWD sudo wewnątrz kontenera. Domyślne.
   --no-sudo                 Usuń NOPASSWD sudo.
   --rebuild-image           Wymuś ponowny docker build.
@@ -102,7 +102,7 @@ BEZPIECZEŃSTWO
   Kontener otrzymuje tylko krótkotrwały registration token.
   Publiczne repozytoria są domyślnie wyłączone.
   NOPASSWD sudo dotyczy kontenera runnera; --no-sudo wyłącza tę zgodność z akcjami wymagającymi sudo.
-  --docker-socket daje workflow praktycznie uprawnienia root na hoście Docker.
+  Dostęp do Docker socketa daje workflow praktycznie uprawnienia root na hoście Docker.
 
 KONFIGURACJA ~/.gitconfig
   [github "home"]
@@ -115,7 +115,7 @@ PRZYKŁAD
   sudo bash install-github-selfhosted-runners.sh -g
 
   sudo bash install-github-selfhosted-runners.sh \
-    --profile home --gui --docker-socket
+    --profile home --gui
 
 DIAGNOSTYKA
   docker ps -a --filter label=com.chrisscriptbase.github-runner=true
@@ -794,7 +794,7 @@ main(){
     (( ${#PROFILES[@]} > 0 )) || PROFILES=(default)
     if [[ "$LIST_REPOS" == false ]] && ! gui_choose_action; then return 0; fi
     if [[ "$ACTION" == install && "$LIST_REPOS" == false ]]; then build_image || die "Nie udało się zbudować obrazu runnera."; fi
-    [[ "$SOCKET" != true ]] || warn "--docker-socket daje workflow kontrolę nad Docker daemonem hosta."
+    [[ "$SOCKET" != true ]] || warn "Dostęp do Docker socketa daje workflow kontrolę nad Docker daemonem hosta."
     [[ "$INCLUDE_PUBLIC" != true ]] || warn "--include-public: self-hosted runner w publicznym repo może wykonać niezaufany kod."
     for profile_name in "${PROFILES[@]}"; do load_profile "$profile_name"; auth; if ! process; then ((failed_profiles += 1)); fi; done
     [[ "$LIST_REPOS" == false ]] || return "$failed_profiles"
