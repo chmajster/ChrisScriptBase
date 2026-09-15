@@ -53,7 +53,19 @@ expect_success "private-only default" bash -c 'source "$1"; [[ $INCLUDE_PUBLIC =
 expect_success "sudo enabled by default for Actions compatibility" bash -c 'source "$1"; [[ $ALLOW_SUDO == true ]]' _ "$SCRIPT"
 expect_success "accept --no-sudo override" bash -c 'source "$1"; args --no-sudo; [[ $ALLOW_SUDO == false ]]' _ "$SCRIPT"
 expect_success "accept --force-recreate" bash -c 'source "$1"; args --force-recreate; [[ $FORCE_RECREATE == true ]]' _ "$SCRIPT"
+expect_success "accept --prepare-host" bash -c 'source "$1"; args --prepare-host; [[ $PREPARE_HOST == true ]]' _ "$SCRIPT"
 expect_success "accept resource limits" bash -c 'source "$1"; args --cpus 2 --memory 4g --pids-limit 256; [[ $RUNNER_CPUS == 2 && $RUNNER_MEMORY == 4g && $RUNNER_PIDS_LIMIT == 256 ]]' _ "$SCRIPT"
+expect_success "normalize pinned runner version" bash -c 'source "$1"; RUNNER_VERSION=v2.999.1; [[ $(resolve_runner_version) == 2.999.1 ]]' _ "$SCRIPT"
+
+expect_success "apt metadata is refreshed at most once" bash -c '
+    source "$1"
+    APT_UPDATED=false
+    apt_calls=0
+    apt-get(){ ((apt_calls += 1)); return 0; }
+    apt_update_once
+    apt_update_once
+    [[ $apt_calls -eq 1 && $APT_UPDATED == true ]]
+' _ "$SCRIPT"
 
 expect_success "render embedded Docker context" env SCRIPT="$SCRIPT" TEST_TMP="$TMP" bash -c '
     source "$SCRIPT"
@@ -65,6 +77,9 @@ expect_success "render embedded Docker context" env SCRIPT="$SCRIPT" TEST_TMP="$
     grep -Fq "FROM ubuntu:24.04" "$TEST_TMP/context/Dockerfile"
     grep -Fq "actions-runner-linux-" "$TEST_TMP/context/Dockerfile"
     grep -Fq "zip unzip" "$TEST_TMP/context/Dockerfile"
+    grep -Fq "git-lfs" "$TEST_TMP/context/Dockerfile"
+    grep -Fq "openssh-client rsync" "$TEST_TMP/context/Dockerfile"
+    grep -Fq "python3-pip python3-venv shellcheck" "$TEST_TMP/context/Dockerfile"
     grep -Fq "ALLOW_SUDO=\"\${RUNNER_ALLOW_SUDO:-true}\"" "$TEST_TMP/context/runner-entrypoint.sh"
 '
 
