@@ -142,6 +142,24 @@ expect_success "GUI advertises full feature access" bash -c '
     grep -Fq "PURGE" "$1"
 ' _ "$SCRIPT"
 
+expect_success "Polish is the default UI language" bash -c '
+    source "$1"
+    [[ "$UI_LANGUAGE" == pl ]]
+    args --language pl
+    [[ "$UI_LANGUAGE" == pl ]]
+' _ "$SCRIPT"
+
+expect_success "Polish GUI labels are present" bash -c '
+    grep -Fq "Instalacja" "$1"
+    grep -Fq "Ponowna instalacja" "$1"
+    grep -Fq "Wymuś reinstalację" "$1"
+    grep -Fq "Sprawdź aktualizacje" "$1"
+    grep -Fq "Aktualizuj runnera" "$1"
+    grep -Fq "Przygotuj host" "$1"
+    grep -Fq "Odinstaluj" "$1"
+    grep -Fq "Język            - polski (aktywny)" "$1"
+' _ "$SCRIPT"
+
 expect_success "render embedded Docker context" env SCRIPT="$SCRIPT" TEST_TMP="$TMP" bash -c '
     source "$SCRIPT"
     mkdir -p "$TEST_TMP/context"

@@ -32,6 +32,7 @@ LIST_PROFILES=false
 LIST_REPOS=false
 SELECT_MODE=""
 UI="auto"
+UI_LANGUAGE="${RUNNER_UI_LANGUAGE:-pl}"
 RUNNER_CPUS="${RUNNER_CPUS:-}"
 RUNNER_MEMORY="${RUNNER_MEMORY:-}"
 RUNNER_PIDS_LIMIT="${RUNNER_PIDS_LIMIT:-512}"
@@ -108,11 +109,13 @@ REPOZYTORIA
   --include-public          Pozwól również na publiczne repozytoria.
 
 UI
-  -g, --gui                 Pełny TUI oparty o dialog. Wszystkie funkcje i opcje
-                            operacyjne skryptu są dostępne bez flag CLI: akcje,
-                            profile, repozytoria, ustawienia runnera i hosta.
+  -g, --gui                 Pełny polski TUI oparty o dialog. Wszystkie funkcje
+                            i opcje operacyjne skryptu są dostępne bez flag CLI:
+                            akcje, profile, repozytoria, runner i host.
   --tui                     Alias --gui.
   --zenity                  Wymuś graficzny interfejs Zenity dla wyboru repo.
+  --language pl             Język interfejsu: polski. Domyślny.
+  --polish                  Alias dla --language pl.
 
 DOCKER / RUNNER
   --docker-socket           Udostępnij /var/run/docker.sock jobom. Domyślne.
@@ -197,6 +200,8 @@ args(){
             -g|--gui|-GUI) UI="dialog"; shift ;;
             --tui) UI="dialog"; shift ;;
             --zenity) UI="zenity"; shift ;;
+            --language) [[ $# -ge 2 ]] || die "$1 wymaga języka."; UI_LANGUAGE="${2,,}"; shift 2 ;;
+            --polish) UI_LANGUAGE="pl"; shift ;;
             --list-profiles) LIST_PROFILES=true; shift ;;
             --list-repos) LIST_REPOS=true; shift ;;
             *) die "Nieznana opcja: $1" ;;
@@ -214,6 +219,7 @@ args(){
     case "$SOCKET" in true|false) ;; *) die "RUNNER_DOCKER_SOCKET musi być true/false." ;; esac
     case "$ALLOW_SUDO" in true|false) ;; *) die "RUNNER_ALLOW_SUDO musi być true/false." ;; esac
     case "$INCLUDE_PUBLIC" in true|false) ;; *) die "RUNNER_INCLUDE_PUBLIC musi być true/false." ;; esac
+    case "$UI_LANGUAGE" in pl|pl_pl|polski|polish) UI_LANGUAGE="pl" ;; *) die "Obsługiwany język interfejsu: pl (polski)." ;; esac
 }
 
 caller_init(){
@@ -850,7 +856,7 @@ status_org_line(){
 status_profile(){
     local repo_name="" tmp=""; local -a repositories=()
     tmp="$(mktemp)"
-    { echo "Profil: $PROFILE owner=$OWNER mode=$MODE"; printf '%-24s %-10s %-9s %-5s %-6s %-10s %-10s %-8s\n' Repo Kontener GitHub Busy Sock DockerAPI Runner Config; if [[ "$MODE" == org ]]; then status_org_line; else mapfile -t repositories < <(local_repos | awk 'NF && !seen[tolower($0)]++'); if (( ${#repositories[@]} == 0 )); then echo 'Brak lokalnych runnerów.'; else for repo_name in "${repositories[@]}"; do status_repo_line "$repo_name"; done; fi; fi; } >"$tmp"
+    { echo "Profil: $PROFILE owner=$OWNER mode=$MODE"; printf '%-24s %-10s %-9s %-5s %-6s %-10s %-10s %-8s\n' Repo Kontener GitHub Zajęty Socket DockerAPI Runner Konfig.; if [[ "$MODE" == org ]]; then status_org_line; else mapfile -t repositories < <(local_repos | awk 'NF && !seen[tolower($0)]++'); if (( ${#repositories[@]} == 0 )); then echo 'Brak lokalnych runnerów.'; else for repo_name in "${repositories[@]}"; do status_repo_line "$repo_name"; done; fi; fi; } >"$tmp"
     if [[ "$UI" == dialog && -r /dev/tty && -w /dev/tty ]]; then dialog --clear --backtitle "ChrisScriptBase • GitHub Runner" --title " Status runnerów " --textbox "$tmp" 28 120 </dev/tty >/dev/tty 2>/dev/tty || true; else cat "$tmp"; fi
     rm -f "$tmp"
 }
@@ -1086,16 +1092,16 @@ gui_show_inventory(){
     if (( ${#PROFILES[@]} > 0 )); then inventory_profiles=("${PROFILES[@]}"); else mapfile -t inventory_profiles < <(profiles | awk 'NF && !seen[$0]++'); fi
     tmp="$(mktemp)"
     {
-        echo "PROFILE / REPOSITORY INVENTORY"
+        echo "INWENTARZ PROFILI / REPOZYTORIÓW"
         echo
         for p in "${inventory_profiles[@]}"; do
             echo "=== Profil: $p ==="
             if ! load_profile "$p"; then echo "Błąd wczytania profilu"; echo; continue; fi
             echo "Owner: $OWNER   mode: $MODE"
             echo "Repozytoria GitHub:"
-            while IFS= read -r repo; do [[ -n "$repo" ]] && printf '  remote: %s\n' "$repo"; done < <(remote_repos 2>/dev/null || true)
+            while IFS= read -r repo; do [[ -n "$repo" ]] && printf '  zdalne: %s\n' "$repo"; done < <(remote_repos 2>/dev/null || true)
             echo "Lokalne runnery:"
-            while IFS= read -r repo; do [[ -n "$repo" ]] && printf '  local:  %s\n' "$repo"; done < <(local_repos 2>/dev/null | awk 'NF && !seen[$0]++')
+            while IFS= read -r repo; do [[ -n "$repo" ]] && printf '  lokalne: %s\n' "$repo"; done < <(local_repos 2>/dev/null | awk 'NF && !seen[$0]++')
             echo
         done
     } >"$tmp"
@@ -1113,19 +1119,20 @@ gui_choose_action(){
     while true; do
         message="Pełny tryb GUI — wszystkie funkcje skryptu są dostępne z tego menu.\nIstniejąca instalacja runnerów: $detected\nProfile: $([[ ${#PROFILES[@]} -gt 0 ]] && printf '%s' "${PROFILES[*]}" || echo 'domyślny')\nRepo mode: ${SELECT_MODE:-interactive}\n\nWybierz operację:"
         choice="$(exec 3>&1; dialog --clear --output-fd 3 --backtitle "ChrisScriptBase • GitHub Self-Hosted Runner Manager" --title " Pełne zarządzanie runnerami " --ok-label "Wybierz" --cancel-label "Wyjście" --menu "$message" 31 112 18 \
-          install "Install          - instalacja / reconciliation" \
-          reinstall "Reinstall        - bezpieczny reinstall z rollbackiem" \
-          force_reinstall "Force Reinstall  - wymuś przy konflikcie 409/422" \
-          status "Status           - kontenery, GitHub, socket, wersja" \
-          repair "Repair           - automatyczna naprawa runnerów" \
-          check_updates "Check Updates    - sprawdź latest actions/runner" \
-          update_runner "Update Runner    - latest + rebuild + reinstall" \
-          prepare_host "Prepare Host     - zależności + Docker + raport" \
+          install "Instalacja       - dodaj runner / uzgodnij stan" \
+          reinstall "Ponowna instalacja - bezpiecznie, z wycofaniem przy błędzie" \
+          force_reinstall "Wymuś reinstalację - kontynuuj przy konflikcie 409/422" \
+          status "Status            - kontenery, GitHub, socket i wersja" \
+          repair "Napraw            - automatyczna naprawa runnerów" \
+          check_updates "Sprawdź aktualizacje - porównaj wersję actions/runner" \
+          update_runner "Aktualizuj runnera - najnowsza wersja + przebudowa + reinstall" \
+          prepare_host "Przygotuj host    - zależności + Docker + raport" \
           settings "Ustawienia       - socket/sudo/CPU/RAM/wersja/repo" \
           profiles "Profile          - wybierz jeden lub wiele profili" \
-          inventory "Profile i repo   - pokaż skonfigurowane zasoby" \
-          uninstall "Uninstall        - usuń wybrane runnery" \
-          help "Pomoc            - pełna dokumentacja opcji" \
+          language "Język            - polski (aktywny)" \
+          inventory "Profile i repozytoria - pokaż skonfigurowane zasoby" \
+          uninstall "Odinstaluj        - usuń wybrane runnery" \
+          help "Pomoc             - pełna dokumentacja opcji" \
           exit "Wyjście" \
           </dev/tty >/dev/tty 2>/dev/tty)" || rc=$?
         clear >/dev/tty 2>/dev/null || true
@@ -1134,6 +1141,7 @@ gui_choose_action(){
             settings) gui_settings || true; continue ;;
             profiles) gui_select_profiles || true; continue ;;
             inventory) gui_show_inventory || true; continue ;;
+            language) dialog --msgbox "Język interfejsu: polski (pl).\n\nPolski jest językiem domyślnym GUI i komunikatów użytkowych." 10 76 </dev/tty >/dev/tty 2>/dev/tty || true; continue ;;
             help) gui_show_help; continue ;;
             exit) return 130 ;;
             prepare_host) gui_reset_action_flags; PREPARE_HOST=true; return 0 ;;
@@ -1154,11 +1162,11 @@ gui_choose_action(){
 }
 
 terminal_select(){
-    local repo_name="" output="" rc=0 message="" action_label=Install; local -a available=("$@") items=()
+    local repo_name="" output="" rc=0 message="" action_label=Instalacja; local -a available=("$@") items=()
     [[ -r /dev/tty && -w /dev/tty ]] || die "-g/--gui wymaga interaktywnego terminala"; ensure_dialog
     if (( ${#available[@]} == 0 )); then dialog --clear --backtitle "ChrisScriptBase • GitHub Self-Hosted Runner Manager" --title " Brak repozytoriów " --msgbox "Nie znaleziono repozytoriów dostępnych dla profilu: $PROFILE" 9 70 </dev/tty >/dev/tty 2>/dev/tty || true; return 0; fi
     for repo_name in "${available[@]}"; do items+=("$repo_name" "" off); done
-    if [[ "$ACTION" == uninstall ]]; then action_label=Uninstall; elif [[ "$REPAIR_MODE" == true ]]; then action_label=Repair; elif [[ "$UPDATE_RUNNER" == true ]]; then action_label='Update Runner'; elif [[ "$REINSTALL_ONLY" == true && "$FORCE_REMOTE_DELETE" == true ]]; then action_label='Force Reinstall'; elif [[ "$REINSTALL_ONLY" == true ]]; then action_label=Reinstall; fi
+    if [[ "$ACTION" == uninstall ]]; then action_label=Odinstaluj; elif [[ "$REPAIR_MODE" == true ]]; then action_label=Napraw; elif [[ "$UPDATE_RUNNER" == true ]]; then action_label='Aktualizuj runnera'; elif [[ "$REINSTALL_ONLY" == true && "$FORCE_REMOTE_DELETE" == true ]]; then action_label='Wymuś reinstalację'; elif [[ "$REINSTALL_ONLY" == true ]]; then action_label='Ponowna instalacja'; fi
     message="Profil: $PROFILE\nOwner: $OWNER\nAkcja: $action_label\n\nSpacja: zaznacz/odznacz   Enter: zatwierdź"
     output="$(exec 3>&1; dialog --clear --colors --output-fd 3 --separate-output --backtitle "ChrisScriptBase • GitHub Self-Hosted Runner Manager" --title " Wybór repozytoriów " --ok-label "Zatwierdź" --cancel-label "Anuluj" --checklist "$message" 24 100 16 "${items[@]}" </dev/tty >/dev/tty 2>/dev/tty)" || rc=$?
     (( rc == 0 )) || return "$rc"; [[ -z "$output" ]] || printf '%s\n' "$output"
