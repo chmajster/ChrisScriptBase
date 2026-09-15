@@ -67,6 +67,40 @@ expect_success "apt metadata is refreshed at most once" bash -c '
     [[ $apt_calls -eq 1 && $APT_UPDATED == true ]]
 ' _ "$SCRIPT"
 
+expect_success "prepare-host required package list" bash -c '
+    source "$1"
+    packages=" ${HOST_REQUIRED_PACKAGES[*]} "
+    for package in ca-certificates curl jq git coreutils gawk sudo libc-bin findutils grep sed hostname docker.io dialog; do
+        [[ "$packages" == *" $package "* ]] || exit 1
+    done
+' _ "$SCRIPT"
+
+expect_success "package report lists status and versions" bash -c '
+    source "$1"
+    HOST_REQUIRED_PACKAGES=(curl jq docker.io)
+    dpkg-query(){
+        local package="${@: -1}"
+        if [[ "$*" == *"Status"* ]]; then
+            printf "install ok installed"
+        else
+            printf "test-version-%s" "$package"
+        fi
+    }
+    docker(){
+        case "${1:-}" in
+            info) return 0 ;;
+            version) printf "99.0.0" ;;
+        esac
+    }
+    output="$(host_package_report)"
+    grep -Fq "curl" <<< "$output"
+    grep -Fq "jq" <<< "$output"
+    grep -Fq "docker.io" <<< "$output"
+    grep -Fq "test-version-curl" <<< "$output"
+    grep -Fq "Docker Engine: OK (wersja 99.0.0)" <<< "$output"
+    grep -Fq "Wszystkie wymagane pakiety są zainstalowane (3/3)." <<< "$output"
+' _ "$SCRIPT"
+
 expect_success "render embedded Docker context" env SCRIPT="$SCRIPT" TEST_TMP="$TMP" bash -c '
     source "$SCRIPT"
     mkdir -p "$TEST_TMP/context"

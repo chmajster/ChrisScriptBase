@@ -33,6 +33,22 @@ RUNNER_PIDS_LIMIT="${RUNNER_PIDS_LIMIT:-512}"
 LOG_MAX_SIZE="${RUNNER_LOG_MAX_SIZE:-20m}"
 LOG_MAX_FILE="${RUNNER_LOG_MAX_FILE:-3}"
 APT_UPDATED=false
+HOST_REQUIRED_PACKAGES=(
+    ca-certificates
+    curl
+    jq
+    git
+    coreutils
+    gawk
+    sudo
+    libc-bin
+    findutils
+    grep
+    sed
+    hostname
+    docker.io
+    dialog
+)
 PROFILES=()
 REPOS=()
 PROFILE="default"
@@ -64,7 +80,8 @@ AKCJE
   --uninstall               Usuń wybrane runnery.
   --purge                   Z --uninstall usuń pusty stan i lokalny obraz.
   --prepare-host            Przygotuj hosta i zakończ: zależności, Docker i dialog.
-                            Przydatne do przygotowania obrazu/VM przed instalacją runnerów.
+                            Instaluje brakujące pakiety, a następnie wyświetla ich
+                            status i wersje oraz sprawdza działanie Docker Engine.
 
 PROFILE
   -p, --profile NAME        Profil z ~/.gitconfig; można powtórzyć.
@@ -299,6 +316,73 @@ apt_install(){
     (( $# > 0 )) || return 0
     apt_update_once
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@"
+}
+
+package_installed(){
+    local package="$1" status=""
+    command -v dpkg-query >/dev/null 2>&1 || return 2
+    status="$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null || true)"
+    [[ "$status" == "install ok installed" ]]
+}
+
+ensure_prepare_host_packages(){
+    local package=""
+    local -a missing=()
+    [[ "$PREPARE_HOST" == true ]] || return 0
+    command -v apt-get >/dev/null 2>&1 || return 0
+    command -v dpkg-query >/dev/null 2>&1 || return 0
+
+    for package in "${HOST_REQUIRED_PACKAGES[@]}"; do
+        package_installed "$package" || missing+=("$package")
+    done
+
+    if (( ${#missing[@]} > 0 )); then
+        log "Instalacja brakujących pakietów hosta: ${missing[*]}"
+        apt_install "${missing[@]}"
+    fi
+}
+
+host_package_report(){
+    local package="" version="" docker_version=""
+    local issues=0
+
+    log "Weryfikacja pakietów hosta"
+    printf '%-22s %-10s %s\n' "Pakiet" "Status" "Wersja"
+    printf '%-22s %-10s %s\n' "----------------------" "----------" "------------------------------"
+
+    if command -v dpkg-query >/dev/null 2>&1; then
+        for package in "${HOST_REQUIRED_PACKAGES[@]}"; do
+            if package_installed "$package"; then
+                version="$(dpkg-query -W -f='${Version}' "$package" 2>/dev/null || true)"
+                [[ -n "$version" ]] || version="n/d"
+                printf '%-22s %-10s %s\n' "$package" "OK" "$version"
+            else
+                printf '%-22s %-10s %s\n' "$package" "BRAK" "-"
+                ((issues += 1))
+            fi
+        done
+    else
+        warn "Brak dpkg-query: nie można odczytać wersji pakietów. Pokazuję wymaganą listę jako N/D."
+        for package in "${HOST_REQUIRED_PACKAGES[@]}"; do
+            printf '%-22s %-10s %s\n' "$package" "N/D" "-"
+        done
+    fi
+
+    echo
+    if docker info >/dev/null 2>&1; then
+        docker_version="$(docker version --format '{{.Server.Version}}' 2>/dev/null || true)"
+        [[ -n "$docker_version" ]] || docker_version="n/d"
+        printf 'Docker Engine: OK (wersja %s)\n' "$docker_version"
+    else
+        echo 'Docker Engine: BŁĄD'
+        ((issues += 1))
+    fi
+
+    if (( issues > 0 )); then
+        warn "Weryfikacja hosta wykryła $issues braków/błędów."
+        return 1
+    fi
+    printf 'Wszystkie wymagane pakiety są zainstalowane (%d/%d).\n' "${#HOST_REQUIRED_PACKAGES[@]}" "${#HOST_REQUIRED_PACKAGES[@]}"
 }
 
 ensure_dependencies(){
@@ -889,7 +973,9 @@ main(){
     [[ $EUID -eq 0 ]] || die "Uruchom przez sudo/root"
     ensure_dependencies
     if [[ "$PREPARE_HOST" == true ]]; then
+        ensure_prepare_host_packages
         docker_ready
+        host_package_report || die "Host nie przeszedł końcowej weryfikacji pakietów."
         echo "Host przygotowany. Docker działa, a wymagane pakiety są zainstalowane."
         return 0
     fi
