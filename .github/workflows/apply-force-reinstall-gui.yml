@@ -1,0 +1,220 @@
+name: Apply force reinstall GUI patch
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-force-reinstall-gui.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Apply force reinstall patch
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          script_path = Path('linux/install-github-selfhosted-runners.sh')
+          tests_path = Path('linux/tests/test-install-github-selfhosted-runners.sh')
+          s = script_path.read_text()
+
+          def replace_once(old, new, label):
+              global s
+              count = s.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected exactly one match, got {count}')
+              s = s.replace(old, new, 1)
+
+          replace_once(
+              'FORCE_RECREATE=false\nPURGE=false',
+              'FORCE_RECREATE=false\nFORCE_REMOTE_DELETE=false\nPURGE=false',
+              'force flag declaration',
+          )
+          replace_once(
+              '                            Install / Reinstall / Uninstall.\n',
+              '                            Install / Reinstall / Force Reinstall / Uninstall.\n',
+              'GUI help actions',
+          )
+          replace_once(
+              '  --force-recreate          Wymuś odtworzenie wybranych kontenerów.\n',
+              '  --force-recreate          Wymuś odtworzenie kontenerów; przy błędzie usunięcia\n'
+              '                            starej rejestracji kontynuuj z config.sh --replace.\n',
+              'force recreate help',
+          )
+          replace_once(
+              '            --force-recreate) FORCE_RECREATE=true; shift ;;\n',
+              '            --force-recreate) FORCE_RECREATE=true; FORCE_REMOTE_DELETE=true; shift ;;\n',
+              'force recreate args',
+          )
+
+          old_remote = '''remote_delete(){
+              local endpoint="$1" runner_name="$2" row="" id="" rc=0
+              row="$(runner_lookup "$endpoint" "$runner_name")" || rc=$?
+              (( rc != 3 )) || return 0
+              (( rc == 0 )) || return "$rc"
+              id="${row%%$'\\t'*}"; [[ -n "$id" ]] || return 0
+              api DELETE "$endpoint/$id" >/dev/null
+          }
+          '''
+          new_remote = old_remote + '''
+          remote_delete_recreate(){
+              local endpoint="$1" runner_name="$2" attempt=1 rc=1
+              for attempt in 1 2 3; do
+                  if remote_delete "$endpoint" "$runner_name"; then
+                      return 0
+                  else
+                      rc=$?
+                  fi
+                  if (( attempt < 3 )); then
+                      warn "Nie udało się usunąć rejestracji $runner_name (próba $attempt/3). Ponawiam za 2 s..."
+                      sleep 2
+                  fi
+              done
+              if [[ "$FORCE_REMOTE_DELETE" == true ]]; then
+                  warn "FORCE: nie udało się usunąć starej rejestracji $runner_name. Kontynuuję; config.sh --replace zastąpi wpis podczas ponownej rejestracji."
+                  return 0
+              fi
+              return "$rc"
+          }
+          '''
+          replace_once(old_remote, new_remote, 'remote delete recreate helper')
+
+          replace_once(
+              '        remote_delete "$(runner_endpoint "$repo_name")" "$runner_name" || { warn "Nie udało się usunąć starej rejestracji $runner_name."; return 1; }\n',
+              '        remote_delete_recreate "$(runner_endpoint "$repo_name")" "$runner_name" || { warn "Nie udało się usunąć starej rejestracji $runner_name."; return 1; }\n',
+              'repo reconciliation delete',
+          )
+          replace_once(
+              '    if docker inspect "$container_name" >/dev/null 2>&1; then docker rm -f "$container_name" >/dev/null 2>&1 || true; remote_delete "/orgs/$OWNER/actions/runners" "$runner_name" || return 1; fi\n',
+              '    if docker inspect "$container_name" >/dev/null 2>&1; then docker rm -f "$container_name" >/dev/null 2>&1 || true; remote_delete_recreate "/orgs/$OWNER/actions/runners" "$runner_name" || return 1; fi\n',
+              'org reconciliation delete',
+          )
+
+          old_menu = '''          --menu "$message" 16 78 6 \\
+                    install "Install    - dodaj nowy runner / wykonaj reconciliation" \\
+                    reinstall "Reinstall  - przeinstaluj wybrane zainstalowane runnery" \\
+                    uninstall "Uninstall  - usuń wybrane zainstalowane runnery" \\
+          '''
+          new_menu = '''          --menu "$message" 18 96 8 \\
+                    install "Install         - dodaj nowy runner / wykonaj reconciliation" \\
+                    reinstall "Reinstall       - przeinstaluj; błąd wyrejestrowania zatrzymuje operację" \\
+                    force_reinstall "Force Reinstall - kontynuuj mimo 422/błędu usunięcia starej rejestracji" \\
+                    uninstall "Uninstall       - usuń wybrane zainstalowane runnery" \\
+          '''
+          replace_once(old_menu, new_menu, 'GUI action menu')
+
+          old_case = '''        install)
+                      ACTION="install"
+                      REINSTALL_ONLY=false
+                      ;;
+                  reinstall)
+                      ACTION="install"
+                      FORCE_RECREATE=true
+                      REINSTALL_ONLY=true
+                      ;;
+                  uninstall)
+                      ACTION="uninstall"
+                      REINSTALL_ONLY=false
+                      ;;
+          '''
+          new_case = '''        install)
+                      ACTION="install"
+                      FORCE_RECREATE=false
+                      FORCE_REMOTE_DELETE=false
+                      REINSTALL_ONLY=false
+                      ;;
+                  reinstall)
+                      ACTION="install"
+                      FORCE_RECREATE=true
+                      FORCE_REMOTE_DELETE=false
+                      REINSTALL_ONLY=true
+                      ;;
+                  force_reinstall)
+                      ACTION="install"
+                      FORCE_RECREATE=true
+                      FORCE_REMOTE_DELETE=true
+                      REINSTALL_ONLY=true
+                      ;;
+                  uninstall)
+                      ACTION="uninstall"
+                      FORCE_RECREATE=false
+                      FORCE_REMOTE_DELETE=false
+                      REINSTALL_ONLY=false
+                      ;;
+          '''
+          replace_once(old_case, new_case, 'GUI action handling')
+
+          replace_once(
+              '    local repo_name="" output="" rc=0 message=""; local -a available=("$@") items=()\n',
+              '    local repo_name="" output="" rc=0 message="" action_label="Install"; local -a available=("$@") items=()\n',
+              'terminal action label variable',
+          )
+          old_select_message = '''    for repo_name in "${available[@]}"; do items+=("$repo_name" "" off); done
+              message="Profil: $PROFILE\\nOwner: $OWNER\\nAkcja: $([[ "$ACTION" == uninstall ]] && echo Uninstall || { [[ "$REINSTALL_ONLY" == true ]] && echo Reinstall || echo Install; })\\n\\nSpacja: zaznacz/odznacz   Enter: zatwierdź"
+          '''
+          new_select_message = '''    for repo_name in "${available[@]}"; do items+=("$repo_name" "" off); done
+              if [[ "$ACTION" == uninstall ]]; then
+                  action_label="Uninstall"
+              elif [[ "$REINSTALL_ONLY" == true && "$FORCE_REMOTE_DELETE" == true ]]; then
+                  action_label="Force Reinstall"
+              elif [[ "$REINSTALL_ONLY" == true ]]; then
+                  action_label="Reinstall"
+              fi
+              message="Profil: $PROFILE\\nOwner: $OWNER\\nAkcja: $action_label\\n\\nSpacja: zaznacz/odznacz   Enter: zatwierdź"
+          '''
+          replace_once(old_select_message, new_select_message, 'terminal selected action label')
+
+          script_path.write_text(s)
+
+          t = tests_path.read_text()
+          old_test = 'expect_success "accept --force-recreate" bash -c \'source "$1"; args --force-recreate; [[ $FORCE_RECREATE == true ]]\' _ "$SCRIPT"\n'
+          new_test = '''expect_success "accept --force-recreate" bash -c 'source "$1"; args --force-recreate; [[ $FORCE_RECREATE == true && $FORCE_REMOTE_DELETE == true ]]' _ "$SCRIPT"
+          expect_success "force recreate tolerates remote delete failure" bash -c '
+              source "$1"
+              FORCE_REMOTE_DELETE=true
+              sleep(){ :; }
+              remote_delete(){ return 22; }
+              remote_delete_recreate /repos/test/actions/runners test-runner
+          ' _ "$SCRIPT"
+          expect_failure "normal reinstall rejects remote delete failure" bash -c '
+              source "$1"
+              FORCE_REMOTE_DELETE=false
+              sleep(){ :; }
+              remote_delete(){ return 22; }
+              remote_delete_recreate /repos/test/actions/runners test-runner
+          ' _ "$SCRIPT"
+          '''
+          if t.count(old_test) != 1:
+              raise SystemExit(f'force recreate test: expected one match, got {t.count(old_test)}')
+          t = t.replace(old_test, new_test, 1)
+          tests_path.write_text(t)
+          PY
+
+      - name: Validate shell syntax
+        run: bash -n linux/install-github-selfhosted-runners.sh
+
+      - name: Run runner manager regression tests
+        run: bash linux/tests/test-install-github-selfhosted-runners.sh
+
+      - name: Commit patch
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo 'No changes to commit.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add linux/install-github-selfhosted-runners.sh linux/tests/test-install-github-selfhosted-runners.sh
+          git commit -m 'Add force reinstall fallback and GUI option'
+          git push origin HEAD:main
