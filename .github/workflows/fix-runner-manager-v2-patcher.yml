@@ -1,0 +1,106 @@
+name: Fix runner manager upgrade patcher
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/fix-runner-manager-v2-patcher.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Fix strict GUI case matcher
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('.github/workflows/apply-runner-manager-v2.yml')
+          x = p.read_text()
+          old = '''          rep('''        force_reinstall)
+                  ACTION="install"
+                  FORCE_RECREATE=true
+                  FORCE_REMOTE_DELETE=true
+                  REINSTALL_ONLY=true
+                  ;;
+              uninstall)''', '''        force_reinstall)
+                  ACTION="install"
+                  FORCE_RECREATE=true
+                  FORCE_REMOTE_DELETE=true
+                  REINSTALL_ONLY=true
+                  ;;
+              status)
+                  STATUS_ONLY=true
+                  ;;
+              repair)
+                  ACTION="install"
+                  REPAIR_MODE=true
+                  REINSTALL_ONLY=true
+                  FORCE_RECREATE=false
+                  FORCE_REMOTE_DELETE=false
+                  ;;
+              check_updates)
+                  CHECK_UPDATES=true
+                  ;;
+              update_runner)
+                  ACTION="install"
+                  UPDATE_RUNNER=true
+                  REINSTALL_ONLY=true
+                  FORCE_RECREATE=true
+                  FORCE_REMOTE_DELETE=false
+                  REBUILD=true
+                  ;;
+              uninstall)''', 'gui menu cases')'''
+          new = '''          rep('''        force_reinstall)
+              ACTION="install"
+              FORCE_RECREATE=true
+              FORCE_REMOTE_DELETE=true
+              REINSTALL_ONLY=true
+              ;;
+          uninstall)''', '''        force_reinstall)
+              ACTION="install"
+              FORCE_RECREATE=true
+              FORCE_REMOTE_DELETE=true
+              REINSTALL_ONLY=true
+              ;;
+          status)
+              STATUS_ONLY=true
+              ;;
+          repair)
+              ACTION="install"
+              REPAIR_MODE=true
+              REINSTALL_ONLY=true
+              FORCE_RECREATE=false
+              FORCE_REMOTE_DELETE=false
+              ;;
+          check_updates)
+              CHECK_UPDATES=true
+              ;;
+          update_runner)
+              ACTION="install"
+              UPDATE_RUNNER=true
+              REINSTALL_ONLY=true
+              FORCE_RECREATE=true
+              FORCE_REMOTE_DELETE=false
+              REBUILD=true
+              ;;
+          uninstall)''', 'gui menu cases')'''
+          if old not in x:
+              raise SystemExit('patcher GUI case block not found')
+          p.write_text(x.replace(old, new, 1))
+          PY
+      - name: Commit patcher fix
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git rm .github/workflows/fix-runner-manager-v2-patcher.yml
+          git add .github/workflows/apply-runner-manager-v2.yml
+          git commit -m "Fix runner manager upgrade patch matcher"
+          git push origin main
