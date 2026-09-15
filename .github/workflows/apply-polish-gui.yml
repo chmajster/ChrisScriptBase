@@ -1,0 +1,173 @@
+name: Apply Polish language support to runner GUI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-polish-gui.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Apply Polish UI
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('linux/install-github-selfhosted-runners.sh')
+          tpath = Path('linux/tests/test-install-github-selfhosted-runners.sh')
+          s = p.read_text()
+          t = tpath.read_text()
+
+          def once(text, old, new, label):
+              if old not in text:
+                  raise SystemExit(f'missing fragment: {label}')
+              return text.replace(old, new, 1)
+
+          # Explicit Polish UI language, defaulting to Polish.
+          s = once(s, 'UI="auto"\nRUNNER_CPUS=', 'UI="auto"\nUI_LANGUAGE="${RUNNER_UI_LANGUAGE:-pl}"\nRUNNER_CPUS=', 'UI language global')
+
+          s = once(s,
+              '  --zenity                  Wymuś graficzny interfejs Zenity dla wyboru repo.\n',
+              '  --zenity                  Wymuś graficzny interfejs Zenity dla wyboru repo.\n'
+              '  --language pl             Język interfejsu: polski. Domyślny.\n'
+              '  --polish                  Alias dla --language pl.\n',
+              'help language')
+
+          s = once(s,
+              '            --zenity) UI="zenity"; shift ;;\n            --list-profiles)',
+              '            --zenity) UI="zenity"; shift ;;\n'
+              '            --language) [[ $# -ge 2 ]] || die "$1 wymaga języka."; UI_LANGUAGE="${2,,}"; shift 2 ;;\n'
+              '            --polish) UI_LANGUAGE="pl"; shift ;;\n'
+              '            --list-profiles)',
+              'args language')
+
+          s = once(s,
+              '    case "$INCLUDE_PUBLIC" in true|false) ;; *) die "RUNNER_INCLUDE_PUBLIC musi być true/false." ;; esac\n}',
+              '    case "$INCLUDE_PUBLIC" in true|false) ;; *) die "RUNNER_INCLUDE_PUBLIC musi być true/false." ;; esac\n'
+              '    case "$UI_LANGUAGE" in pl|pl_pl|polski|polish) UI_LANGUAGE="pl" ;; *) die "Obsługiwany język interfejsu: pl (polski)." ;; esac\n'
+              '}',
+              'language validation')
+
+          # Main GUI: Polish action labels and explicit language item.
+          replacements = {
+              'install "Install          - instalacja / reconciliation"': 'install "Instalacja       - dodaj runner / uzgodnij stan"',
+              'reinstall "Reinstall        - bezpieczny reinstall z rollbackiem"': 'reinstall "Ponowna instalacja - bezpiecznie, z wycofaniem przy błędzie"',
+              'force_reinstall "Force Reinstall  - wymuś przy konflikcie 409/422"': 'force_reinstall "Wymuś reinstalację - kontynuuj przy konflikcie 409/422"',
+              'status "Status           - kontenery, GitHub, socket, wersja"': 'status "Status            - kontenery, GitHub, socket i wersja"',
+              'repair "Repair           - automatyczna naprawa runnerów"': 'repair "Napraw            - automatyczna naprawa runnerów"',
+              'check_updates "Check Updates    - sprawdź latest actions/runner"': 'check_updates "Sprawdź aktualizacje - porównaj wersję actions/runner"',
+              'update_runner "Update Runner    - latest + rebuild + reinstall"': 'update_runner "Aktualizuj runnera - najnowsza wersja + przebudowa + reinstall"',
+              'prepare_host "Prepare Host     - zależności + Docker + raport"': 'prepare_host "Przygotuj host    - zależności + Docker + raport"',
+              'inventory "Profile i repo   - pokaż skonfigurowane zasoby"': 'inventory "Profile i repozytoria - pokaż skonfigurowane zasoby"',
+              'uninstall "Uninstall        - usuń wybrane runnery"': 'uninstall "Odinstaluj        - usuń wybrane runnery"',
+              'help "Pomoc            - pełna dokumentacja opcji"': 'help "Pomoc             - pełna dokumentacja opcji"',
+          }
+          for old, new in replacements.items():
+              if old not in s:
+                  raise SystemExit(f'missing Polish menu fragment: {old}')
+              s = s.replace(old, new, 1)
+
+          s = once(s,
+              '          profiles "Profile          - wybierz jeden lub wiele profili" \\\n          inventory',
+              '          profiles "Profile          - wybierz jeden lub wiele profili" \\\n'
+              '          language "Język            - polski (aktywny)" \\\n'
+              '          inventory',
+              'language menu item')
+
+          s = once(s,
+              '            inventory) gui_show_inventory || true; continue ;;\n            help)',
+              '            inventory) gui_show_inventory || true; continue ;;\n'
+              '            language) dialog --msgbox "Język interfejsu: polski (pl).\\n\\nPolski jest językiem domyślnym GUI i komunikatów użytkowych." 10 76 </dev/tty >/dev/tty 2>/dev/tty || true; continue ;;\n'
+              '            help)',
+              'language action')
+
+          # Polish action names in the repository selection screen.
+          s = s.replace("action_label=Install", "action_label=Instalacja", 1)
+          s = s.replace("action_label=Uninstall", "action_label=Odinstaluj", 1)
+          s = s.replace("action_label=Repair", "action_label=Napraw", 1)
+          s = s.replace("action_label='Update Runner'", "action_label='Aktualizuj runnera'", 1)
+          s = s.replace("action_label='Force Reinstall'", "action_label='Wymuś reinstalację'", 1)
+          s = s.replace("action_label=Reinstall", "action_label='Ponowna instalacja'", 1)
+
+          # Polish status column labels and remaining user-facing English labels.
+          s = s.replace('Repo Kontener GitHub Busy Sock DockerAPI Runner Config', 'Repo Kontener GitHub Zajęty Socket DockerAPI Runner Konfig.', 1)
+          s = s.replace('PROFILE / REPOSITORY INVENTORY', 'INWENTARZ PROFILI / REPOZYTORIÓW', 1)
+          s = s.replace('remote: %s', 'zdalne: %s')
+          s = s.replace('local:  %s', 'lokalne: %s')
+
+          # Help now describes Polish GUI explicitly.
+          s = once(s,
+              '  -g, --gui                 Pełny TUI oparty o dialog. Wszystkie funkcje i opcje\n'
+              '                            operacyjne skryptu są dostępne bez flag CLI: akcje,\n'
+              '                            profile, repozytoria, ustawienia runnera i hosta.\n',
+              '  -g, --gui                 Pełny polski TUI oparty o dialog. Wszystkie funkcje\n'
+              '                            i opcje operacyjne skryptu są dostępne bez flag CLI:\n'
+              '                            akcje, profile, repozytoria, runner i host.\n',
+              'help Polish GUI')
+
+          # Tests.
+          marker = 'expect_success "render embedded Docker context"'
+          pos = t.find(marker)
+          if pos < 0:
+              raise SystemExit('test marker missing')
+          extra = r'''expect_success "Polish is the default UI language" bash -c '
+              source "$1"
+              [[ "$UI_LANGUAGE" == pl ]]
+              args --language pl
+              [[ "$UI_LANGUAGE" == pl ]]
+          ' _ "$SCRIPT"
+
+          expect_success "Polish GUI labels are present" bash -c '
+              grep -Fq "Instalacja" "$1"
+              grep -Fq "Ponowna instalacja" "$1"
+              grep -Fq "Wymuś reinstalację" "$1"
+              grep -Fq "Sprawdź aktualizacje" "$1"
+              grep -Fq "Aktualizuj runnera" "$1"
+              grep -Fq "Przygotuj host" "$1"
+              grep -Fq "Odinstaluj" "$1"
+              grep -Fq "Język            - polski (aktywny)" "$1"
+          ' _ "$SCRIPT"
+
+          '''
+          t = t[:pos] + extra + t[pos:]
+
+          p.write_text(s)
+          tpath.write_text(t)
+          PY
+
+      - name: Validate syntax
+        run: |
+          bash -n linux/install-github-selfhosted-runners.sh
+          bash -n linux/tests/test-install-github-selfhosted-runners.sh
+
+      - name: Run regression tests
+        run: bash linux/tests/test-install-github-selfhosted-runners.sh
+
+      - name: Verify Polish UI
+        run: |
+          grep -Fq 'UI_LANGUAGE="${RUNNER_UI_LANGUAGE:-pl}"' linux/install-github-selfhosted-runners.sh
+          grep -Fq -- '--language pl' linux/install-github-selfhosted-runners.sh
+          grep -Fq 'Ponowna instalacja' linux/install-github-selfhosted-runners.sh
+          grep -Fq 'Aktualizuj runnera' linux/install-github-selfhosted-runners.sh
+          grep -Fq 'Język            - polski (aktywny)' linux/install-github-selfhosted-runners.sh
+
+      - name: Commit and remove temporary workflow
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git rm -f .github/workflows/apply-polish-gui.yml
+          git add linux/install-github-selfhosted-runners.sh linux/tests/test-install-github-selfhosted-runners.sh
+          git commit -m "Add Polish language support to runner GUI"
+          git push origin main
