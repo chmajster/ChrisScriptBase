@@ -22,6 +22,7 @@ INCLUDE_PUBLIC="${RUNNER_INCLUDE_PUBLIC:-false}"
 REBUILD=false
 FORCE_RECREATE=false
 PURGE=false
+PREPARE_HOST=false
 LIST_PROFILES=false
 LIST_REPOS=false
 SELECT_MODE=""
@@ -31,6 +32,7 @@ RUNNER_MEMORY="${RUNNER_MEMORY:-}"
 RUNNER_PIDS_LIMIT="${RUNNER_PIDS_LIMIT:-512}"
 LOG_MAX_SIZE="${RUNNER_LOG_MAX_SIZE:-20m}"
 LOG_MAX_FILE="${RUNNER_LOG_MAX_FILE:-3}"
+APT_UPDATED=false
 PROFILES=()
 REPOS=()
 PROFILE="default"
@@ -61,6 +63,8 @@ AKCJE
   --install                 Instalacja/reconciliation runnerów. Domyślne.
   --uninstall               Usuń wybrane runnery.
   --purge                   Z --uninstall usuń pusty stan i lokalny obraz.
+  --prepare-host            Przygotuj hosta i zakończ: zależności, Docker i dialog.
+                            Przydatne do przygotowania obrazu/VM przed instalacją runnerów.
 
 PROFILE
   -p, --profile NAME        Profil z ~/.gitconfig; można powtórzyć.
@@ -95,7 +99,12 @@ DOCKER / RUNNER
   --cpus N                  Limit CPU kontenera, np. 2 lub 1.5.
   --memory SIZE             Limit RAM, np. 4g.
   --pids-limit N            Limit procesów. Domyślnie 512.
-  --runner-version VER      Wersja actions/runner; puste = latest podczas build.
+  --runner-version VER      Wersja actions/runner; puste = latest przy budowie obrazu.
+
+OBRAZ RUNNERA
+  Obraz zawiera podstawowy zestaw narzędzi CI, aby workflow nie instalował ich
+  przy każdym jobie: git-lfs, SSH, rsync, build-essential, Python 3, pip/venv,
+  ShellCheck, kompresję oraz Docker CLI/Engine package dla zgodności z socketem hosta.
 
 BEZPIECZEŃSTWO
   Długoterminowy GitHub PAT pozostaje wyłącznie na hoście.
@@ -112,12 +121,15 @@ KONFIGURACJA ~/.gitconfig
       labels = homelab,linux
 
 PRZYKŁAD
+  sudo bash install-github-selfhosted-runners.sh --prepare-host
+
   sudo bash install-github-selfhosted-runners.sh -g
 
   sudo bash install-github-selfhosted-runners.sh \
     --profile home --gui
 
 DIAGNOSTYKA
+  docker info
   docker ps -a --filter label=com.chrisscriptbase.github-runner=true
   docker logs -f <nazwa-kontenera>
 EOF
@@ -147,6 +159,7 @@ args(){
             --install) ACTION="install"; ACTION_EXPLICIT=true; shift ;;
             --uninstall) ACTION="uninstall"; ACTION_EXPLICIT=true; shift ;;
             --purge) PURGE=true; shift ;;
+            --prepare-host) PREPARE_HOST=true; shift ;;
             --docker-socket) SOCKET=true; shift ;;
             --no-docker-socket) SOCKET=false; shift ;;
             --allow-sudo) ALLOW_SUDO=true; shift ;;
@@ -275,25 +288,102 @@ org_runner(){ local host=""; host="$(hostname -s | tr '[:upper:]' '[:lower:]')";
 repo_container(){ echo "github-runner-$(san "$PROFILE")-$(san "$1")"; }
 org_container(){ echo "github-runner-$(san "$PROFILE")-org"; }
 
+apt_update_once(){
+    command -v apt-get >/dev/null 2>&1 || die "Brak apt-get do automatycznej instalacji pakietów."
+    [[ "$APT_UPDATED" == true ]] && return 0
+    apt-get update
+    APT_UPDATED=true
+}
+
+apt_install(){
+    (( $# > 0 )) || return 0
+    apt_update_once
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@"
+}
+
 ensure_dependencies(){
-    local command_name; local -a missing=()
-    for command_name in curl jq git base64 getent awk sudo sha256sum; do command -v "$command_name" >/dev/null 2>&1 || missing+=("$command_name"); done
-    if (( ${#missing[@]} > 0 )); then
-        command -v apt-get >/dev/null 2>&1 || die "Brak wymaganych zależności: ${missing[*]}. Automatyczna instalacja obsługuje obecnie apt."
-        apt-get update
-        DEBIAN_FRONTEND=noninteractive apt-get install -y curl jq git coreutils gawk sudo ca-certificates
+    local command_name="" need_core=false need_docker=false need_dialog=false need_zenity=false
+    local -a missing=() packages=()
+
+    for command_name in curl jq git base64 getent awk sudo sha256sum; do
+        if ! command -v "$command_name" >/dev/null 2>&1; then
+            missing+=("$command_name")
+            need_core=true
+        fi
+    done
+
+    if [[ "$LIST_REPOS" == false || "$PREPARE_HOST" == true ]] && ! command -v docker >/dev/null 2>&1; then
+        missing+=(docker)
+        need_docker=true
     fi
+
+    if [[ "$PREPARE_HOST" == true || "$UI" == dialog ]] && ! command -v dialog >/dev/null 2>&1; then
+        need_dialog=true
+    fi
+    if [[ "$UI" == zenity ]] && ! command -v zenity >/dev/null 2>&1; then
+        need_zenity=true
+    fi
+
+    if [[ "$need_core" == true || "$need_docker" == true ]]; then
+        command -v apt-get >/dev/null 2>&1 || die "Brak wymaganych zależności: ${missing[*]}. Automatyczna instalacja podstawowych zależności i Dockera obsługuje obecnie apt."
+    fi
+
+    if command -v apt-get >/dev/null 2>&1; then
+        if [[ "$need_core" == true ]]; then
+            packages+=(curl jq git coreutils gawk sudo ca-certificates libc-bin)
+        fi
+        [[ "$need_docker" != true ]] || packages+=(docker.io)
+        [[ "$need_dialog" != true ]] || packages+=(dialog)
+        [[ "$need_zenity" != true ]] || packages+=(zenity)
+        if (( ${#packages[@]} > 0 )); then
+            log "Instalacja brakujących pakietów hosta: ${packages[*]}"
+            apt_install "${packages[@]}"
+        fi
+    fi
+
+    for command_name in curl jq git base64 getent awk sudo sha256sum; do
+        command -v "$command_name" >/dev/null 2>&1 || die "Po instalacji nadal brakuje polecenia: $command_name"
+    done
 }
 
 docker_ready(){
+    local i
     if ! command -v docker >/dev/null 2>&1; then
         command -v apt-get >/dev/null 2>&1 || die "Docker nie jest zainstalowany i brak apt-get do automatycznej instalacji."
         log "Instalacja Docker Engine"
-        apt-get update
-        DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io
+        apt_install docker.io
     fi
-    if command -v systemctl >/dev/null 2>&1; then systemctl enable --now docker >/dev/null 2>&1 || true; fi
-    docker info >/dev/null 2>&1 || die "Docker Engine nie działa"
+
+    if docker info >/dev/null 2>&1; then return 0; fi
+
+    log "Uruchamianie Docker Engine"
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl enable --now docker >/dev/null 2>&1 || true
+    fi
+    if ! docker info >/dev/null 2>&1 && command -v service >/dev/null 2>&1; then
+        service docker start >/dev/null 2>&1 || true
+    fi
+
+    for ((i=1; i<=10; i++)); do
+        docker info >/dev/null 2>&1 && return 0
+        sleep 1
+    done
+
+    if [[ ! -S /var/run/docker.sock ]]; then
+        die "Docker CLI jest zainstalowany, ale /var/run/docker.sock nie istnieje. Sprawdź usługę: systemctl status docker"
+    fi
+    docker info 2>&1 | tail -20 >&2 || true
+    die "Docker Engine nie odpowiada mimo dostępnego socketa. Sprawdź: systemctl status docker && journalctl -u docker -n 100"
+}
+
+resolve_runner_version(){
+    local version="${RUNNER_VERSION#v}"
+    if [[ -z "$version" ]]; then
+        version="$(curl -fsSL https://api.github.com/repos/actions/runner/releases/latest | jq -r '.tag_name // empty' | sed 's/^v//')" || return 1
+    fi
+    [[ -n "$version" && "$version" != null ]] || { warn "Nie udało się ustalić wersji actions/runner."; return 1; }
+    [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || { warn "Nieprawidłowa wersja actions/runner: $version"; return 1; }
+    printf '%s\n' "$version"
 }
 
 render_docker_context(){
@@ -305,7 +395,11 @@ ARG RUNNER_VERSION=""
 ENV DEBIAN_FRONTEND=noninteractive
 ENV RUNNER_HOME=/actions-runner
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl git jq sudo tar gzip zip unzip docker.io \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates curl git git-lfs jq sudo tar gzip zip unzip xz-utils zstd \
+      openssh-client rsync file build-essential pkg-config \
+      python3 python3-pip python3-venv shellcheck docker.io \
+ && git lfs install --system \
  && rm -rf /var/lib/apt/lists/*
 RUN useradd --create-home --uid 1001 --shell /bin/bash runner \
  && mkdir -p "${RUNNER_HOME}" "${RUNNER_HOME}/_work" \
@@ -368,11 +462,12 @@ ENTRYPOINT
 }
 
 build_image(){
-    local context_dir=""; local -a build_args=(build --pull -t "$IMAGE")
+    local context_dir="" resolved_version=""; local -a build_args=(build --pull -t "$IMAGE")
     if [[ "$REBUILD" == false ]] && docker image inspect "$IMAGE" >/dev/null 2>&1; then return 0; fi
+    resolved_version="$(resolve_runner_version)" || return 1
     context_dir="$(mktemp -d)"; render_docker_context "$context_dir"
-    [[ -z "$RUNNER_VERSION" ]] || build_args+=(--build-arg "RUNNER_VERSION=$RUNNER_VERSION")
-    build_args+=("$context_dir"); log "Budowanie obrazu $IMAGE"
+    build_args+=(--build-arg "RUNNER_VERSION=$resolved_version")
+    build_args+=("$context_dir"); log "Budowanie obrazu $IMAGE z actions/runner v$resolved_version"
     if ! docker "${build_args[@]}"; then rm -rf "$context_dir"; return 1; fi
     rm -rf "$context_dir"
 }
@@ -635,8 +730,8 @@ ensure_dialog(){
     [[ -r /dev/tty && -w /dev/tty ]] || die "Brak interaktywnego terminala /dev/tty dla interfejsu dialog"
     echo "Instaluję wymagany pakiet 'dialog'..." >/dev/tty
     if command -v apt-get >/dev/null 2>&1; then
-        apt-get update >/dev/tty 2>&1
-        DEBIAN_FRONTEND=noninteractive apt-get install -y dialog >/dev/tty 2>&1
+        apt_update_once >/dev/tty 2>&1
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends dialog >/dev/tty 2>&1
     elif command -v dnf >/dev/null 2>&1; then
         dnf install -y dialog >/dev/tty 2>&1
     elif command -v yum >/dev/null 2>&1; then
@@ -738,7 +833,10 @@ terminal_select(){
 zenity_select(){
     local repo_name=""; local -a available=("$@") rows=()
     [[ -n "${DISPLAY:-}" || -n "${WAYLAND_DISPLAY:-}" ]] || die "Zenity wymaga X11/Wayland"
-    command -v zenity >/dev/null 2>&1 || { apt-get update; apt-get install -y zenity; }
+    if ! command -v zenity >/dev/null 2>&1; then
+        command -v apt-get >/dev/null 2>&1 || die "Brak Zenity i brak apt-get do automatycznej instalacji."
+        apt_install zenity
+    fi
     for repo_name in "${available[@]}"; do rows+=(FALSE "$repo_name"); done
     sudo -u "$CALLER" env HOME="$CALLER_HOME" DISPLAY="${DISPLAY:-}" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" XAUTHORITY="${XAUTHORITY:-$CALLER_HOME/.Xauthority}" zenity --list --checklist --title="GitHub Docker Runners" --column="Wybierz" --column="Repo" --separator=$'\n' "${rows[@]}" || true
 }
@@ -786,10 +884,16 @@ purge_if_empty(){
 
 main(){
     local profile_name="" failed_profiles=0
-    args "$@"; caller_init
-    if [[ "$LIST_PROFILES" == true ]]; then profiles | awk 'NF && !seen[$0]++'; return 0; fi
+    args "$@"
+    if [[ "$LIST_PROFILES" == true ]]; then caller_init; profiles | awk 'NF && !seen[$0]++'; return 0; fi
     [[ $EUID -eq 0 ]] || die "Uruchom przez sudo/root"
     ensure_dependencies
+    if [[ "$PREPARE_HOST" == true ]]; then
+        docker_ready
+        echo "Host przygotowany. Docker działa, a wymagane pakiety są zainstalowane."
+        return 0
+    fi
+    caller_init
     if [[ "$LIST_REPOS" == false ]]; then docker_ready; fi
     (( ${#PROFILES[@]} > 0 )) || PROFILES=(default)
     if [[ "$LIST_REPOS" == false ]] && ! gui_choose_action; then return 0; fi
