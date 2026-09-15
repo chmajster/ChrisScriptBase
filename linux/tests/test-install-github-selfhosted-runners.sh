@@ -124,6 +124,24 @@ expect_success "runner image stores version label" bash -c '
     source "$1"; tmp="$(mktemp -d)"; render_docker_context "$tmp"; grep -Fq "com.chrisscriptbase.runner-version" "$tmp/Dockerfile"; rm -rf "$tmp"
 ' _ "$SCRIPT"
 
+expect_success "full GUI helpers are present" bash -c '
+    source "$1"
+    declare -F gui_settings >/dev/null
+    declare -F gui_select_profiles >/dev/null
+    declare -F gui_show_inventory >/dev/null
+    declare -F gui_show_help >/dev/null
+    declare -F gui_reset_action_flags >/dev/null
+' _ "$SCRIPT"
+
+expect_success "GUI advertises full feature access" bash -c '
+    grep -Fq "Pełny tryb GUI" "$1"
+    grep -Fq "prepare_host" "$1"
+    grep -Fq "settings" "$1"
+    grep -Fq "profiles" "$1"
+    grep -Fq "inventory" "$1"
+    grep -Fq "PURGE" "$1"
+' _ "$SCRIPT"
+
 expect_success "render embedded Docker context" env SCRIPT="$SCRIPT" TEST_TMP="$TMP" bash -c '
     source "$SCRIPT"
     mkdir -p "$TEST_TMP/context"

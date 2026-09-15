@@ -108,9 +108,9 @@ REPOZYTORIA
   --include-public          Pozwól również na publiczne repozytoria.
 
 UI
-  -g, --gui                 TUI oparty o dialog. Dostępne: Install, Reinstall,
-                            Force Reinstall, Status, Repair, Check Updates,
-                            Update Runner i Uninstall.
+  -g, --gui                 Pełny TUI oparty o dialog. Wszystkie funkcje i opcje
+                            operacyjne skryptu są dostępne bez flag CLI: akcje,
+                            profile, repozytoria, ustawienia runnera i hosta.
   --tui                     Alias --gui.
   --zenity                  Wymuś graficzny interfejs Zenity dla wyboru repo.
 
@@ -974,35 +974,183 @@ runner_installation_detected(){
     return 1
 }
 
+gui_reset_action_flags(){
+    ACTION="install"
+    REINSTALL_ONLY=false
+    FORCE_RECREATE=false
+    FORCE_REMOTE_DELETE=false
+    PREPARE_HOST=false
+    STATUS_ONLY=false
+    REPAIR_MODE=false
+    CHECK_UPDATES=false
+    UPDATE_RUNNER=false
+    PURGE=false
+}
+
+gui_show_help(){
+    local tmp=""
+    tmp="$(mktemp)"; help >"$tmp"
+    dialog --clear --backtitle "ChrisScriptBase • GitHub Runner" --title " Pomoc " --textbox "$tmp" 30 110 </dev/tty >/dev/tty 2>/dev/tty || true
+    rm -f "$tmp"
+}
+
+gui_select_profiles(){
+    local output="" rc=0 profile_name="" state="off"; local -a available=() items=() selected=()
+    mapfile -t available < <(profiles | awk 'NF && !seen[$0]++')
+    if (( ${#available[@]} == 0 )); then
+        dialog --msgbox "Nie znaleziono profili GitHub w $GITCONFIG.\n\nSkonfiguruj profil w ~/.gitconfig lub przez GITHUB_OWNER/GITHUB_TOKEN." 11 82 </dev/tty >/dev/tty 2>/dev/tty || true
+        return 1
+    fi
+    for profile_name in "${available[@]}"; do
+        state=off
+        if (( ${#PROFILES[@]} == 0 )); then [[ "$profile_name" == default ]] && state=on
+        else
+            local p=""; for p in "${PROFILES[@]}"; do [[ "$p" == "$profile_name" ]] && state=on; done
+        fi
+        items+=("$profile_name" "Profil GitHub" "$state")
+    done
+    output="$(exec 3>&1; dialog --clear --output-fd 3 --separate-output --backtitle "ChrisScriptBase • GitHub Runner" --title " Profile " --ok-label "Zapisz" --cancel-label "Anuluj" --checklist "Wybierz profile obsługiwane przez operacje GUI:" 22 90 14 "${items[@]}" </dev/tty >/dev/tty 2>/dev/tty)" || rc=$?
+    (( rc == 0 )) || return "$rc"
+    [[ -n "$output" ]] || { dialog --msgbox "Wybierz co najmniej jeden profil." 7 55 </dev/tty >/dev/tty 2>/dev/tty || true; return 1; }
+    mapfile -t selected <<<"$output"
+    PROFILES=("${selected[@]}")
+}
+
+gui_settings(){
+    local output="" rc=0 item="" current_pkg="auto" current_repo="interactive"; local -a values=()
+    local socket_state=off sudo_state=off public_state=off rebuild_state=off
+    [[ "$SOCKET" == true ]] && socket_state=on
+    [[ "$ALLOW_SUDO" == true ]] && sudo_state=on
+    [[ "$INCLUDE_PUBLIC" == true ]] && public_state=on
+    [[ "$REBUILD" == true ]] && rebuild_state=on
+
+    output="$(exec 3>&1; dialog --clear --output-fd 3 --separate-output --backtitle "ChrisScriptBase • GitHub Runner" --title " Ustawienia bezpieczeństwa i obrazu " --ok-label "Dalej" --cancel-label "Anuluj" --checklist "Spacja zmienia wartość:" 18 100 10 \
+      docker_socket "Udostępnij /var/run/docker.sock jobom" "$socket_state" \
+      allow_sudo "NOPASSWD sudo wewnątrz kontenera" "$sudo_state" \
+      include_public "Uwzględniaj publiczne repozytoria" "$public_state" \
+      rebuild "Wymuś przebudowę obrazu przed instalacją" "$rebuild_state" \
+      </dev/tty >/dev/tty 2>/dev/tty)" || rc=$?
+    (( rc == 0 )) || return "$rc"
+    SOCKET=false; ALLOW_SUDO=false; INCLUDE_PUBLIC=false; REBUILD=false
+    while IFS= read -r item; do
+        case "$item" in
+            docker_socket) SOCKET=true ;;
+            allow_sudo) ALLOW_SUDO=true ;;
+            include_public) INCLUDE_PUBLIC=true ;;
+            rebuild) REBUILD=true ;;
+        esac
+    done <<<"$output"
+
+    output="$(exec 3>&1; dialog --clear --output-fd 3 --backtitle "ChrisScriptBase • GitHub Runner" --title " Zasoby i wersja runnera " --ok-label "Dalej" --cancel-label "Anuluj" --form "Puste CPU/RAM = bez dodatkowego limitu. Pusta wersja = latest." 20 96 10 \
+      "CPU (--cpus):"        1 1 "${RUNNER_CPUS:-}"       1 28 24 0 \
+      "RAM (--memory):"      2 1 "${RUNNER_MEMORY:-}"     2 28 24 0 \
+      "PID limit:"           3 1 "${RUNNER_PIDS_LIMIT:-512}" 3 28 24 0 \
+      "Runner version:"      4 1 "${RUNNER_VERSION:-}"    4 28 24 0 \
+      "Log max-size:"        5 1 "${LOG_MAX_SIZE:-20m}"   5 28 24 0 \
+      "Log max-file:"        6 1 "${LOG_MAX_FILE:-3}"     6 28 24 0 \
+      </dev/tty >/dev/tty 2>/dev/tty)" || rc=$?
+    (( rc == 0 )) || return "$rc"
+    mapfile -t values <<<"$output"
+    RUNNER_CPUS="${values[0]:-}"
+    RUNNER_MEMORY="${values[1]:-}"
+    RUNNER_PIDS_LIMIT="${values[2]:-512}"
+    RUNNER_VERSION="${values[3]:-}"
+    LOG_MAX_SIZE="${values[4]:-20m}"
+    LOG_MAX_FILE="${values[5]:-3}"
+    [[ "$RUNNER_PIDS_LIMIT" =~ ^[0-9]+$ ]] || { dialog --msgbox "PID limit musi być liczbą całkowitą." 7 60 </dev/tty >/dev/tty 2>/dev/tty || true; RUNNER_PIDS_LIMIT=512; }
+    [[ "$LOG_MAX_FILE" =~ ^[0-9]+$ ]] || { dialog --msgbox "Log max-file musi być liczbą całkowitą." 7 60 </dev/tty >/dev/tty 2>/dev/tty || true; LOG_MAX_FILE=3; }
+
+    current_pkg="${PKG_MANAGER:-auto}"
+    output="$(exec 3>&1; dialog --clear --output-fd 3 --backtitle "ChrisScriptBase • GitHub Runner" --title " Manager pakietów " --ok-label "Dalej" --cancel-label "Anuluj" --radiolist "Automatyczne wykrywanie jest zalecane:" 17 76 7 \
+      auto "Automatycznie wykryj" "$([[ "$current_pkg" == auto ]] && echo on || echo off)" \
+      apt "Debian / Ubuntu" "$([[ "$current_pkg" == apt ]] && echo on || echo off)" \
+      dnf "RHEL / Rocky / Alma / Fedora" "$([[ "$current_pkg" == dnf ]] && echo on || echo off)" \
+      yum "Starsze systemy RHEL/CentOS" "$([[ "$current_pkg" == yum ]] && echo on || echo off)" \
+      zypper "SUSE / openSUSE" "$([[ "$current_pkg" == zypper ]] && echo on || echo off)" \
+      </dev/tty >/dev/tty 2>/dev/tty)" || rc=$?
+    (( rc == 0 )) || return "$rc"
+    [[ "$output" == auto ]] && PKG_MANAGER="" || PKG_MANAGER="$output"
+
+    [[ "$SELECT_MODE" == all ]] && current_repo=all || current_repo=interactive
+    output="$(exec 3>&1; dialog --clear --output-fd 3 --backtitle "ChrisScriptBase • GitHub Runner" --title " Wybór repozytoriów " --ok-label "Zapisz" --cancel-label "Anuluj" --radiolist "Sposób wyboru repozytoriów dla operacji:" 12 76 4 \
+      interactive "Wybieraj repozytoria checklistą" "$([[ "$current_repo" == interactive ]] && echo on || echo off)" \
+      all "Automatycznie wykonuj dla wszystkich dostępnych" "$([[ "$current_repo" == all ]] && echo on || echo off)" \
+      </dev/tty >/dev/tty 2>/dev/tty)" || rc=$?
+    (( rc == 0 )) || return "$rc"
+    SELECT_MODE="$output"
+}
+
+gui_show_inventory(){
+    local tmp="" p="" repo=""; local -a inventory_profiles=()
+    docker_ready
+    if (( ${#PROFILES[@]} > 0 )); then inventory_profiles=("${PROFILES[@]}"); else mapfile -t inventory_profiles < <(profiles | awk 'NF && !seen[$0]++'); fi
+    tmp="$(mktemp)"
+    {
+        echo "PROFILE / REPOSITORY INVENTORY"
+        echo
+        for p in "${inventory_profiles[@]}"; do
+            echo "=== Profil: $p ==="
+            if ! load_profile "$p"; then echo "Błąd wczytania profilu"; echo; continue; fi
+            echo "Owner: $OWNER   mode: $MODE"
+            echo "Repozytoria GitHub:"
+            while IFS= read -r repo; do [[ -n "$repo" ]] && printf '  remote: %s\n' "$repo"; done < <(remote_repos 2>/dev/null || true)
+            echo "Lokalne runnery:"
+            while IFS= read -r repo; do [[ -n "$repo" ]] && printf '  local:  %s\n' "$repo"; done < <(local_repos 2>/dev/null | awk 'NF && !seen[$0]++')
+            echo
+        done
+    } >"$tmp"
+    dialog --clear --backtitle "ChrisScriptBase • GitHub Runner" --title " Profile i repozytoria " --textbox "$tmp" 30 110 </dev/tty >/dev/tty 2>/dev/tty || true
+    rm -f "$tmp"
+}
+
 gui_choose_action(){
-    local choice="" rc=0 message=""
+    local choice="" rc=0 message="" detected="nie"
     [[ "$UI" == dialog ]] || return 0
     [[ "$ACTION_EXPLICIT" == false ]] || return 0
-    runner_installation_detected || return 0
     [[ -r /dev/tty && -w /dev/tty ]] || die "-g/--gui wymaga interaktywnego terminala"
     ensure_dialog
-    message="Wykryto istniejącą instalację GitHub Self-Hosted Runner.\n\nWybierz operację:"
-    choice="$(exec 3>&1; dialog --clear --output-fd 3 --backtitle "ChrisScriptBase • GitHub Self-Hosted Runner Manager" --title " Zarządzanie runnerami " --ok-label "Wybierz" --cancel-label "Anuluj" --menu "$message" 24 104 12 \
-      install "Install         - dodaj runner / reconciliation" \
-      reinstall "Reinstall       - bezpieczny reinstall z rollbackiem" \
-      force_reinstall "Force Reinstall - kontynuuj przy HTTP 409/422" \
-      status "Status          - stan kontenerów, GitHub, socketa i wersji" \
-      repair "Repair          - restart/recreate niedziałających runnerów" \
-      check_updates "Check Updates   - porównaj wersję actions/runner" \
-      update_runner "Update Runner   - latest + rebuild + bezpieczny reinstall" \
-      uninstall "Uninstall       - usuń wybrane runnery" </dev/tty >/dev/tty 2>/dev/tty)" || rc=$?
-    clear >/dev/tty 2>/dev/null || true; (( rc == 0 )) || return 130
-    case "$choice" in
-        install) ACTION=install; FORCE_RECREATE=false; FORCE_REMOTE_DELETE=false; REINSTALL_ONLY=false ;;
-        reinstall) ACTION=install; FORCE_RECREATE=true; FORCE_REMOTE_DELETE=false; REINSTALL_ONLY=true ;;
-        force_reinstall) ACTION=install; FORCE_RECREATE=true; FORCE_REMOTE_DELETE=true; REINSTALL_ONLY=true ;;
-        status) STATUS_ONLY=true ;;
-        repair) ACTION=install; REPAIR_MODE=true; REINSTALL_ONLY=true; FORCE_RECREATE=false; FORCE_REMOTE_DELETE=false ;;
-        check_updates) CHECK_UPDATES=true ;;
-        update_runner) ACTION=install; UPDATE_RUNNER=true; REINSTALL_ONLY=true; FORCE_RECREATE=true; FORCE_REMOTE_DELETE=false; REBUILD=true ;;
-        uninstall) ACTION=uninstall; FORCE_RECREATE=false; FORCE_REMOTE_DELETE=false; REINSTALL_ONLY=false ;;
-        *) return 130 ;;
-    esac
+    runner_installation_detected && detected="tak"
+    while true; do
+        message="Pełny tryb GUI — wszystkie funkcje skryptu są dostępne z tego menu.\nIstniejąca instalacja runnerów: $detected\nProfile: $([[ ${#PROFILES[@]} -gt 0 ]] && printf '%s' "${PROFILES[*]}" || echo 'domyślny')\nRepo mode: ${SELECT_MODE:-interactive}\n\nWybierz operację:"
+        choice="$(exec 3>&1; dialog --clear --output-fd 3 --backtitle "ChrisScriptBase • GitHub Self-Hosted Runner Manager" --title " Pełne zarządzanie runnerami " --ok-label "Wybierz" --cancel-label "Wyjście" --menu "$message" 31 112 18 \
+          install "Install          - instalacja / reconciliation" \
+          reinstall "Reinstall        - bezpieczny reinstall z rollbackiem" \
+          force_reinstall "Force Reinstall  - wymuś przy konflikcie 409/422" \
+          status "Status           - kontenery, GitHub, socket, wersja" \
+          repair "Repair           - automatyczna naprawa runnerów" \
+          check_updates "Check Updates    - sprawdź latest actions/runner" \
+          update_runner "Update Runner    - latest + rebuild + reinstall" \
+          prepare_host "Prepare Host     - zależności + Docker + raport" \
+          settings "Ustawienia       - socket/sudo/CPU/RAM/wersja/repo" \
+          profiles "Profile          - wybierz jeden lub wiele profili" \
+          inventory "Profile i repo   - pokaż skonfigurowane zasoby" \
+          uninstall "Uninstall        - usuń wybrane runnery" \
+          help "Pomoc            - pełna dokumentacja opcji" \
+          exit "Wyjście" \
+          </dev/tty >/dev/tty 2>/dev/tty)" || rc=$?
+        clear >/dev/tty 2>/dev/null || true
+        (( rc == 0 )) || return 130
+        case "$choice" in
+            settings) gui_settings || true; continue ;;
+            profiles) gui_select_profiles || true; continue ;;
+            inventory) gui_show_inventory || true; continue ;;
+            help) gui_show_help; continue ;;
+            exit) return 130 ;;
+            prepare_host) gui_reset_action_flags; PREPARE_HOST=true; return 0 ;;
+            install) gui_reset_action_flags; ACTION=install; return 0 ;;
+            reinstall) gui_reset_action_flags; ACTION=install; FORCE_RECREATE=true; REINSTALL_ONLY=true; return 0 ;;
+            force_reinstall) gui_reset_action_flags; ACTION=install; FORCE_RECREATE=true; FORCE_REMOTE_DELETE=true; REINSTALL_ONLY=true; return 0 ;;
+            status) gui_reset_action_flags; STATUS_ONLY=true; return 0 ;;
+            repair) gui_reset_action_flags; ACTION=install; REPAIR_MODE=true; REINSTALL_ONLY=true; return 0 ;;
+            check_updates) gui_reset_action_flags; CHECK_UPDATES=true; return 0 ;;
+            update_runner) gui_reset_action_flags; ACTION=install; UPDATE_RUNNER=true; REINSTALL_ONLY=true; FORCE_RECREATE=true; REBUILD=true; return 0 ;;
+            uninstall)
+                gui_reset_action_flags; ACTION=uninstall
+                if dialog --clear --backtitle "ChrisScriptBase • GitHub Runner" --title " Uninstall " --yes-label "Tak" --no-label "Nie" --yesno "Po usunięciu ostatniego runnera wykonać także PURGE stanu i lokalnego obrazu?" 9 88 </dev/tty >/dev/tty 2>/dev/tty; then PURGE=true; fi
+                return 0
+                ;;
+        esac
+    done
 }
 
 terminal_select(){
@@ -1075,13 +1223,28 @@ main(){
     if [[ "$LIST_PROFILES" == true ]]; then caller_init; profiles | awk 'NF && !seen[$0]++'; return 0; fi
     [[ $EUID -eq 0 ]] || die "Uruchom przez sudo/root"
     ensure_dependencies
-    if [[ "$PREPARE_HOST" == true ]]; then ensure_prepare_host_packages; docker_ready; host_package_report || die "Host nie przeszedł końcowej weryfikacji pakietów."; echo "Host przygotowany. Docker działa, a wymagane pakiety są zainstalowane."; return 0; fi
     caller_init
-    if [[ "$LIST_REPOS" == false ]]; then docker_ready; fi
-    (( ${#PROFILES[@]} > 0 )) || PROFILES=(default)
+
+    # In GUI mode the action is selected after dependencies/caller initialization,
+    # so Prepare Host, Settings, Profiles, Inventory and every operational action
+    # can be started without any additional CLI flag.
     if [[ "$LIST_REPOS" == false ]] && ! gui_choose_action; then return 0; fi
+
+    if [[ "$PREPARE_HOST" == true ]]; then
+        ensure_prepare_host_packages
+        docker_ready
+        host_package_report || die "Host nie przeszedł końcowej weryfikacji pakietów."
+        if [[ "$UI" == dialog ]]; then ui_message "Prepare Host" "Host przygotowany. Docker działa, a wymagane pakiety są zainstalowane."; else echo "Host przygotowany. Docker działa, a wymagane pakiety są zainstalowane."; fi
+        return 0
+    fi
+
+    if [[ "$LIST_REPOS" == false ]]; then docker_ready; fi
+
     if [[ "$CHECK_UPDATES" == true ]]; then check_runner_updates; return $?; fi
     if [[ "$UPDATE_RUNNER" == true ]]; then latest="$(latest_runner_version)" || die "Nie udało się pobrać latest actions/runner"; RUNNER_VERSION="$latest"; REBUILD=true; FORCE_RECREATE=true; REINSTALL_ONLY=true; fi
+
+    (( ${#PROFILES[@]} > 0 )) || PROFILES=(default)
+
     if [[ "$ACTION" == install && "$LIST_REPOS" == false && "$STATUS_ONLY" == false ]]; then build_image || die "Nie udało się zbudować obrazu runnera."; fi
     [[ "$SOCKET" != true ]] || warn "Dostęp do Docker socketa daje workflow kontrolę nad Docker daemonem hosta."
     [[ "$INCLUDE_PUBLIC" != true ]] || warn "--include-public: self-hosted runner w publicznym repo może wykonać niezaufany kod."
