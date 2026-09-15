@@ -53,21 +53,20 @@ expect_success "private-only default" bash -c 'source "$1"; [[ $INCLUDE_PUBLIC =
 expect_success "sudo enabled by default for Actions compatibility" bash -c 'source "$1"; [[ $ALLOW_SUDO == true ]]' _ "$SCRIPT"
 expect_success "accept --no-sudo override" bash -c 'source "$1"; args --no-sudo; [[ $ALLOW_SUDO == false ]]' _ "$SCRIPT"
 expect_success "accept --force-recreate" bash -c 'source "$1"; args --force-recreate; [[ $FORCE_RECREATE == true && $FORCE_REMOTE_DELETE == true ]]' _ "$SCRIPT"
-expect_success "force recreate tolerates remote delete failure" bash -c '
-    source "$1"
-    FORCE_REMOTE_DELETE=true
-    sleep(){ :; }
-    remote_delete(){ return 22; }
-    remote_delete_recreate /repos/test/actions/runners test-runner
+expect_success "force recreate tolerates conflict delete failure" bash -c '
+    source "$1"; FORCE_REMOTE_DELETE=true; GITHUB_API_RETRIES=1; sleep(){ :; }; remote_delete(){ return 43; }; remote_delete_recreate /repos/test/actions/runners test-runner
 ' _ "$SCRIPT"
-expect_failure "normal reinstall rejects remote delete failure" bash -c '
-    source "$1"
-    FORCE_REMOTE_DELETE=false
-    sleep(){ :; }
-    remote_delete(){ return 22; }
-    remote_delete_recreate /repos/test/actions/runners test-runner
+expect_failure "force recreate does not hide authorization failure" bash -c '
+    source "$1"; FORCE_REMOTE_DELETE=true; remote_delete(){ return 40; }; remote_delete_recreate /repos/test/actions/runners test-runner
+' _ "$SCRIPT"
+expect_failure "normal reinstall rejects conflict delete failure" bash -c '
+    source "$1"; FORCE_REMOTE_DELETE=false; GITHUB_API_RETRIES=1; sleep(){ :; }; remote_delete(){ return 43; }; remote_delete_recreate /repos/test/actions/runners test-runner
 ' _ "$SCRIPT"
 expect_success "accept --prepare-host" bash -c 'source "$1"; args --prepare-host; [[ $PREPARE_HOST == true ]]' _ "$SCRIPT"
+expect_success "accept --status" bash -c 'source "$1"; args --status; [[ $STATUS_ONLY == true ]]' _ "$SCRIPT"
+expect_success "accept --repair" bash -c 'source "$1"; args --repair; [[ $REPAIR_MODE == true && $REINSTALL_ONLY == true ]]' _ "$SCRIPT"
+expect_success "accept --check-updates" bash -c 'source "$1"; args --check-updates; [[ $CHECK_UPDATES == true ]]' _ "$SCRIPT"
+expect_success "accept --update-runner" bash -c 'source "$1"; args --update-runner; [[ $UPDATE_RUNNER == true && $REBUILD == true && $REINSTALL_ONLY == true ]]' _ "$SCRIPT"
 expect_success "accept resource limits" bash -c 'source "$1"; args --cpus 2 --memory 4g --pids-limit 256; [[ $RUNNER_CPUS == 2 && $RUNNER_MEMORY == 4g && $RUNNER_PIDS_LIMIT == 256 ]]' _ "$SCRIPT"
 expect_success "normalize pinned runner version" bash -c 'source "$1"; RUNNER_VERSION=v2.999.1; [[ $(resolve_runner_version) == 2.999.1 ]]' _ "$SCRIPT"
 
@@ -113,6 +112,16 @@ expect_success "package report lists status and versions" bash -c '
     grep -Fq "test-version-curl" <<< "$output"
     grep -Fq "Docker Engine: OK (wersja 99.0.0)" <<< "$output"
     grep -Fq "Wszystkie wymagane pakiety są zainstalowane (3/3)." <<< "$output"
+' _ "$SCRIPT"
+
+expect_success "package manager mappings" bash -c '
+    source "$1"; [[ $(package_name_for libc-bin apt) == libc-bin ]]; [[ $(package_name_for libc-bin dnf) == glibc-common ]]; [[ $(package_name_for libc-bin zypper) == glibc ]]; [[ $(package_name_for docker.io zypper) == docker ]]
+' _ "$SCRIPT"
+expect_success "transactional reinstall restarts old container on API failure" bash -c '
+    source "$1"; logf="$(mktemp)"; docker(){ case "$1" in inspect) if [[ "$*" == *State.Running* ]]; then echo true; fi; return 0 ;; stop|start|rm) echo "$1" >>"$logf"; return 0 ;; esac; }; remote_delete_recreate(){ return 41; }; if retire_existing_container /repos/test/actions/runners runner container; then exit 1; fi; grep -Fxq stop "$logf"; grep -Fxq start "$logf"; ! grep -Fxq rm "$logf"; rm -f "$logf"
+' _ "$SCRIPT"
+expect_success "runner image stores version label" bash -c '
+    source "$1"; tmp="$(mktemp -d)"; render_docker_context "$tmp"; grep -Fq "com.chrisscriptbase.runner-version" "$tmp/Dockerfile"; rm -rf "$tmp"
 ' _ "$SCRIPT"
 
 expect_success "render embedded Docker context" env SCRIPT="$SCRIPT" TEST_TMP="$TMP" bash -c '
