@@ -52,7 +52,21 @@ expect_success "accept --include-public" bash -c 'source "$1"; args --include-pu
 expect_success "private-only default" bash -c 'source "$1"; [[ $INCLUDE_PUBLIC == false ]]' _ "$SCRIPT"
 expect_success "sudo enabled by default for Actions compatibility" bash -c 'source "$1"; [[ $ALLOW_SUDO == true ]]' _ "$SCRIPT"
 expect_success "accept --no-sudo override" bash -c 'source "$1"; args --no-sudo; [[ $ALLOW_SUDO == false ]]' _ "$SCRIPT"
-expect_success "accept --force-recreate" bash -c 'source "$1"; args --force-recreate; [[ $FORCE_RECREATE == true ]]' _ "$SCRIPT"
+expect_success "accept --force-recreate" bash -c 'source "$1"; args --force-recreate; [[ $FORCE_RECREATE == true && $FORCE_REMOTE_DELETE == true ]]' _ "$SCRIPT"
+expect_success "force recreate tolerates remote delete failure" bash -c '
+    source "$1"
+    FORCE_REMOTE_DELETE=true
+    sleep(){ :; }
+    remote_delete(){ return 22; }
+    remote_delete_recreate /repos/test/actions/runners test-runner
+' _ "$SCRIPT"
+expect_failure "normal reinstall rejects remote delete failure" bash -c '
+    source "$1"
+    FORCE_REMOTE_DELETE=false
+    sleep(){ :; }
+    remote_delete(){ return 22; }
+    remote_delete_recreate /repos/test/actions/runners test-runner
+' _ "$SCRIPT"
 expect_success "accept --prepare-host" bash -c 'source "$1"; args --prepare-host; [[ $PREPARE_HOST == true ]]' _ "$SCRIPT"
 expect_success "accept resource limits" bash -c 'source "$1"; args --cpus 2 --memory 4g --pids-limit 256; [[ $RUNNER_CPUS == 2 && $RUNNER_MEMORY == 4g && $RUNNER_PIDS_LIMIT == 256 ]]' _ "$SCRIPT"
 expect_success "normalize pinned runner version" bash -c 'source "$1"; RUNNER_VERSION=v2.999.1; [[ $(resolve_runner_version) == 2.999.1 ]]' _ "$SCRIPT"

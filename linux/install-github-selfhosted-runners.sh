@@ -21,6 +21,7 @@ ALLOW_SUDO="${RUNNER_ALLOW_SUDO:-true}"
 INCLUDE_PUBLIC="${RUNNER_INCLUDE_PUBLIC:-false}"
 REBUILD=false
 FORCE_RECREATE=false
+FORCE_REMOTE_DELETE=false
 PURGE=false
 PREPARE_HOST=false
 LIST_PROFILES=false
@@ -101,7 +102,7 @@ REPOZYTORIA
 UI
   -g, --gui                 Terminalowy interfejs GUI/TUI oparty o dialog.
                             Bez jawnej akcji wykrywa istniejące runnery i pokazuje
-                            Install / Reinstall / Uninstall.
+                            Install / Reinstall / Force Reinstall / Uninstall.
                             Bez jawnego trybu repo automatycznie włącza --select-repos.
   --tui                     Alias terminalowego interfejsu dialog.
   --zenity                  Wymuś osobny graficzny interfejs Zenity.
@@ -112,7 +113,8 @@ DOCKER / RUNNER
   --allow-sudo              Runner ma NOPASSWD sudo wewnątrz kontenera. Domyślne.
   --no-sudo                 Usuń NOPASSWD sudo.
   --rebuild-image           Wymuś ponowny docker build.
-  --force-recreate          Wymuś odtworzenie wybranych kontenerów.
+  --force-recreate          Wymuś odtworzenie kontenerów; przy błędzie usunięcia
+                            starej rejestracji kontynuuj z config.sh --replace.
   --cpus N                  Limit CPU kontenera, np. 2 lub 1.5.
   --memory SIZE             Limit RAM, np. 4g.
   --pids-limit N            Limit procesów. Domyślnie 512.
@@ -184,7 +186,7 @@ args(){
             --include-public) INCLUDE_PUBLIC=true; shift ;;
             --private-only) INCLUDE_PUBLIC=false; shift ;;
             --rebuild-image) REBUILD=true; shift ;;
-            --force-recreate) FORCE_RECREATE=true; shift ;;
+            --force-recreate) FORCE_RECREATE=true; FORCE_REMOTE_DELETE=true; shift ;;
             --cpus) [[ $# -ge 2 ]] || die "$1 wymaga wartości."; RUNNER_CPUS="$2"; shift 2 ;;
             --memory) [[ $# -ge 2 ]] || die "$1 wymaga wartości."; RUNNER_MEMORY="$2"; shift 2 ;;
             --pids-limit) [[ $# -ge 2 ]] || die "$1 wymaga wartości."; [[ "$2" =~ ^[0-9]+$ ]] || die "--pids-limit wymaga liczby całkowitej."; RUNNER_PIDS_LIMIT="$2"; shift 2 ;;
@@ -580,6 +582,26 @@ remote_delete(){
     api DELETE "$endpoint/$id" >/dev/null
 }
 
+remote_delete_recreate(){
+    local endpoint="$1" runner_name="$2" attempt=1 rc=1
+    for attempt in 1 2 3; do
+        if remote_delete "$endpoint" "$runner_name"; then
+            return 0
+        else
+            rc=$?
+        fi
+        if (( attempt < 3 )); then
+            warn "Nie udało się usunąć rejestracji $runner_name (próba $attempt/3). Ponawiam za 2 s..."
+            sleep 2
+        fi
+    done
+    if [[ "$FORCE_REMOTE_DELETE" == true ]]; then
+        warn "FORCE: nie udało się usunąć starej rejestracji $runner_name. Kontynuuję; config.sh --replace zastąpi wpis podczas ponownej rejestracji."
+        return 0
+    fi
+    return "$rc"
+}
+
 wait_runner_online(){
     local endpoint="$1" runner_name="$2" container_name="$3" attempts="${RUNNER_HEALTH_ATTEMPTS:-20}" row="" status="" i
     for ((i=1;i<=attempts;i++)); do
@@ -774,7 +796,7 @@ install_repo(){
     if existing_runner_healthy "$state_dir" "$repo_name" "$runner_name" "$container_name"; then echo "Już działa i jest online: $container_name"; return 3; fi
     if docker inspect "$container_name" >/dev/null 2>&1; then
         log "Reconciliation: odtwarzam $container_name"; docker rm -f "$container_name" >/dev/null 2>&1 || true
-        remote_delete "$(runner_endpoint "$repo_name")" "$runner_name" || { warn "Nie udało się usunąć starej rejestracji $runner_name."; return 1; }
+        remote_delete_recreate "$(runner_endpoint "$repo_name")" "$runner_name" || { warn "Nie udało się usunąć starej rejestracji $runner_name."; return 1; }
     fi
     log "Instalacja Docker runnera $OWNER/$repo_name"; run_container "$state_dir" repo "$repo_name" "$runner_name" "$container_name"
 }
@@ -792,7 +814,7 @@ install_org(){
     local state_dir="$(org_state)" runner_name="$(org_runner)" container_name="$(org_container)"
     legacy_org_cleanup || return 1
     if existing_runner_healthy "$state_dir" "" "$runner_name" "$container_name"; then echo "Już działa i jest online: $container_name"; return 3; fi
-    if docker inspect "$container_name" >/dev/null 2>&1; then docker rm -f "$container_name" >/dev/null 2>&1 || true; remote_delete "/orgs/$OWNER/actions/runners" "$runner_name" || return 1; fi
+    if docker inspect "$container_name" >/dev/null 2>&1; then docker rm -f "$container_name" >/dev/null 2>&1 || true; remote_delete_recreate "/orgs/$OWNER/actions/runners" "$runner_name" || return 1; fi
     log "Instalacja Docker organization runnera $OWNER"; run_container "$state_dir" org "" "$runner_name" "$container_name"
 }
 
@@ -861,10 +883,11 @@ gui_choose_action(){
           --backtitle "ChrisScriptBase • GitHub Self-Hosted Runner Manager" \
           --title " Zarządzanie runnerami " \
           --ok-label "Wybierz" --cancel-label "Anuluj" \
-          --menu "$message" 16 78 6 \
-          install "Install    - dodaj nowy runner / wykonaj reconciliation" \
-          reinstall "Reinstall  - przeinstaluj wybrane zainstalowane runnery" \
-          uninstall "Uninstall  - usuń wybrane zainstalowane runnery" \
+          --menu "$message" 18 96 8 \
+          install "Install         - dodaj nowy runner / wykonaj reconciliation" \
+          reinstall "Reinstall       - przeinstaluj; błąd wyrejestrowania zatrzymuje operację" \
+          force_reinstall "Force Reinstall - kontynuuj mimo 422/błędu usunięcia starej rejestracji" \
+          uninstall "Uninstall       - usuń wybrane zainstalowane runnery" \
           </dev/tty >/dev/tty 2>/dev/tty
     )" || rc=$?
     clear >/dev/tty 2>/dev/null || true
@@ -872,15 +895,26 @@ gui_choose_action(){
     case "$choice" in
         install)
             ACTION="install"
+            FORCE_RECREATE=false
+            FORCE_REMOTE_DELETE=false
             REINSTALL_ONLY=false
             ;;
         reinstall)
             ACTION="install"
             FORCE_RECREATE=true
+            FORCE_REMOTE_DELETE=false
+            REINSTALL_ONLY=true
+            ;;
+        force_reinstall)
+            ACTION="install"
+            FORCE_RECREATE=true
+            FORCE_REMOTE_DELETE=true
             REINSTALL_ONLY=true
             ;;
         uninstall)
             ACTION="uninstall"
+            FORCE_RECREATE=false
+            FORCE_REMOTE_DELETE=false
             REINSTALL_ONLY=false
             ;;
         *) return 130 ;;
@@ -888,7 +922,7 @@ gui_choose_action(){
 }
 
 terminal_select(){
-    local repo_name="" output="" rc=0 message=""; local -a available=("$@") items=()
+    local repo_name="" output="" rc=0 message="" action_label="Install"; local -a available=("$@") items=()
     [[ -r /dev/tty && -w /dev/tty ]] || die "-g/--gui wymaga interaktywnego terminala"
     ensure_dialog
     if (( ${#available[@]} == 0 )); then
@@ -900,7 +934,14 @@ terminal_select(){
         return 0
     fi
     for repo_name in "${available[@]}"; do items+=("$repo_name" "" off); done
-    message="Profil: $PROFILE\nOwner: $OWNER\nAkcja: $([[ "$ACTION" == uninstall ]] && echo Uninstall || { [[ "$REINSTALL_ONLY" == true ]] && echo Reinstall || echo Install; })\n\nSpacja: zaznacz/odznacz   Enter: zatwierdź"
+    if [[ "$ACTION" == uninstall ]]; then
+        action_label="Uninstall"
+    elif [[ "$REINSTALL_ONLY" == true && "$FORCE_REMOTE_DELETE" == true ]]; then
+        action_label="Force Reinstall"
+    elif [[ "$REINSTALL_ONLY" == true ]]; then
+        action_label="Reinstall"
+    fi
+    message="Profil: $PROFILE\nOwner: $OWNER\nAkcja: $action_label\n\nSpacja: zaznacz/odznacz   Enter: zatwierdź"
     output="$(
         exec 3>&1
         dialog --clear --colors \
