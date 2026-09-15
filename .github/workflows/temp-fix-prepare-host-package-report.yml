@@ -1,0 +1,54 @@
+name: Finalize prepare-host package report
+
+on:
+  push:
+    branches:
+      - prepare-host-package-report
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: prepare-host-package-report
+          fetch-depth: 0
+
+      - name: Apply prepared patch and fix test typo
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import base64
+          import re
+          from pathlib import Path
+
+          workflow = Path('.github/workflows/temp-prepare-host-package-report.yml').read_text()
+          match = re.search(r"echo '([A-Za-z0-9+/=]+)' \| base64 -d > /tmp/apply.py", workflow)
+          if not match:
+              raise SystemExit('Cannot find encoded patcher')
+          Path('/tmp/apply.py').write_bytes(base64.b64decode(match.group(1)))
+          PY
+          python3 /tmp/apply.py
+          sed -i 's/host_packae_report/host_package_report/g' linux/tests/test-install-github-selfhosted-runners.sh
+
+      - name: Validate
+        shell: bash
+        run: |
+          bash -n linux/install-github-selfhosted-runners.sh
+          shellcheck -e SC2155,SC2015 linux/install-github-selfhosted-runners.sh
+          bash linux/tests/test-install-github-selfhosted-runners.sh
+          bash linux/tests/test-install-github-selfhosted-runners-legacy-service.sh
+
+      - name: Commit final changes
+        shell: bash
+        run: |
+          rm -f .github/workflows/temp-prepare-host-package-report.yml
+          rm -f .github/workflows/temp-fix-prepare-host-package-report.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "List and verify prepare-host packages"
+          git push origin HEAD:prepare-host-package-report
