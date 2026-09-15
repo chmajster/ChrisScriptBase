@@ -1,0 +1,871 @@
+name: Apply runner manager reliability upgrade
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-runner-manager-v2.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Apply upgrade
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          script_path = Path('linux/install-github-selfhosted-runners.sh')
+          test_path = Path('linux/tests/test-install-github-selfhosted-runners.sh')
+          s = script_path.read_text()
+          t = test_path.read_text()
+
+          def rep(old, new, label):
+              global s
+              if old not in s:
+                  raise SystemExit(f'missing script fragment: {label}')
+              s = s.replace(old, new, 1)
+
+          def rep_test(old, new, label):
+              global t
+              if old not in t:
+                  raise SystemExit(f'missing test fragment: {label}')
+              t = t.replace(old, new, 1)
+
+          rep('''PREPARE_HOST=false
+          LIST_PROFILES=false''', '''PREPARE_HOST=false
+          STATUS_ONLY=false
+          REPAIR_MODE=false
+          CHECK_UPDATES=false
+          UPDATE_RUNNER=false
+          LIST_PROFILES=false''', 'operation flags')
+
+          rep('''APT_UPDATED=false
+          HOST_REQUIRED_PACKAGES=(
+              ca-certificates
+              curl
+              jq
+              git
+              coreutils
+              gawk
+              sudo
+              libc-bin
+              findutils
+              grep
+              sed
+              hostname
+              docker.io
+              dialog
+          )''', '''PACKAGE_METADATA_UPDATED=false
+          PKG_MANAGER="${PACKAGE_MANAGER:-}"
+          HOST_REQUIRED_PACKAGES=(
+              ca-certificates
+              curl
+              jq
+              git
+              coreutils
+              gawk
+              sudo
+              getent
+              findutils
+              grep
+              sed
+              hostname
+              docker
+              dialog
+          )''', 'package requirements')
+
+          rep('''  --prepare-host            Przygotuj hosta i zakończ: zależności, Docker i dialog.
+                                      Instaluje brakujące pakiety, a następnie wyświetla ich
+                                      status i wersje oraz sprawdza działanie Docker Engine.
+          ''', '''  --prepare-host            Przygotuj hosta i zakończ: zależności, Docker i dialog.
+                                      Instaluje brakujące pakiety, a następnie wyświetla ich
+                                      status i wersje oraz sprawdza działanie Docker Engine.
+            --status                  Pokaż stan lokalnych kontenerów i rejestracji GitHub.
+            --repair                  Napraw niedziałające/offline runnery i brakujące kontenery.
+            --check-updates           Porównaj zainstalowaną wersję Actions Runner z najnowszą.
+            --update-runner           Przebuduj obraz z nowym runnerem i bezpiecznie przeinstaluj.
+          ''', 'help actions')
+
+          rep('''                            Install / Reinstall / Force Reinstall / Uninstall.''', '''                            Install / Reinstall / Force Reinstall / Status / Repair /
+                                      Check Updates / Update Runner / Uninstall.''', 'help gui')
+
+          rep('''            --prepare-host) PREPARE_HOST=true; shift ;;
+                      --docker-socket) SOCKET=true; shift ;;''', '''            --prepare-host) PREPARE_HOST=true; shift ;;
+                      --status) STATUS_ONLY=true; ACTION_EXPLICIT=true; shift ;;
+                      --repair) REPAIR_MODE=true; ACTION="install"; REINSTALL_ONLY=true; ACTION_EXPLICIT=true; shift ;;
+                      --check-updates) CHECK_UPDATES=true; ACTION_EXPLICIT=true; shift ;;
+                      --update-runner) UPDATE_RUNNER=true; ACTION="install"; REINSTALL_ONLY=true; FORCE_RECREATE=true; REBUILD=true; ACTION_EXPLICIT=true; shift ;;
+                      --docker-socket) SOCKET=true; shift ;;''', 'args operations')
+
+          old_api = '''api(){
+              local method="$1" endpoint="$2"
+              curl --silent --show-error --fail-with-body --location --request "$method" \\
+                --header "Accept: application/vnd.github+json" \\
+                --header "Authorization: Bearer $TOKEN" \\
+                --header "X-GitHub-Api-Version: $API_VERSION" \\
+                "https://api.github.com$endpoint"
+          }
+          '''
+          new_api = '''api(){
+              local method="$1" endpoint="$2" body_file="" headers_file="" http_code="" curl_rc=0 body="" message="" remaining="" retry_after=""
+              body_file="$(mktemp)"
+              headers_file="$(mktemp)"
+              http_code="$(curl --silent --show-error --location --request "$method" \\
+                --header "Accept: application/vnd.github+json" \\
+                --header "Authorization: Bearer $TOKEN" \\
+                --header "X-GitHub-Api-Version: $API_VERSION" \\
+                --dump-header "$headers_file" --output "$body_file" --write-out '%{http_code}' \\
+                "https://api.github.com$endpoint")" || curl_rc=$?
+              if (( curl_rc != 0 )); then
+                  warn "GitHub API $method $endpoint: błąd transportu curl=$curl_rc"
+                  rm -f "$body_file" "$headers_file"
+                  return 47
+              fi
+              body="$(cat "$body_file")"
+              if [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+                  printf '%s' "$body"
+                  rm -f "$body_file" "$headers_file"
+                  return 0
+              fi
+              message="$(jq -r '.message // empty' "$body_file" 2>/dev/null || true)"
+              remaining="$(awk -F': *' 'tolower($1)=="x-ratelimit-remaining" {gsub("\\r","",$2); print $2; exit}' "$headers_file" 2>/dev/null || true)"
+              retry_after="$(awk -F': *' 'tolower($1)=="retry-after" {gsub("\\r","",$2); print $2; exit}' "$headers_file" 2>/dev/null || true)"
+              warn "GitHub API $method $endpoint -> HTTP $http_code${message:+: $message}"
+              rm -f "$body_file" "$headers_file"
+              case "$http_code" in
+                  401) return 40 ;;
+                  403) [[ "$remaining" == 0 || -n "$retry_after" ]] && return 44 || return 41 ;;
+                  404) return 42 ;;
+                  409|422) return 43 ;;
+                  429) return 44 ;;
+                  5??) return 45 ;;
+                  *) return 46 ;;
+              esac
+          }
+          '''
+          rep(old_api, new_api, 'api classification')
+
+          rep('''registration_token(){ local endpoint="" response=""; if [[ "$MODE" == org ]]; then endpoint="/orgs/$OWNER/actions/runners/registration-token"; else endpoint="/repos/$OWNER/$1/actions/runners/registration-token"; fi; response="$(api POST "$endpoint")" || return 1; jq -r '.token // empty' <<< "$response"; }''', '''registration_token(){ local endpoint="" response="" rc=0; if [[ "$MODE" == org ]]; then endpoint="/orgs/$OWNER/actions/runners/registration-token"; else endpoint="/repos/$OWNER/$1/actions/runners/registration-token"; fi; response="$(api POST "$endpoint")" || { rc=$?; return "$rc"; }; jq -r '.token // empty' <<< "$response"; }''', 'registration token rc')
+
+          rep('''        response="$(api GET "/user/repos?affiliation=owner&per_page=100&page=$page&sort=full_name")" || return 1''', '''        response="$(api GET "/user/repos?affiliation=owner&per_page=100&page=$page&sort=full_name")" || return $?''', 'remote repos rc')
+
+          rep('''        response="$(api GET "$endpoint?per_page=100&page=$page")" || return 1''', '''        response="$(api GET "$endpoint?per_page=100&page=$page")" || return $?''', 'runner lookup rc')
+
+          pattern = re.compile(r'''remote_delete\(\)\{.*?\n\}\n\nremote_delete_recreate\(\)\{.*?\n\}\n''', re.S)
+          replacement = '''remote_delete(){
+              local endpoint="$1" runner_name="$2" row="" id="" rc=0
+              row="$(runner_lookup "$endpoint" "$runner_name")" || rc=$?
+              (( rc == 3 )) && return 0
+              (( rc == 0 )) || return "$rc"
+              id="${row%%$'\\t'*}"; [[ -n "$id" ]] || return 0
+              if api DELETE "$endpoint/$id" >/dev/null; then
+                  return 0
+              else
+                  rc=$?
+              fi
+              (( rc == 42 )) && return 0
+              return "$rc"
+          }
+
+          remote_delete_recreate(){
+              local endpoint="$1" runner_name="$2" attempt=1 rc=1 max_attempts="${GITHUB_API_RETRIES:-3}" delay="${GITHUB_API_RETRY_DELAY:-2}"
+              for ((attempt=1; attempt<=max_attempts; attempt++)); do
+                  if remote_delete "$endpoint" "$runner_name"; then
+                      return 0
+                  else
+                      rc=$?
+                  fi
+                  case "$rc" in
+                      43|44|45|47) ;;
+                      *) return "$rc" ;;
+                  esac
+                  if (( attempt < max_attempts )); then
+                      warn "Nie udało się usunąć rejestracji $runner_name (próba $attempt/$max_attempts, rc=$rc). Ponawiam za ${delay}s..."
+                      sleep "$delay"
+                      (( delay *= 2 ))
+                  fi
+              done
+              if [[ "$FORCE_REMOTE_DELETE" == true && "$rc" -eq 43 ]]; then
+                  warn "FORCE: GitHub zwraca konflikt/422 dla $runner_name. Kontynuuję; config.sh --replace zastąpi wpis podczas ponownej rejestracji."
+                  return 0
+              fi
+              return "$rc"
+          }
+          '''
+          s, n = pattern.subn(replacement, s, count=1)
+          if n != 1:
+              raise SystemExit('missing remote delete block')
+
+          package_block = re.compile(r'''apt_update_once\(\)\{.*?\n\}\n\nresolve_runner_version\(\)\{''', re.S)
+          package_replacement = '''detect_package_manager(){
+              if [[ -n "$PKG_MANAGER" ]]; then
+                  case "$PKG_MANAGER" in apt|dnf|yum|zypper) printf '%s\\n' "$PKG_MANAGER"; return 0 ;; *) die "Nieobsługiwany PACKAGE_MANAGER=$PKG_MANAGER" ;; esac
+              fi
+              if command -v apt-get >/dev/null 2>&1; then PKG_MANAGER=apt
+              elif command -v dnf >/dev/null 2>&1; then PKG_MANAGER=dnf
+              elif command -v yum >/dev/null 2>&1; then PKG_MANAGER=yum
+              elif command -v zypper >/dev/null 2>&1; then PKG_MANAGER=zypper
+              else die "Nie znaleziono obsługiwanego managera pakietów: apt, dnf, yum ani zypper"
+              fi
+              printf '%s\\n' "$PKG_MANAGER"
+          }
+
+          requirement_package(){
+              local requirement="$1" manager="${2:-$(detect_package_manager)}"
+              case "$manager:$requirement" in
+                  apt:ca-certificates) echo ca-certificates ;; apt:curl) echo curl ;; apt:jq) echo jq ;; apt:git) echo git ;; apt:coreutils) echo coreutils ;; apt:gawk) echo gawk ;; apt:sudo) echo sudo ;; apt:getent) echo libc-bin ;; apt:findutils) echo findutils ;; apt:grep) echo grep ;; apt:sed) echo sed ;; apt:hostname) echo hostname ;; apt:dialog) echo dialog ;; apt:zenity) echo zenity ;;
+                  dnf:ca-certificates|yum:ca-certificates|zypper:ca-certificates) echo ca-certificates ;;
+                  dnf:curl|yum:curl|zypper:curl) echo curl ;; dnf:jq|yum:jq|zypper:jq) echo jq ;; dnf:git|yum:git|zypper:git) echo git ;;
+                  dnf:coreutils|yum:coreutils|zypper:coreutils) echo coreutils ;; dnf:gawk|yum:gawk|zypper:gawk) echo gawk ;; dnf:sudo|yum:sudo|zypper:sudo) echo sudo ;;
+                  dnf:getent|yum:getent) echo glibc-common ;; zypper:getent) echo glibc ;;
+                  dnf:findutils|yum:findutils|zypper:findutils) echo findutils ;; dnf:grep|yum:grep|zypper:grep) echo grep ;; dnf:sed|yum:sed|zypper:sed) echo sed ;;
+                  dnf:hostname|yum:hostname|zypper:hostname) echo hostname ;; dnf:dialog|yum:dialog|zypper:dialog) echo dialog ;; dnf:zenity|yum:zenity|zypper:zenity) echo zenity ;;
+                  *) return 1 ;;
+              esac
+          }
+
+          requirement_installed(){
+              local requirement="$1"
+              case "$requirement" in
+                  ca-certificates) [[ -s /etc/ssl/certs/ca-certificates.crt || -s /etc/pki/tls/certs/ca-bundle.crt ]] ;;
+                  coreutils) command -v base64 >/dev/null 2>&1 && command -v sha256sum >/dev/null 2>&1 ;;
+                  gawk) command -v awk >/dev/null 2>&1 ;;
+                  getent) command -v getent >/dev/null 2>&1 ;;
+                  findutils) command -v find >/dev/null 2>&1 ;;
+                  docker) command -v docker >/dev/null 2>&1 ;;
+                  *) command -v "$requirement" >/dev/null 2>&1 ;;
+              esac
+          }
+
+          package_metadata_update_once(){
+              local manager="$(detect_package_manager)"
+              [[ "$PACKAGE_METADATA_UPDATED" == true ]] && return 0
+              case "$manager" in
+                  apt) apt-get update ;;
+                  dnf) dnf -y makecache ;;
+                  yum) yum -y makecache ;;
+                  zypper) zypper --non-interactive refresh ;;
+              esac
+              PACKAGE_METADATA_UPDATED=true
+          }
+
+          package_install_names(){
+              (( $# > 0 )) || return 0
+              local manager="$(detect_package_manager)"
+              package_metadata_update_once
+              case "$manager" in
+                  apt) DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@" ;;
+                  dnf) dnf install -y "$@" ;;
+                  yum) yum install -y "$@" ;;
+                  zypper) zypper --non-interactive install --no-recommends "$@" ;;
+              esac
+          }
+
+          install_docker_engine(){
+              command -v docker >/dev/null 2>&1 && return 0
+              local manager="$(detect_package_manager)"
+              case "$manager" in
+                  apt) package_install_names docker.io ;;
+                  zypper) package_install_names docker ;;
+                  dnf)
+                      package_metadata_update_once
+                      dnf install -y docker-ce docker-ce-cli containerd.io 2>/dev/null || \\
+                      dnf install -y moby-engine 2>/dev/null || \\
+                      dnf install -y docker 2>/dev/null || die "Nie znaleziono Docker Engine w repozytoriach dnf. Skonfiguruj repo Docker CE lub Moby."
+                      ;;
+                  yum)
+                      package_metadata_update_once
+                      yum install -y docker-ce docker-ce-cli containerd.io 2>/dev/null || \\
+                      yum install -y moby-engine 2>/dev/null || \\
+                      yum install -y docker 2>/dev/null || die "Nie znaleziono Docker Engine w repozytoriach yum. Skonfiguruj repo Docker CE lub Moby."
+                      ;;
+              esac
+              command -v docker >/dev/null 2>&1 || die "Instalacja Docker Engine nie udostępniła polecenia docker"
+          }
+
+          install_requirements(){
+              local requirement="" package="" docker_needed=false; local -a packages=() unique=()
+              for requirement in "$@"; do
+                  requirement_installed "$requirement" && continue
+                  if [[ "$requirement" == docker ]]; then docker_needed=true; continue; fi
+                  package="$(requirement_package "$requirement")" || die "Brak mapowania pakietu dla wymagania: $requirement"
+                  packages+=("$package")
+              done
+              if (( ${#packages[@]} > 0 )); then
+                  mapfile -t unique < <(printf '%s\\n' "${packages[@]}" | awk 'NF && !seen[$0]++')
+                  log "Instalacja brakujących pakietów hosta (${PKG_MANAGER:-auto}): ${unique[*]}"
+                  package_install_names "${unique[@]}"
+              fi
+              [[ "$docker_needed" != true ]] || install_docker_engine
+          }
+
+          package_version(){
+              local requirement="$1" manager="$(detect_package_manager)" package=""
+              [[ "$requirement" != docker ]] || { docker --version 2>/dev/null | head -1; return 0; }
+              package="$(requirement_package "$requirement" "$manager")" || { echo n/d; return 0; }
+              case "$manager" in
+                  apt) dpkg-query -W -f='${Version}' "$package" 2>/dev/null || echo n/d ;;
+                  dnf|yum|zypper) rpm -q --qf '%{VERSION}-%{RELEASE}' "$package" 2>/dev/null || echo n/d ;;
+              esac
+          }
+
+          ensure_prepare_host_packages(){
+              [[ "$PREPARE_HOST" == true ]] || return 0
+              install_requirements "${HOST_REQUIRED_PACKAGES[@]}"
+          }
+
+          host_package_report(){
+              local requirement="" version="" docker_version="" issues=0
+              log "Weryfikacja pakietów hosta ($(detect_package_manager))"
+              printf '%-22s %-10s %s\\n' "Wymaganie" "Status" "Wersja"
+              printf '%-22s %-10s %s\\n' "----------------------" "----------" "------------------------------"
+              for requirement in "${HOST_REQUIRED_PACKAGES[@]}"; do
+                  if requirement_installed "$requirement"; then
+                      version="$(package_version "$requirement")"; [[ -n "$version" ]] || version="n/d"
+                      printf '%-22s %-10s %s\\n' "$requirement" "OK" "$version"
+                  else
+                      printf '%-22s %-10s %s\\n' "$requirement" "BRAK" "-"
+                      ((issues += 1))
+                  fi
+              done
+              echo
+              if docker info >/dev/null 2>&1; then
+                  docker_version="$(docker version --format '{{.Server.Version}}' 2>/dev/null || true)"; [[ -n "$docker_version" ]] || docker_version="n/d"
+                  printf 'Docker Engine: OK (wersja %s)\\n' "$docker_version"
+              else
+                  echo 'Docker Engine: BŁĄD'; ((issues += 1))
+              fi
+              (( issues == 0 )) || { warn "Weryfikacja hosta wykryła $issues braków/błędów."; return 1; }
+              printf 'Wszystkie wymagania hosta są spełnione (%d/%d).\\n' "${#HOST_REQUIRED_PACKAGES[@]}" "${#HOST_REQUIRED_PACKAGES[@]}"
+          }
+
+          ensure_dependencies(){
+              local -a requirements=(ca-certificates curl jq git coreutils gawk sudo getent)
+              [[ "$LIST_REPOS" == true && "$PREPARE_HOST" == false ]] || requirements+=(docker)
+              [[ "$PREPARE_HOST" != true && "$UI" != dialog ]] || requirements+=(dialog)
+              [[ "$UI" != zenity ]] || requirements+=(zenity)
+              install_requirements "${requirements[@]}"
+              local requirement=""
+              for requirement in "${requirements[@]}"; do requirement_installed "$requirement" || die "Po instalacji nadal brakuje wymagania: $requirement"; done
+          }
+
+          docker_ready(){
+              local i
+              command -v docker >/dev/null 2>&1 || install_docker_engine
+              docker info >/dev/null 2>&1 && return 0
+              log "Uruchamianie Docker Engine"
+              if command -v systemctl >/dev/null 2>&1; then systemctl enable --now docker >/dev/null 2>&1 || true; fi
+              if ! docker info >/dev/null 2>&1 && command -v service >/dev/null 2>&1; then service docker start >/dev/null 2>&1 || true; fi
+              for ((i=1; i<=10; i++)); do docker info >/dev/null 2>&1 && return 0; sleep 1; done
+              [[ -S /var/run/docker.sock ]] || die "Docker CLI jest zainstalowany, ale /var/run/docker.sock nie istnieje. Sprawdź usługę Docker."
+              docker info 2>&1 | tail -20 >&2 || true
+              die "Docker Engine nie odpowiada mimo dostępnego socketa."
+          }
+
+          resolve_runner_version(){'''
+          s, n = package_block.subn(package_replacement, s, count=1)
+          if n != 1:
+              raise SystemExit('missing package manager block')
+
+          rep('''resolve_runner_version(){
+              local version="${RUNNER_VERSION#v}"
+              if [[ -z "$version" ]]; then
+                  version="$(curl -fsSL https://api.github.com/repos/actions/runner/releases/latest | jq -r '.tag_name // empty' | sed 's/^v//')" || return 1
+              fi
+              [[ -n "$version" && "$version" != null ]] || { warn "Nie udało się ustalić wersji actions/runner."; return 1; }
+              [[ "$version" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || { warn "Nieprawidłowa wersja actions/runner: $version"; return 1; }
+              printf '%s\\n' "$version"
+          }
+          ''', '''latest_runner_version(){
+              local version=""
+              version="$(curl -fsSL https://api.github.com/repos/actions/runner/releases/latest | jq -r '.tag_name // empty' | sed 's/^v//')" || return 1
+              [[ -n "$version" && "$version" != null ]] || return 1
+              printf '%s\\n' "$version"
+          }
+
+          resolve_runner_version(){
+              local version="${RUNNER_VERSION#v}"
+              [[ -n "$version" ]] || version="$(latest_runner_version)" || return 1
+              [[ -n "$version" && "$version" != null ]] || { warn "Nie udało się ustalić wersji actions/runner."; return 1; }
+              [[ "$version" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || { warn "Nieprawidłowa wersja actions/runner: $version"; return 1; }
+              printf '%s\\n' "$version"
+          }
+
+          image_runner_version(){ docker image inspect -f '{{index .Config.Labels "com.chrisscriptbase.runner-version"}}' "$IMAGE" 2>/dev/null | grep -v '^<no value>$' || true; }
+          container_runner_version(){ local container_name="$1"; docker exec "$container_name" /actions-runner/bin/Runner.Listener --version 2>/dev/null | tail -1 | tr -d '\\r' || true; }
+
+          check_runner_updates(){
+              local latest="" current="" container_name=""
+              latest="$(latest_runner_version)" || { warn "Nie udało się pobrać najnowszej wersji actions/runner."; return 1; }
+              current="$(image_runner_version)"
+              if [[ -z "$current" ]]; then
+                  container_name="$(docker ps -a --filter label=com.chrisscriptbase.github-runner=true --format '{{.Names}}' | head -1)"
+                  [[ -z "$container_name" ]] || current="$(container_runner_version "$container_name")"
+              fi
+              [[ -n "$current" ]] || current="n/d"
+              echo "Actions Runner: zainstalowana=$current najnowsza=$latest"
+              if [[ "$current" == "$latest" ]]; then echo "Status aktualizacji: aktualny"; else echo "Status aktualizacji: dostępna aktualizacja"; fi
+          }
+          ''', 'runner update functions')
+
+          rep('''ARG RUNNER_VERSION=""
+          ENV DEBIAN_FRONTEND=noninteractive''', '''ARG RUNNER_VERSION=""
+          LABEL com.chrisscriptbase.runner-version="${RUNNER_VERSION}"
+          ENV DEBIAN_FRONTEND=noninteractive''', 'runner image version label')
+
+          rep('''local_repos(){ local repositories_root="$(profile_root)/repositories" state_dir="" repo_name=""; if [[ -d "$repositories_root" ]]; then for state_dir in "$repositories_root"/*; do [[ -f "$state_dir/metadata" ]] || continue; repo_name="$(meta_get "$state_dir/metadata" repo)"; [[ -z "$repo_name" ]] || echo "$repo_name"; done; fi; legacy_repos; legacy_service_repos; }
+          ''', '''container_repos(){
+              local container_name="" repo_name="" prefix="github-runner-$(san "$PROFILE")-"
+              while IFS= read -r container_name; do
+                  [[ -n "$container_name" ]] || continue
+                  repo_name="$(docker inspect -f '{{index .Config.Labels "com.chrisscriptbase.repository"}}' "$container_name" 2>/dev/null || true)"
+                  [[ "$repo_name" != '<no value>' ]] || repo_name=""
+                  if [[ -z "$repo_name" && "$container_name" == "$prefix"* ]]; then repo_name="${container_name#"$prefix"}"; fi
+                  [[ -n "$repo_name" && "$repo_name" != org ]] && printf '%s\\n' "$repo_name"
+              done < <(docker ps -a --filter label=com.chrisscriptbase.github-runner=true --filter "label=com.chrisscriptbase.profile=$PROFILE" --format '{{.Names}}' 2>/dev/null || true)
+          }
+
+          local_repos(){ local repositories_root="$(profile_root)/repositories" state_dir="" repo_name=""; if [[ -d "$repositories_root" ]]; then for state_dir in "$repositories_root"/*; do [[ -f "$state_dir/metadata" ]] || continue; repo_name="$(meta_get "$state_dir/metadata" repo)"; [[ -z "$repo_name" ]] || echo "$repo_name"; done; fi; legacy_repos; legacy_service_repos; container_repos; }
+          ''', 'container repos')
+
+          rep('''docker_args=(run -d --name "$container_name" --restart unless-stopped --label com.chrisscriptbase.github-runner=true --label "com.chrisscriptbase.profile=$PROFILE"''', '''docker_args=(run -d --name "$container_name" --restart unless-stopped --label com.chrisscriptbase.github-runner=true --label "com.chrisscriptbase.profile=$PROFILE" --label "com.chrisscriptbase.scope=$scope" --label "com.chrisscriptbase.repository=$repo_name" --label "com.chrisscriptbase.runner-name=$runner_name"''', 'container labels')
+
+          status_insert = '''
+          container_socket_status(){
+              local container_name="$1" mounted=""
+              mounted="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/var/run/docker.sock"}}yes{{end}}{{end}}' "$container_name" 2>/dev/null || true)"
+              [[ "$mounted" == yes ]] && echo yes || echo no
+          }
+
+          status_repo(){
+              local repo_name="$1" state_dir="$(repo_state "$1")" metadata="$state_dir/metadata" runner_name="$(repo_runner "$1")" container_name="$(repo_container "$1")"
+              local container_state="missing" github_state="missing" busy="-" socket="-" docker_api="-" cfg="-" version="-" row="" running="false" stored_hash="" expected_hash=""
+              if [[ -f "$metadata" ]]; then
+                  runner_name="$(meta_get "$metadata" runner_name)"; container_name="$(meta_get "$metadata" container_name)"
+              fi
+              if docker inspect "$container_name" >/dev/null 2>&1; then
+                  running="$(docker inspect -f '{{.State.Running}}' "$container_name" 2>/dev/null || echo false)"
+                  [[ "$running" == true ]] && container_state=running || container_state=stopped
+                  socket="$(container_socket_status "$container_name")"
+                  version="$(container_runner_version "$container_name")"; [[ -n "$version" ]] || version="?"
+                  if [[ "$running" == true && "$socket" == yes ]]; then docker_api="$(docker exec "$container_name" docker version --format '{{.Server.APIVersion}}' 2>/dev/null || true)"; [[ -n "$docker_api" ]] || docker_api=error; fi
+              fi
+              row="$(runner_lookup "$(runner_endpoint "$repo_name")" "$runner_name" 2>/dev/null || true)"
+              if [[ -n "$row" ]]; then github_state="$(cut -f2 <<< "$row")"; busy="$(cut -f3 <<< "$row")"; fi
+              if [[ -f "$metadata" ]]; then stored_hash="$(meta_get "$metadata" config_hash)"; expected_hash="$(config_hash)"; [[ -n "$stored_hash" && "$stored_hash" == "$expected_hash" ]] && cfg=ok || cfg=drift; fi
+              printf '%-24s %-10s %-9s %-5s %-6s %-10s %-8s %-8s\\n' "$repo_name" "$container_state" "$github_state" "$busy" "$socket" "$docker_api" "$version" "$cfg"
+          }
+
+          status_org(){
+              local state_dir="$(org_state)" metadata="$state_dir/metadata" runner_name="$(org_runner)" container_name="$(org_container)" row="" container_state="missing" github_state="missing" busy="-" socket="-" docker_api="-" cfg="-" version="-" running="false" stored_hash="" expected_hash=""
+              if [[ -f "$metadata" ]]; then runner_name="$(meta_get "$metadata" runner_name)"; container_name="$(meta_get "$metadata" container_name)"; fi
+              if docker inspect "$container_name" >/dev/null 2>&1; then running="$(docker inspect -f '{{.State.Running}}' "$container_name" 2>/dev/null || echo false)"; [[ "$running" == true ]] && container_state=running || container_state=stopped; socket="$(container_socket_status "$container_name")"; version="$(container_runner_version "$container_name")"; [[ -n "$version" ]] || version="?"; [[ "$running" != true || "$socket" != yes ]] || docker_api="$(docker exec "$container_name" docker version --format '{{.Server.APIVersion}}' 2>/dev/null || echo error)"; fi
+              row="$(runner_lookup "/orgs/$OWNER/actions/runners" "$runner_name" 2>/dev/null || true)"; if [[ -n "$row" ]]; then github_state="$(cut -f2 <<< "$row")"; busy="$(cut -f3 <<< "$row")"; fi
+              if [[ -f "$metadata" ]]; then stored_hash="$(meta_get "$metadata" config_hash)"; expected_hash="$(config_hash)"; [[ -n "$stored_hash" && "$stored_hash" == "$expected_hash" ]] && cfg=ok || cfg=drift; fi
+              printf '%-24s %-10s %-9s %-5s %-6s %-10s %-8s %-8s\\n' "(organization)" "$container_state" "$github_state" "$busy" "$socket" "$docker_api" "$version" "$cfg"
+          }
+
+          status_profile(){
+              local repo_name=""; local -a repositories=()
+              echo "Profil: $PROFILE owner=$OWNER mode=$MODE"
+              printf '%-24s %-10s %-9s %-5s %-6s %-10s %-8s %-8s\\n' "Repo" "Kontener" "GitHub" "Busy" "Sock" "DockerAPI" "Runner" "Config"
+              if [[ "$MODE" == org ]]; then status_org; return 0; fi
+              mapfile -t repositories < <(local_repos | awk 'NF && !seen[tolower($0)]++')
+              if (( ${#repositories[@]} == 0 )); then echo "Brak lokalnych runnerów."; return 0; fi
+              for repo_name in "${repositories[@]}"; do status_repo "$repo_name"; done
+          }
+
+          '''
+          rep('''run_container(){''', status_insert + '''run_container(){''', 'status functions')
+
+          retire_helper = '''
+          retire_existing_container(){
+              local endpoint="$1" runner_name="$2" container_name="$3" was_running="false"
+              docker inspect "$container_name" >/dev/null 2>&1 || return 0
+              was_running="$(docker inspect -f '{{.State.Running}}' "$container_name" 2>/dev/null || echo false)"
+              if [[ "$was_running" == true ]]; then docker stop -t 30 "$container_name" >/dev/null 2>&1 || true; fi
+              if ! remote_delete_recreate "$endpoint" "$runner_name"; then
+                  warn "Rollback: GitHub nie pozwolił wyrejestrować $runner_name. Zachowuję stary kontener $container_name."
+                  [[ "$was_running" != true ]] || docker start "$container_name" >/dev/null 2>&1 || true
+                  return 1
+              fi
+              docker rm -f "$container_name" >/dev/null 2>&1 || true
+          }
+
+          '''
+          rep('''existing_runner_healthy(){''', retire_helper + '''existing_runner_healthy(){''', 'transaction helper')
+
+          rep('''    if docker inspect "$container_name" >/dev/null 2>&1; then
+                  log "Reconciliation: odtwarzam $container_name"; docker rm -f "$container_name" >/dev/null 2>&1 || true
+                  remote_delete_recreate "$(runner_endpoint "$repo_name")" "$runner_name" || { warn "Nie udało się usunąć starej rejestracji $runner_name."; return 1; }
+              fi''', '''    if docker inspect "$container_name" >/dev/null 2>&1; then
+                  log "Reconciliation: bezpiecznie odtwarzam $container_name"
+                  retire_existing_container "$(runner_endpoint "$repo_name")" "$runner_name" "$container_name" || return 1
+              fi''', 'repo transactional reinstall')
+
+          rep('''    if docker inspect "$container_name" >/dev/null 2>&1; then docker rm -f "$container_name" >/dev/null 2>&1 || true; remote_delete_recreate "/orgs/$OWNER/actions/runners" "$runner_name" || return 1; fi''', '''    if docker inspect "$container_name" >/dev/null 2>&1; then retire_existing_container "/orgs/$OWNER/actions/runners" "$runner_name" "$container_name" || return 1; fi''', 'org transactional reinstall')
+
+          repair_insert = '''
+          repair_repo(){
+              local repo_name="$1" state_dir="$(repo_state "$1")" metadata="$state_dir/metadata" runner_name="$(repo_runner "$1")" container_name="$(repo_container "$1")" row="" status="" running="false" stored_hash="" expected_hash="" rc=0 saved_force="$FORCE_RECREATE"
+              if [[ -f "$metadata" ]]; then runner_name="$(meta_get "$metadata" runner_name)"; container_name="$(meta_get "$metadata" container_name)"; fi
+              if docker inspect "$container_name" >/dev/null 2>&1; then
+                  running="$(docker inspect -f '{{.State.Running}}' "$container_name" 2>/dev/null || echo false)"
+                  row="$(runner_lookup "$(runner_endpoint "$repo_name")" "$runner_name" 2>/dev/null || true)"; [[ -z "$row" ]] || status="$(cut -f2 <<< "$row")"
+                  if [[ -f "$metadata" ]]; then stored_hash="$(meta_get "$metadata" config_hash)"; expected_hash="$(config_hash)"; fi
+                  if [[ "$running" == true && "$status" == online && -n "$stored_hash" && "$stored_hash" == "$expected_hash" ]]; then echo "Repair: $repo_name jest zdrowy"; return 3; fi
+                  if [[ -n "$stored_hash" && "$stored_hash" == "$expected_hash" ]]; then
+                      log "Repair: restartuję $container_name"
+                      docker restart "$container_name" >/dev/null 2>&1 || docker start "$container_name" >/dev/null 2>&1 || true
+                      if wait_runner_online "$(runner_endpoint "$repo_name")" "$runner_name" "$container_name"; then echo "Repair: naprawiono restartem $repo_name"; return 0; fi
+                  fi
+              else
+                  warn "Repair: brak kontenera $container_name; odtwarzam runner $repo_name."
+              fi
+              FORCE_RECREATE=true
+              if install_repo "$repo_name"; then rc=0; else rc=$?; fi
+              FORCE_RECREATE="$saved_force"
+              return "$rc"
+          }
+
+          repair_org(){
+              local saved_force="$FORCE_RECREATE" rc=0 state_dir="$(org_state)" metadata="$state_dir/metadata" runner_name="$(org_runner)" container_name="$(org_container)" row="" status="" running="false" stored_hash="" expected_hash=""
+              if [[ -f "$metadata" ]]; then runner_name="$(meta_get "$metadata" runner_name)"; container_name="$(meta_get "$metadata" container_name)"; fi
+              if docker inspect "$container_name" >/dev/null 2>&1; then
+                  running="$(docker inspect -f '{{.State.Running}}' "$container_name" 2>/dev/null || echo false)"; row="$(runner_lookup "/orgs/$OWNER/actions/runners" "$runner_name" 2>/dev/null || true)"; [[ -z "$row" ]] || status="$(cut -f2 <<< "$row")"
+                  if [[ -f "$metadata" ]]; then stored_hash="$(meta_get "$metadata" config_hash)"; expected_hash="$(config_hash)"; fi
+                  if [[ "$running" == true && "$status" == online && -n "$stored_hash" && "$stored_hash" == "$expected_hash" ]]; then echo "Repair: organization runner jest zdrowy"; return 3; fi
+                  if [[ -n "$stored_hash" && "$stored_hash" == "$expected_hash" ]]; then docker restart "$container_name" >/dev/null 2>&1 || true; if wait_runner_online "/orgs/$OWNER/actions/runners" "$runner_name" "$container_name"; then return 0; fi; fi
+              fi
+              FORCE_RECREATE=true; if install_org; then rc=0; else rc=$?; fi; FORCE_RECREATE="$saved_force"; return "$rc"
+          }
+
+          '''
+          rep('''remove_repo(){''', repair_insert + '''remove_repo(){''', 'repair functions')
+
+          rep('''    command -v dialog >/dev/null 2>&1 && return 0
+              [[ -r /dev/tty && -w /dev/tty ]] || die "Brak interaktywnego terminala /dev/tty dla interfejsu dialog"
+              echo "Instaluję wymagany pakiet 'dialog'..." >/dev/tty
+              if command -v apt-get >/dev/null 2>&1; then
+                  apt_update_once >/dev/tty 2>&1
+                  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends dialog >/dev/tty 2>&1
+              elif command -v dnf >/dev/null 2>&1; then
+                  dnf install -y dialog >/dev/tty 2>&1
+              elif command -v yum >/dev/null 2>&1; then
+                  yum install -y dialog >/dev/tty 2>&1
+              elif command -v zypper >/dev/null 2>&1; then
+                  zypper --non-interactive install dialog >/dev/tty 2>&1
+              elif command -v pacman >/dev/null 2>&1; then
+                  pacman -Sy --noconfirm dialog >/dev/tty 2>&1
+              else
+                  die "Brak programu dialog i nie rozpoznano obsługiwanego managera pakietów"
+              fi
+              command -v dialog >/dev/null 2>&1 || die "Nie udało się zainstalować programu dialog"''', '''    command -v dialog >/dev/null 2>&1 && return 0
+              [[ -r /dev/tty && -w /dev/tty ]] || die "Brak interaktywnego terminala /dev/tty dla interfejsu dialog"
+              echo "Instaluję wymagany pakiet 'dialog'..." >/dev/tty
+              install_requirements dialog >/dev/tty 2>&1
+              command -v dialog >/dev/null 2>&1 || die "Nie udało się zainstalować programu dialog"''', 'generic ensure dialog')
+
+          rep('''        command -v apt-get >/dev/null 2>&1 || die "Brak Zenity i brak apt-get do automatycznej instalacji."
+                  apt_install zenity''', '''        install_requirements zenity''', 'generic zenity')
+
+          old_menu = '''          --menu "$message" 18 96 8 \\
+                    install "Install         - dodaj nowy runner / wykonaj reconciliation" \\
+                    reinstall "Reinstall       - przeinstaluj; błąd wyrejestrowania zatrzymuje operację" \\
+                    force_reinstall "Force Reinstall - kontynuuj mimo 422/błędu usunięcia starej rejestracji" \\
+                    uninstall "Uninstall       - usuń wybrane zainstalowane runnery" \\
+          '''
+          new_menu = '''          --menu "$message" 24 104 12 \\
+                    install "Install         - dodaj nowy runner / wykonaj reconciliation" \\
+                    reinstall "Reinstall       - bezpieczna reinstalacja z rollbackiem przy błędzie API" \\
+                    force_reinstall "Force Reinstall - kontynuuj mimo konfliktu HTTP 409/422" \\
+                    status "Status          - pokaż stan kontenerów, GitHub, socketa i wersji" \\
+                    repair "Repair          - restart/recreate niedziałających runnerów" \\
+                    check_updates "Check Updates   - sprawdź wersję actions/runner" \\
+                    update_runner "Update Runner   - przebuduj obraz i przeinstaluj lokalne runnery" \\
+                    uninstall "Uninstall       - usuń wybrane zainstalowane runnery" \\
+          '''
+          rep(old_menu, new_menu, 'gui menu')
+
+          rep('''        force_reinstall)
+                  ACTION="install"
+                  FORCE_RECREATE=true
+                  FORCE_REMOTE_DELETE=true
+                  REINSTALL_ONLY=true
+                  ;;
+              uninstall)''', '''        force_reinstall)
+                  ACTION="install"
+                  FORCE_RECREATE=true
+                  FORCE_REMOTE_DELETE=true
+                  REINSTALL_ONLY=true
+                  ;;
+              status)
+                  STATUS_ONLY=true
+                  ;;
+              repair)
+                  ACTION="install"
+                  REPAIR_MODE=true
+                  REINSTALL_ONLY=true
+                  FORCE_RECREATE=false
+                  FORCE_REMOTE_DELETE=false
+                  ;;
+              check_updates)
+                  CHECK_UPDATES=true
+                  ;;
+              update_runner)
+                  ACTION="install"
+                  UPDATE_RUNNER=true
+                  REINSTALL_ONLY=true
+                  FORCE_RECREATE=true
+                  FORCE_REMOTE_DELETE=false
+                  REBUILD=true
+                  ;;
+              uninstall)''', 'gui menu cases')
+
+          rep('''    if [[ "$ACTION" == uninstall ]]; then
+                  action_label="Uninstall"
+              elif [[ "$REINSTALL_ONLY" == true && "$FORCE_REMOTE_DELETE" == true ]]; then
+                  action_label="Force Reinstall"
+              elif [[ "$REINSTALL_ONLY" == true ]]; then
+                  action_label="Reinstall"
+              fi''', '''    if [[ "$ACTION" == uninstall ]]; then
+                  action_label="Uninstall"
+              elif [[ "$REPAIR_MODE" == true ]]; then
+                  action_label="Repair"
+              elif [[ "$UPDATE_RUNNER" == true ]]; then
+                  action_label="Update Runner"
+              elif [[ "$REINSTALL_ONLY" == true && "$FORCE_REMOTE_DELETE" == true ]]; then
+                  action_label="Force Reinstall"
+              elif [[ "$REINSTALL_ONLY" == true ]]; then
+                  action_label="Reinstall"
+              fi''', 'gui action label')
+
+          rep('''    local repo_name=""; local -a available=() chosen=()
+              if [[ "$LIST_REPOS" == true ]]; then remote_repos; return 0; fi''', '''    local spec=""; local -a available=() chosen=()
+              if [[ "$LIST_REPOS" == true ]]; then remote_repos; return 0; fi''', 'resolve local declaration') if False else None
+
+          # process() gets status/repair branches without disturbing existing selection logic.
+          rep('''process(){
+              local repo_name="" rc=0 success=0 skipped=0 failed=0; local -a repositories=()
+              if [[ "$MODE" == org ]]; then
+                  if [[ "$LIST_REPOS" == true ]]; then warn "MODE=org: --list-repos pominięte"; return 0; fi
+                  if [[ "$ACTION" == install ]]; then if install_org; then return 0; fi; rc=$?; (( rc == 3 )) && return 0; return "$rc"; fi
+                  remove_org; return $?
+              fi
+              mapfile -t repositories < <(resolve)''', '''process(){
+              local repo_name="" rc=0 success=0 skipped=0 failed=0; local -a repositories=()
+              if [[ "$STATUS_ONLY" == true ]]; then status_profile; return $?; fi
+              if [[ "$MODE" == org ]]; then
+                  if [[ "$LIST_REPOS" == true ]]; then warn "MODE=org: --list-repos pominięte"; return 0; fi
+                  if [[ "$REPAIR_MODE" == true ]]; then if repair_org; then return 0; fi; rc=$?; (( rc == 3 )) && return 0; return "$rc"; fi
+                  if [[ "$ACTION" == install ]]; then if install_org; then return 0; fi; rc=$?; (( rc == 3 )) && return 0; return "$rc"; fi
+                  remove_org; return $?
+              fi
+              mapfile -t repositories < <(resolve)''', 'process status repair org')
+
+          rep('''        if [[ "$ACTION" == install ]]; then
+                      if install_repo "$repo_name"; then ((success += 1)); else rc=$?; if (( rc == 3 )); then ((skipped += 1)); else ((failed += 1)); fi; fi
+                  else''', '''        if [[ "$REPAIR_MODE" == true ]]; then
+                      if repair_repo "$repo_name"; then ((success += 1)); else rc=$?; if (( rc == 3 )); then ((skipped += 1)); else ((failed += 1)); fi; fi
+                  elif [[ "$ACTION" == install ]]; then
+                      if install_repo "$repo_name"; then ((success += 1)); else rc=$?; if (( rc == 3 )); then ((skipped += 1)); else ((failed += 1)); fi; fi
+                  else''', 'process repair repos')
+
+          rep('''    if [[ "$LIST_REPOS" == false ]] && ! gui_choose_action; then return 0; fi
+              if [[ "$ACTION" == install && "$LIST_REPOS" == false ]]; then build_image || die "Nie udało się zbudować obrazu runnera."; fi''', '''    if [[ "$LIST_REPOS" == false ]] && ! gui_choose_action; then return 0; fi
+              if [[ "$CHECK_UPDATES" == true ]]; then check_runner_updates; return $?; fi
+              if [[ "$UPDATE_RUNNER" == true ]]; then REBUILD=true; FORCE_RECREATE=true; REINSTALL_ONLY=true; fi
+              if [[ "$ACTION" == install && "$LIST_REPOS" == false && "$STATUS_ONLY" == false ]]; then build_image || die "Nie udało się zbudować obrazu runnera."; fi''', 'main update/status handling')
+
+          # Tests: replace apt-only expectations and add regression coverage.
+          rep_test('''expect_success "accept --prepare-host" bash -c 'source "$1"; args --prepare-host; [[ $PREPARE_HOST == true ]]' _ "$SCRIPT"
+          expect_success "accept resource limits"''', '''expect_success "accept --prepare-host" bash -c 'source "$1"; args --prepare-host; [[ $PREPARE_HOST == true ]]' _ "$SCRIPT"
+          expect_success "accept status" bash -c 'source "$1"; args --status; [[ $STATUS_ONLY == true ]]' _ "$SCRIPT"
+          expect_success "accept repair" bash -c 'source "$1"; args --repair; [[ $REPAIR_MODE == true && $REINSTALL_ONLY == true ]]' _ "$SCRIPT"
+          expect_success "accept check updates" bash -c 'source "$1"; args --check-updates; [[ $CHECK_UPDATES == true ]]' _ "$SCRIPT"
+          expect_success "accept update runner" bash -c 'source "$1"; args --update-runner; [[ $UPDATE_RUNNER == true && $REBUILD == true && $REINSTALL_ONLY == true ]]' _ "$SCRIPT"
+          expect_success "accept resource limits"''', 'operation arg tests')
+
+          old_apt_test = '''expect_success "apt metadata is refreshed at most once" bash -c '
+              source "$1"
+              APT_UPDATED=false
+              apt_calls=0
+              apt-get(){ ((apt_calls += 1)); return 0; }
+              apt_update_once
+              apt_update_once
+              [[ $apt_calls -eq 1 && $APT_UPDATED == true ]]
+          ' _ "$SCRIPT"
+
+          expect_success "prepare-host required package list" bash -c '
+              source "$1"
+              packages=" ${HOST_REQUIRED_PACKAGES[*]} "
+              for package in ca-certificates curl jq git coreutils gawk sudo libc-bin findutils grep sed hostname docker.io dialog; do
+                  [[ "$packages" == *" $package "* ]] || exit 1
+              done
+          ' _ "$SCRIPT"
+
+          expect_success "package report lists status and versions" bash -c '
+              source "$1"
+              HOST_REQUIRED_PACKAGES=(curl jq docker.io)
+              dpkg-query(){
+                  local package="${@: -1}"
+                  if [[ "$*" == *"Status"* ]]; then
+                      printf "install ok installed"
+                  else
+                      printf "test-version-%s" "$package"
+                  fi
+              }
+              docker(){
+                  case "${1:-}" in
+                      info) return 0 ;;
+                      version) printf "99.0.0" ;;
+                  esac
+              }
+              output="$(host_package_report)"
+              grep -Fq "curl" <<< "$output"
+              grep -Fq "jq" <<< "$output"
+              grep -Fq "docker.io" <<< "$output"
+              grep -Fq "test-version-curl" <<< "$output"
+              grep -Fq "Docker Engine: OK (wersja 99.0.0)" <<< "$output"
+              grep -Fq "Wszystkie wymagane pakiety są zainstalowane (3/3)." <<< "$output"
+          ' _ "$SCRIPT"
+          '''
+          new_pkg_test = '''expect_success "package metadata is refreshed at most once" bash -c '
+              source "$1"
+              PKG_MANAGER=apt
+              PACKAGE_METADATA_UPDATED=false
+              apt_calls=0
+              apt-get(){ ((apt_calls += 1)); return 0; }
+              package_metadata_update_once
+              package_metadata_update_once
+              [[ $apt_calls -eq 1 && $PACKAGE_METADATA_UPDATED == true ]]
+          ' _ "$SCRIPT"
+
+          expect_success "package mappings cover apt dnf yum zypper" bash -c '
+              source "$1"
+              [[ $(requirement_package getent apt) == libc-bin ]]
+              [[ $(requirement_package getent dnf) == glibc-common ]]
+              [[ $(requirement_package dialog yum) == dialog ]]
+              [[ $(requirement_package getent zypper) == glibc ]]
+          ' _ "$SCRIPT"
+
+          expect_success "prepare-host required package list" bash -c '
+              source "$1"
+              packages=" ${HOST_REQUIRED_PACKAGES[*]} "
+              for package in ca-certificates curl jq git coreutils gawk sudo getent findutils grep sed hostname docker dialog; do
+                  [[ "$packages" == *" $package "* ]] || exit 1
+              done
+          ' _ "$SCRIPT"
+          '''
+          rep_test(old_apt_test, new_pkg_test, 'package tests')
+
+          rep_test('''expect_success "force recreate tolerates remote delete failure" bash -c '
+              source "$1"
+              FORCE_REMOTE_DELETE=true
+              sleep(){ :; }
+              remote_delete(){ return 22; }
+              remote_delete_recreate /repos/test/actions/runners test-runner
+          ' _ "$SCRIPT"
+          expect_failure "normal reinstall rejects remote delete failure" bash -c '
+              source "$1"
+              FORCE_REMOTE_DELETE=false
+              sleep(){ :; }
+              remote_delete(){ return 22; }
+              remote_delete_recreate /repos/test/actions/runners test-runner
+          ' _ "$SCRIPT"
+          ''', '''expect_success "force recreate tolerates 422/conflict delete failure" bash -c '
+              source "$1"
+              FORCE_REMOTE_DELETE=true
+              GITHUB_API_RETRIES=1
+              sleep(){ :; }
+              remote_delete(){ return 43; }
+              remote_delete_recreate /repos/test/actions/runners test-runner
+          ' _ "$SCRIPT"
+          expect_failure "force recreate does not hide authorization failure" bash -c '
+              source "$1"
+              FORCE_REMOTE_DELETE=true
+              sleep(){ :; }
+              remote_delete(){ return 40; }
+              remote_delete_recreate /repos/test/actions/runners test-runner
+          ' _ "$SCRIPT"
+          expect_failure "normal reinstall rejects conflict delete failure" bash -c '
+              source "$1"
+              FORCE_REMOTE_DELETE=false
+              GITHUB_API_RETRIES=1
+              sleep(){ :; }
+              remote_delete(){ return 43; }
+              remote_delete_recreate /repos/test/actions/runners test-runner
+          ' _ "$SCRIPT"
+          ''', 'remote delete tests')
+
+          marker = '''expect_success "render embedded Docker context" env SCRIPT="$SCRIPT" TEST_TMP="$TMP" bash -c '\n'''
+          if marker not in t:
+              raise SystemExit('missing render test marker')
+          extra_tests = '''expect_success "transactional reinstall restarts old container when remote delete fails" bash -c '
+              source "$1"
+              calls=""
+              docker(){
+                  case "$1" in
+                      inspect) if [[ "$*" == *State.Running* ]]; then echo true; fi; return 0 ;;
+                      stop) calls+=" stop"; return 0 ;;
+                      start) calls+=" start"; return 0 ;;
+                      rm) calls+=" rm"; return 0 ;;
+                  esac
+              }
+              remote_delete_recreate(){ return 41; }
+              if retire_existing_container /repos/test/actions/runners runner container; then exit 1; fi
+              [[ "$calls" == *" stop"* && "$calls" == *" start"* && "$calls" != *" rm"* ]]
+          ' _ "$SCRIPT"
+
+          expect_success "runner image stores version label" bash -c '
+              source "$1"
+              tmp="$(mktemp -d)"; render_docker_context "$tmp"
+              grep -Fq "com.chrisscriptbase.runner-version" "$tmp/Dockerfile"
+              rm -rf "$tmp"
+          ' _ "$SCRIPT"
+
+          '''
+          t = t.replace(marker, extra_tests + marker, 1)
+
+          script_path.write_text(s)
+          test_path.write_text(t)
+          PY
+
+      - name: Validate shell syntax
+        run: |
+          bash -n linux/install-github-selfhosted-runners.sh
+          bash -n linux/tests/test-install-github-selfhosted-runners.sh
+
+      - name: Run regression tests
+        run: bash linux/tests/test-install-github-selfhosted-runners.sh
+
+      - name: Verify requested features exist
+        run: |
+          grep -Fq -- '--status' linux/install-github-selfhosted-runners.sh
+          grep -Fq -- '--repair' linux/install-github-selfhosted-runners.sh
+          grep -Fq -- '--check-updates' linux/install-github-selfhosted-runners.sh
+          grep -Fq -- '--update-runner' linux/install-github-selfhosted-runners.sh
+          grep -Fq 'retire_existing_container' linux/install-github-selfhosted-runners.sh
+          grep -Fq 'detect_package_manager' linux/install-github-selfhosted-runners.sh
+          grep -Fq 'HTTP $http_code' linux/install-github-selfhosted-runners.sh
+
+      - name: Commit upgrade and remove temporary workflow
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git rm .github/workflows/apply-runner-manager-v2.yml
+          git add linux/install-github-selfhosted-runners.sh linux/tests/test-install-github-selfhosted-runners.sh
+          git commit -m "Upgrade self-hosted runner manager reliability"
+          git push origin main
