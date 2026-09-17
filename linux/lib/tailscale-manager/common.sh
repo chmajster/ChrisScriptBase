@@ -177,6 +177,7 @@ detect_os() {
 }
 
 require_root() {
+    [[ "$DRY_RUN" == true ]] && return 0
     [[ $EUID -eq 0 ]] || die "$EXIT_GENERAL" "Ta operacja wymaga root. Uruchom przez sudo."
 }
 
