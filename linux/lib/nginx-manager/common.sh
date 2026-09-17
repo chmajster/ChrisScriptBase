@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 
 SCRIPT_NAME="nginx-manager.sh"
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.1.1"
 
 EXIT_GENERAL=1
 EXIT_ARGS=2
@@ -37,6 +37,7 @@ TEMP_ROOT="${TMPDIR:-/tmp}/nginx-manager.${UID:-0}.$$"
 DOMAIN=""
 DOCUMENT_ROOT=""
 LISTEN_PORT="80"
+PORT_SET=false
 PHP_SOCKET=""
 ENABLE_SSL=false
 BACKEND_HOST="127.0.0.1"

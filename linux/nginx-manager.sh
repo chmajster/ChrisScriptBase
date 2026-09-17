@@ -34,6 +34,8 @@ execute_action() {
         service) service_action "$SERVICE_ACTION" ;;
         add-site) create_site "$DOMAIN" "$DOCUMENT_ROOT" "$LISTEN_PORT" "$PHP_SOCKET" "$ENABLE_SSL" ;;
         add-proxy) create_reverse_proxy "$DOMAIN" "$BACKEND_HOST" "$BACKEND_PORT" "$BACKEND_SCHEME" "$WEBSOCKET" "$ENABLE_SSL" ;;
+        change-site-port) change_site_port "$DOMAIN" "$LISTEN_PORT" ;;
+        set-default-port) change_default_port "$LISTEN_PORT" ;;
         "") return 0 ;;
         *) die "$EXIT_ARGS" "Nieznana akcja: $ACTION" ;;
     esac

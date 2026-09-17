@@ -11,6 +11,8 @@ Usage:
   nginx-manager.sh --status|--test|--reload|--restart|--backup|--list-sites|--diagnostic
   nginx-manager.sh --add-site --domain DOMAIN --root PATH [--port PORT] [--php-socket PATH]
   nginx-manager.sh --add-proxy --domain DOMAIN --backend-host HOST --backend-port PORT [--websocket]
+  nginx-manager.sh --change-site-port --domain DOMAIN --port PORT
+  nginx-manager.sh --set-default-port --port PORT
 
 Options:
   --gui                    Wymuś interfejs dialog.
@@ -26,6 +28,8 @@ Options:
   --install|--update       Instalacja lub aktualizacja Nginx.
   --remove|--purge         Usuń pakiet; purge wymaga --yes i tworzy backup.
   --service ACTION         start|stop|restart|reload|enable|disable|status.
+  --change-site-port       Zmień port HTTP wskazanego Virtual Hosta.
+  --set-default-port       Zmień port domyślnego serwera Nginx.
   --ssl                    Włącz SSL przy tworzeniu strony/proxy.
   --quiet                  Ogranicz komunikaty.
 EOF
@@ -58,9 +62,11 @@ parse_args() {
             --service) [[ -n "${2:-}" ]] || die "$EXIT_ARGS" "Brak wartości --service"; ACTION="service"; SERVICE_ACTION="$2"; shift ;;
             --add-site) ACTION="add-site" ;;
             --add-proxy) ACTION="add-proxy" ;;
+            --change-site-port) ACTION="change-site-port" ;;
+            --set-default-port) ACTION="set-default-port" ;;
             --domain) [[ -n "${2:-}" ]] || die "$EXIT_ARGS" "Brak wartości --domain"; DOMAIN="$2"; shift ;;
             --root) [[ -n "${2:-}" ]] || die "$EXIT_ARGS" "Brak wartości --root"; DOCUMENT_ROOT="$2"; shift ;;
-            --port) [[ -n "${2:-}" ]] || die "$EXIT_ARGS" "Brak wartości --port"; LISTEN_PORT="$2"; shift ;;
+            --port) [[ -n "${2:-}" ]] || die "$EXIT_ARGS" "Brak wartości --port"; LISTEN_PORT="$2"; PORT_SET=true; shift ;;
             --php-socket) [[ -n "${2:-}" ]] || die "$EXIT_ARGS" "Brak wartości --php-socket"; PHP_SOCKET="$2"; shift ;;
             --backend-host) [[ -n "${2:-}" ]] || die "$EXIT_ARGS" "Brak wartości --backend-host"; BACKEND_HOST="$2"; shift ;;
             --backend-port) [[ -n "${2:-}" ]] || die "$EXIT_ARGS" "Brak wartości --backend-port"; BACKEND_PORT="$2"; shift ;;
@@ -87,6 +93,15 @@ validate_action_arguments() {
             validate_host "$BACKEND_HOST" || die "$EXIT_ARGS" "Niepoprawny backend host."
             validate_port "$BACKEND_PORT" || die "$EXIT_ARGS" "Niepoprawny backend port."
             [[ "$BACKEND_SCHEME" =~ ^https?$ ]] || die "$EXIT_ARGS" "Backend scheme: tylko http lub https."
+            ;;
+        change-site-port)
+            validate_domain "$DOMAIN" || die "$EXIT_ARGS" "Niepoprawna domena."
+            [[ "$PORT_SET" == true ]] || die "$EXIT_ARGS" "Akcja --change-site-port wymaga --port."
+            validate_port "$LISTEN_PORT" || die "$EXIT_ARGS" "Niepoprawny port."
+            ;;
+        set-default-port)
+            [[ "$PORT_SET" == true ]] || die "$EXIT_ARGS" "Akcja --set-default-port wymaga --port."
+            validate_port "$LISTEN_PORT" || die "$EXIT_ARGS" "Niepoprawny port."
             ;;
     esac
 }

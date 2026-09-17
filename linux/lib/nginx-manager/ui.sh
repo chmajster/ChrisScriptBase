@@ -31,6 +31,20 @@ ui_text() {
     "$UI_BIN" --title "$title" --textbox "$file" 30 110
 }
 
+ui_select_site() {
+    local title="$1" domain description
+    local -a options=()
+    while IFS=$'\t' read -r domain description; do
+        [[ -n "$domain" ]] || continue
+        options+=("$domain" "$description")
+    done < <(site_choice_rows)
+    if ((${#options[@]} == 0)); then
+        ui_msg "$title" "Nie znaleziono skonfigurowanych Virtual Hostów."
+        return 1
+    fi
+    ui_menu "$title" "Wybierz stronę z listy:" "${options[@]}"
+}
+
 gui_status() {
     local action output
     while true; do
@@ -70,13 +84,18 @@ gui_site_wizard() {
 gui_sites() {
     local action domain target file
     while true; do
-        action="$(ui_menu "Strony / Virtual Hosts" "Wybierz operację" list "Lista stron" add "Dodaj stronę" edit "Edytuj stronę" delete "Usuń stronę" enable "Włącz stronę" disable "Wyłącz stronę" show "Pokaż konfigurację" test "Testuj konfigurację" clone "Klonuj konfigurację" search "Wyszukaj w konfiguracji" back Powrót || true)"
+        action="$(ui_menu "Strony / Virtual Hosts" "Wybierz operację" list "Lista stron" add "Dodaj stronę" port "Zmień port strony" edit "Edytuj stronę" delete "Usuń stronę" enable "Włącz stronę" disable "Wyłącz stronę" show "Pokaż konfigurację" test "Testuj konfigurację" clone "Klonuj konfigurację" search "Wyszukaj w konfiguracji" back Powrót || true)"
         case "$action" in
             list) ui_text "Virtual Hosts" "$(list_sites 2>&1)" ;;
             add) gui_site_wizard ;;
-            edit) domain="$(ui_input "Edycja" "Domena:" "" || true)"; [[ -n "$domain" ]] && { file="$(find_site_file "$domain" 2>/dev/null || true)"; [[ -n "$file" ]] && edit_config_file "$file" || ui_msg "Błąd" "Nie znaleziono strony."; } ;;
+            port)
+                domain="$(ui_select_site "Port strony" || true)"; [[ -n "$domain" ]] || continue
+                target="$(ui_input "Port strony" "Nowy port HTTP:" "8080" || true)"; [[ -n "$target" ]] || continue
+                ui_yesno "Zmiana portu" "Zmienić port HTTP strony $domain na $target? Port HTTPS pozostanie bez zmian." && ASSUME_YES=true change_site_port "$domain" "$target"
+                ;;
+            edit) domain="$(ui_select_site "Edycja" || true)"; [[ -n "$domain" ]] && { file="$(find_site_file "$domain" 2>/dev/null || true)"; [[ -n "$file" ]] && edit_config_file "$file" || ui_msg "Błąd" "Nie znaleziono strony."; } ;;
             delete|enable|disable|show)
-                domain="$(ui_input "Virtual Host" "Domena:" "" || true)"; [[ -n "$domain" ]] || continue
+                domain="$(ui_select_site "Virtual Host" || true)"; [[ -n "$domain" ]] || continue
                 case "$action" in
                     delete) ui_yesno "Delete site" "Usunąć konfigurację $domain? Document root pozostanie." && ASSUME_YES=true delete_site "$domain" ;;
                     enable) enable_site "$domain" ;;
@@ -86,7 +105,7 @@ gui_sites() {
                 ;;
             test) ui_text "nginx -t" "$(test_nginx_config 2>&1 || true)" ;;
             clone)
-                domain="$(ui_input "Klonowanie" "Domena źródłowa:" "" || true)"; [[ -n "$domain" ]] || continue
+                domain="$(ui_select_site "Klonowanie — strona źródłowa" || true)"; [[ -n "$domain" ]] || continue
                 target="$(ui_input "Klonowanie" "Domena docelowa:" "" || true)"; [[ -n "$target" ]] && clone_site "$domain" "$target"
                 ;;
             search) target="$(ui_input "Wyszukiwanie" "Domena, port, proxy_pass, document root lub IP:" "" || true)"; [[ -n "$target" ]] && ui_text "Wyniki" "$(search_config "$target")" ;;
@@ -113,8 +132,8 @@ gui_ssl() {
         action="$(ui_menu "SSL / HTTPS" "Wybierz operację" list "Lista certyfikatów" certbot "Certbot / Let's Encrypt" existing "Dodaj istniejący certyfikat" self "Certyfikat self-signed" renew "Odnowienie certyfikatów" check "Sprawdź ważność certyfikatów" back Powrót || true)"
         case "$action" in
             list|check) ui_text "Certyfikaty" "$(list_certificates 2>&1)" ;;
-            certbot) domain="$(ui_input "Certbot" "Domena:" "" || true)"; email="$(ui_input "Certbot" "E-mail Let's Encrypt:" "" || true)"; [[ -n "$domain" && -n "$email" ]] && ASSUME_YES=true obtain_letsencrypt_certificate "$domain" "$email" ;;
-            existing) domain="$(ui_input "SSL" "Domena:" "" || true)"; cert="$(ui_input "SSL" "Plik certyfikatu:" "" || true)"; key="$(ui_input "SSL" "Plik klucza prywatnego:" "" || true)"; [[ -n "$domain" && -n "$cert" && -n "$key" ]] && add_existing_certificate "$domain" "$cert" "$key" ;;
+            certbot) domain="$(ui_select_site "Certbot — wybierz stronę" || true)"; email="$(ui_input "Certbot" "E-mail Let's Encrypt:" "" || true)"; [[ -n "$domain" && -n "$email" ]] && ASSUME_YES=true obtain_letsencrypt_certificate "$domain" "$email" ;;
+            existing) domain="$(ui_select_site "SSL — wybierz stronę" || true)"; cert="$(ui_input "SSL" "Plik certyfikatu:" "" || true)"; key="$(ui_input "SSL" "Plik klucza prywatnego:" "" || true)"; [[ -n "$domain" && -n "$cert" && -n "$key" ]] && add_existing_certificate "$domain" "$cert" "$key" ;;
             self) domain="$(ui_input "Self-signed" "Domena:" "" || true)"; days="$(ui_input "Self-signed" "Ważność w dniach:" "365" || true)"; [[ -n "$domain" ]] && ASSUME_YES=true generate_self_signed_certificate "$domain" "$days" ;;
             renew) ui_yesno "Certbot" "Odnowić certyfikaty i przeładować Nginx?" && renew_certificates ;;
             *) break ;;
@@ -166,6 +185,26 @@ gui_backup() {
         restore) name="$(ui_input "Restore" "Nazwa pliku backupu:" "" || true)"; [[ -n "$name" ]] && ASSUME_YES=true restore_backup "$BACKUP_DIR/$name" ;;
         delete) name="$(ui_input "Usuń backup" "Nazwa pliku backupu:" "" || true)"; archive="$BACKUP_DIR/$name"; [[ -f "$archive" ]] && ui_yesno "Usuń backup" "Usunąć $name?" && rm -f -- "$archive" ;;
     esac
+}
+
+gui_ports() {
+    local action domain port
+    while true; do
+        action="$(ui_menu "Porty i połączenia" "Wybierz operację" list "Pokaż porty i procesy" site "Zmień port strony" default "Zmień domyślny port Nginx" back Powrót || true)"
+        case "$action" in
+            list) ui_text "Porty i połączenia" "$(show_ports 2>&1 || true)" ;;
+            site)
+                domain="$(ui_select_site "Port strony" || true)"; [[ -n "$domain" ]] || continue
+                port="$(ui_input "Port strony" "Nowy port HTTP:" "8080" || true)"; [[ -n "$port" ]] || continue
+                ui_yesno "Zmiana portu" "Zmienić port HTTP strony $domain na $port?" && ASSUME_YES=true change_site_port "$domain" "$port"
+                ;;
+            default)
+                port="$(ui_input "Domyślny port Nginx" "Nowy port HTTP:" "80" || true)"; [[ -n "$port" ]] || continue
+                ui_yesno "Zmiana domyślnego portu" "Ustawić domyślny port Nginx na $port?" && ASSUME_YES=true change_default_port "$port"
+                ;;
+            *) break ;;
+        esac
+    done
 }
 
 gui_install_remove() {
@@ -224,7 +263,7 @@ gui_main() {
             6) ui_text "nginx -t" "$(test_nginx_config 2>&1 || true)" ;;
             7) gui_logs ;;
             8) gui_status ;;
-            9) ui_text "Porty i połączenia" "$(show_ports 2>&1 || true)" ;;
+            9) gui_ports ;;
             10) gui_backup ;;
             11) name="$(ui_input "Restore" "Nazwa pliku z $BACKUP_DIR:" "" || true)"; [[ -n "$name" ]] && ASSUME_YES=true restore_backup "$BACKUP_DIR/$name" ;;
             12) ui_msg "Diagnostyka" "Raport: $(generate_diagnostic_report)" ;;

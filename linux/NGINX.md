@@ -24,6 +24,10 @@ sudo bash linux/nginx-manager.sh --reload
 sudo bash linux/nginx-manager.sh --backup
 bash linux/nginx-manager.sh --list-sites
 bash linux/nginx-manager.sh --diagnostic
+sudo bash linux/nginx-manager.sh --non-interactive --change-site-port \
+  --domain example.com --port 8080 --yes
+sudo bash linux/nginx-manager.sh --non-interactive --set-default-port \
+  --port 8080 --yes
 ```
 
 Non-interactive examples:
@@ -42,6 +46,8 @@ Destructive non-interactive operations require `--yes`. Use `--dry-run` to inspe
 ## Features
 
 - status, service lifecycle and autostart;
+- safe changes of a selected site's HTTP port or the default Nginx HTTP port;
+- Virtual Host selection lists in the dialog UI instead of requiring manual domain entry for existing sites;
 - Virtual Host discovery, creation, editing, cloning, enable/disable and deletion;
 - static, PHP-FPM and reverse-proxy generators with WebSocket headers;
 - certificate inventory, expiry warnings, Certbot, renewal, existing and self-signed certificates;
