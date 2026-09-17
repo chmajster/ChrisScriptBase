@@ -891,13 +891,17 @@ local_repos(){ local repositories_root="$(profile_root)/repositories" state_dir=
 container_socket_status(){ local container_name="$1" mounted=""; mounted="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/var/run/docker.sock"}}yes{{end}}{{end}}' "$container_name" 2>/dev/null || true)"; [[ "$mounted" == yes ]] && echo yes || echo no; }
 
 status_repo_instance_line(){
-    local repo_name="$1" instance="$2" state_dir="$(repo_instance_state "$1" "$2")" metadata="$state_dir/metadata" runner_name="$(repo_instance_runner "$1" "$2")" container_name="$(repo_instance_container "$1" "$2")"
+    local repo_name="$1" instance="$2" state_dir="" metadata="" runner_name="" container_name=""
     local container_state=missing github_state=missing busy=- socket=- docker_api=- cfg=- version=- row="" running=false stored_hash="" expected_hash="" display_repo="$repo_name"
+    state_dir="$(repo_instance_state "$repo_name" "$instance")"
+    metadata="$state_dir/metadata"
+    runner_name="$(repo_instance_runner "$repo_name" "$instance")"
+    container_name="$(repo_instance_container "$repo_name" "$instance")"
     (( instance == 1 )) || display_repo="${repo_name}#$(printf '%02d' "$instance")"
     if [[ -f "$metadata" ]]; then runner_name="$(meta_get "$metadata" runner_name)"; container_name="$(meta_get "$metadata" container_name)"; fi
     if docker inspect "$container_name" >/dev/null 2>&1; then
         running="$(docker inspect -f '{{.State.Running}}' "$container_name" 2>/dev/null || echo false)"; [[ "$running" == true ]] && container_state=running || container_state=stopped
-        socket="$(container_socket_status "$container_name")"; version="$(container_runner_version "$container_name")"; [[ -n "$version" ]] || version=?
+        socket="$(container_socket_status "$container_name")"; version="$(container_runner_version "$container_name")"; [[ -n "$version" ]] || version='?'
         if [[ "$running" == true && "$socket" == yes ]]; then docker_api="$(docker exec "$container_name" docker version --format '{{.Server.APIVersion}}' 2>/dev/null || true)"; [[ -n "$docker_api" ]] || docker_api=error; fi
     fi
     row="$(runner_lookup "$(runner_endpoint "$repo_name")" "$runner_name" 2>/dev/null || true)"; if [[ -n "$row" ]]; then github_state="$(cut -f2 <<< "$row")"; busy="$(cut -f3 <<< "$row")"; fi
@@ -913,10 +917,14 @@ status_repo_line(){
 }
 
 status_org_instance_line(){
-    local instance="$1" state_dir="$(org_instance_state "$1")" metadata="$state_dir/metadata" runner_name="$(org_instance_runner "$1")" container_name="$(org_instance_container "$1")" row="" container_state=missing github_state=missing busy=- socket=- docker_api=- cfg=- version=- running=false stored_hash="" expected_hash="" display='(organization)'
+    local instance="$1" state_dir="" metadata="" runner_name="" container_name="" row="" container_state=missing github_state=missing busy=- socket=- docker_api=- cfg=- version=- running=false stored_hash="" expected_hash="" display='(organization)'
+    state_dir="$(org_instance_state "$instance")"
+    metadata="$state_dir/metadata"
+    runner_name="$(org_instance_runner "$instance")"
+    container_name="$(org_instance_container "$instance")"
     (( instance == 1 )) || display="(organization)#$(printf '%02d' "$instance")"
     if [[ -f "$metadata" ]]; then runner_name="$(meta_get "$metadata" runner_name)"; container_name="$(meta_get "$metadata" container_name)"; fi
-    if docker inspect "$container_name" >/dev/null 2>&1; then running="$(docker inspect -f '{{.State.Running}}' "$container_name" 2>/dev/null || echo false)"; [[ "$running" == true ]] && container_state=running || container_state=stopped; socket="$(container_socket_status "$container_name")"; version="$(container_runner_version "$container_name")"; [[ -n "$version" ]] || version=?; if [[ "$running" == true && "$socket" == yes ]]; then docker_api="$(docker exec "$container_name" docker version --format '{{.Server.APIVersion}}' 2>/dev/null || true)"; [[ -n "$docker_api" ]] || docker_api=error; fi; fi
+    if docker inspect "$container_name" >/dev/null 2>&1; then running="$(docker inspect -f '{{.State.Running}}' "$container_name" 2>/dev/null || echo false)"; [[ "$running" == true ]] && container_state=running || container_state=stopped; socket="$(container_socket_status "$container_name")"; version="$(container_runner_version "$container_name")"; [[ -n "$version" ]] || version='?'; if [[ "$running" == true && "$socket" == yes ]]; then docker_api="$(docker exec "$container_name" docker version --format '{{.Server.APIVersion}}' 2>/dev/null || true)"; [[ -n "$docker_api" ]] || docker_api=error; fi; fi
     row="$(runner_lookup "/orgs/$OWNER/actions/runners" "$runner_name" 2>/dev/null || true)"; if [[ -n "$row" ]]; then github_state="$(cut -f2 <<< "$row")"; busy="$(cut -f3 <<< "$row")"; fi
     if [[ -f "$metadata" ]]; then stored_hash="$(meta_get "$metadata" config_hash)"; expected_hash="$(config_hash)"; [[ -n "$stored_hash" && "$stored_hash" == "$expected_hash" ]] && cfg=ok || cfg=drift; fi
     printf '%-24s %-10s %-9s %-5s %-6s %-10s %-10s %-8s\n' "$display" "$container_state" "$github_state" "$busy" "$socket" "$docker_api" "$version" "$cfg"
@@ -982,7 +990,11 @@ install_repo_instance(){
 }
 
 remove_repo_instance(){
-    local repo_name="$1" instance="$2" state_dir="$(repo_instance_state "$1" "$2")" metadata_file="$state_dir/metadata" runner_name="$(repo_instance_runner "$1" "$2")" container_name="$(repo_instance_container "$1" "$2")"
+    local repo_name="$1" instance="$2" state_dir="" metadata_file="" runner_name="" container_name=""
+    state_dir="$(repo_instance_state "$repo_name" "$instance")"
+    metadata_file="$state_dir/metadata"
+    runner_name="$(repo_instance_runner "$repo_name" "$instance")"
+    container_name="$(repo_instance_container "$repo_name" "$instance")"
     if [[ -f "$metadata_file" ]]; then runner_name="$(meta_get "$metadata_file" runner_name)"; container_name="$(meta_get "$metadata_file" container_name)"; fi
     if docker inspect "$container_name" >/dev/null 2>&1; then docker stop -t 30 "$container_name" >/dev/null 2>&1 || true; docker rm -f "$container_name" >/dev/null 2>&1 || true; fi
     if ! remote_delete "/repos/$OWNER/$repo_name/actions/runners" "$runner_name"; then warn "Nie udało się wyrejestrować $runner_name. Zachowuję state $state_dir."; return 1; fi
@@ -1016,7 +1028,11 @@ install_repo(){
 }
 
 repair_repo_instance(){
-    local repo_name="$1" instance="$2" state_dir="$(repo_instance_state "$1" "$2")" metadata="$state_dir/metadata" runner_name="$(repo_instance_runner "$1" "$2")" container_name="$(repo_instance_container "$1" "$2")" row="" status="" running=false stored_hash="" expected_hash="" rc=0 saved_force="$FORCE_RECREATE"
+    local repo_name="$1" instance="$2" state_dir="" metadata="" runner_name="" container_name="" row="" status="" running=false stored_hash="" expected_hash="" rc=0 saved_force="$FORCE_RECREATE"
+    state_dir="$(repo_instance_state "$repo_name" "$instance")"
+    metadata="$state_dir/metadata"
+    runner_name="$(repo_instance_runner "$repo_name" "$instance")"
+    container_name="$(repo_instance_container "$repo_name" "$instance")"
     if [[ -f "$metadata" ]]; then runner_name="$(meta_get "$metadata" runner_name)"; container_name="$(meta_get "$metadata" container_name)"; fi
     if docker inspect "$container_name" >/dev/null 2>&1; then
         running="$(docker inspect -f '{{.State.Running}}' "$container_name" 2>/dev/null || echo false)"; row="$(runner_lookup "$(runner_endpoint "$repo_name")" "$runner_name" 2>/dev/null || true)"; [[ -z "$row" ]] || status="$(cut -f2 <<< "$row")"
@@ -1058,7 +1074,11 @@ install_org_instance(){
 }
 
 remove_org_instance(){
-    local instance="$1" state_dir="$(org_instance_state "$1")" metadata_file="$state_dir/metadata" runner_name="$(org_instance_runner "$1")" container_name="$(org_instance_container "$1")"
+    local instance="$1" state_dir="" metadata_file="" runner_name="" container_name=""
+    state_dir="$(org_instance_state "$instance")"
+    metadata_file="$state_dir/metadata"
+    runner_name="$(org_instance_runner "$instance")"
+    container_name="$(org_instance_container "$instance")"
     if [[ -f "$metadata_file" ]]; then runner_name="$(meta_get "$metadata_file" runner_name)"; container_name="$(meta_get "$metadata_file" container_name)"; fi
     if docker inspect "$container_name" >/dev/null 2>&1; then docker stop -t 30 "$container_name" >/dev/null 2>&1 || true; docker rm -f "$container_name" >/dev/null 2>&1 || true; fi
     if ! remote_delete "/orgs/$OWNER/actions/runners" "$runner_name"; then warn "Nie udało się wyrejestrować $runner_name. Zachowuję state $state_dir."; return 1; fi
@@ -1092,7 +1112,11 @@ install_org(){
 }
 
 repair_org_instance(){
-    local instance="$1" saved_force="$FORCE_RECREATE" rc=0 state_dir="$(org_instance_state "$1")" metadata="$state_dir/metadata" runner_name="$(org_instance_runner "$1")" container_name="$(org_instance_container "$1")" row="" status="" running=false stored_hash="" expected_hash=""
+    local instance="$1" saved_force="$FORCE_RECREATE" rc=0 state_dir="" metadata="" runner_name="" container_name="" row="" status="" running=false stored_hash="" expected_hash=""
+    state_dir="$(org_instance_state "$instance")"
+    metadata="$state_dir/metadata"
+    runner_name="$(org_instance_runner "$instance")"
+    container_name="$(org_instance_container "$instance")"
     if [[ -f "$metadata" ]]; then runner_name="$(meta_get "$metadata" runner_name)"; container_name="$(meta_get "$metadata" container_name)"; fi
     if docker inspect "$container_name" >/dev/null 2>&1; then running="$(docker inspect -f '{{.State.Running}}' "$container_name" 2>/dev/null || echo false)"; row="$(runner_lookup "/orgs/$OWNER/actions/runners" "$runner_name" 2>/dev/null || true)"; [[ -z "$row" ]] || status="$(cut -f2 <<< "$row")"; if [[ -f "$metadata" ]]; then stored_hash="$(meta_get "$metadata" config_hash)"; expected_hash="$(config_hash)"; fi; if [[ "$running" == true && "$status" == online && -n "$stored_hash" && "$stored_hash" == "$expected_hash" ]]; then return 3; fi; if [[ -n "$stored_hash" && "$stored_hash" == "$expected_hash" ]]; then docker restart "$container_name" >/dev/null 2>&1 || true; if wait_runner_online "/orgs/$OWNER/actions/runners" "$runner_name" "$container_name"; then return 0; fi; fi; fi
     FORCE_RECREATE=true; if install_org_instance "$instance"; then rc=0; else rc=$?; fi; FORCE_RECREATE="$saved_force"; return "$rc"
@@ -1194,6 +1218,7 @@ gui_select_profiles(){
 gui_settings(){
     local output="" rc=0 item="" current_pkg="auto" current_repo="interactive"; local -a values=()
     local socket_state=off sudo_state=off public_state=off rebuild_state=off
+    local previous_runner_instances="$RUNNER_INSTANCES" previous_runner_instances_explicit="$RUNNER_INSTANCES_EXPLICIT"
     [[ "$SOCKET" == true ]] && socket_state=on
     [[ "$ALLOW_SUDO" == true ]] && sudo_state=on
     [[ "$INCLUDE_PUBLIC" == true ]] && public_state=on
@@ -1235,7 +1260,11 @@ gui_settings(){
     LOG_MAX_SIZE="${values[5]:-20m}"
     LOG_MAX_FILE="${values[6]:-3}"
     if [[ ! "$RUNNER_INSTANCES" =~ ^[1-9][0-9]*$ ]]; then dialog --msgbox "Liczba runnerów musi być liczbą całkowitą >= 1." 7 70 </dev/tty >/dev/tty 2>/dev/tty || true; RUNNER_INSTANCES=1; return 1; fi
-    RUNNER_INSTANCES_EXPLICIT=true
+    if [[ "$RUNNER_INSTANCES" != "$previous_runner_instances" ]]; then
+        RUNNER_INSTANCES_EXPLICIT=true
+    else
+        RUNNER_INSTANCES_EXPLICIT="$previous_runner_instances_explicit"
+    fi
     [[ "$RUNNER_PIDS_LIMIT" =~ ^[0-9]+$ ]] || { dialog --msgbox "PID limit musi być liczbą całkowitą." 7 60 </dev/tty >/dev/tty 2>/dev/tty || true; RUNNER_PIDS_LIMIT=512; }
     [[ "$LOG_MAX_FILE" =~ ^[0-9]+$ ]] || { dialog --msgbox "Log max-file musi być liczbą całkowitą." 7 60 </dev/tty >/dev/tty 2>/dev/tty || true; LOG_MAX_FILE=3; }
 
