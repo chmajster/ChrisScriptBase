@@ -1,0 +1,27 @@
+name: Test Nginx manager
+
+on:
+  pull_request:
+    paths:
+      - 'linux/nginx-manager.sh'
+      - 'linux/lib/nginx-manager/**'
+      - 'linux/NGINX.md'
+      - 'linux/tests/test-nginx-manager.sh'
+      - '.github/workflows/nginx-manager-tests.yml'
+      - 'README.md'
+      - 'CHANGELOG.md'
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ShellCheck Nginx manager
+        run: |
+          shellcheck -x linux/nginx-manager.sh
+          shellcheck -e SC2016 linux/tests/test-nginx-manager.sh
+
+      - name: Run Nginx manager regression tests
+        run: bash linux/tests/test-nginx-manager.sh

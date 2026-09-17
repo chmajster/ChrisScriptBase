@@ -19,6 +19,7 @@ Repository: [chmajster/ChrisScriptBase](https://github.com/chmajster/ChrisScript
 | `linux/web-hosts-file-manager.sh` | Installs a Flask-based web manager for `/etc/hosts`. |
 | `linux/ldapsearch.sh` | Discovers SSSD/LDAP settings and looks up LDAP/AD users, groups and netgroups with NSS/SSSD fallback. |
 | `linux/tailscale-manager.sh` | Installs and configures Tailscale with dialog/whiptail GUI, interactive CLI, or fully non-interactive silent mode. |
+| `linux/nginx-manager.sh` | Safely manages Nginx sites, reverse proxies, SSL, backups, diagnostics and services through dialog or CLI. |
 | `snow/watchdog-dashboard.js` | Browser-based ServiceNow watchdog dashboard snippet. |
 
 ## Usage
@@ -55,6 +56,18 @@ sudo bash linux/tailscale-manager.sh --silent --diagnose
 ```
 
 The Tailscale manager supports Tailscale SSH, subnet routes, exit nodes, DNS/routes preferences, tags, status, diagnostics, config files and dry-run. See [`linux/TAILSCALE.md`](linux/TAILSCALE.md) for the full documentation.
+
+Nginx Manager examples:
+
+```bash
+sudo bash linux/nginx-manager.sh
+bash linux/nginx-manager.sh --status
+sudo bash linux/nginx-manager.sh --non-interactive --backup
+sudo bash linux/nginx-manager.sh --non-interactive --add-proxy \
+  --domain api.example.com --backend-host 127.0.0.1 --backend-port 8080
+```
+
+Nginx Manager supports Debian, Ubuntu, Linux Mint, RHEL, Rocky Linux, AlmaLinux, CentOS Stream and Fedora. Every configuration write is tested with `nginx -t`; a failed test triggers rollback and blocks reload. See [`linux/NGINX.md`](linux/NGINX.md).
 
 Scripts that modify the system usually require root privileges:
 
@@ -93,6 +106,7 @@ Repozytorium: [chmajster/ChrisScriptBase](https://github.com/chmajster/ChrisScri
 | `linux/web-hosts-file-manager.sh` | Instaluje webowy manager pliku `/etc/hosts` oparty o Flask. |
 | `linux/ldapsearch.sh` | Wykrywa konfiguracje SSSD/LDAP i wyszukuje uzytkownikow LDAP/AD, grupy oraz netgroupy z fallbackiem NSS/SSSD. |
 | `linux/tailscale-manager.sh` | Instaluje i konfiguruje Tailscale w trybie GUI dialog/whiptail, interaktywnym CLI albo w pelni nieinteraktywnym silent. |
+| `linux/nginx-manager.sh` | Bezpiecznie zarzadza Nginx, Virtual Hostami, reverse proxy, SSL, backupami i diagnostyka przez dialog lub CLI. |
 | `snow/watchdog-dashboard.js` | Dashboard watchdog dla ServiceNow uruchamiany w przegladarce. |
 
 ## Uzycie
@@ -129,6 +143,18 @@ sudo bash linux/tailscale-manager.sh --silent --diagnose
 ```
 
 Tailscale Manager obsluguje Tailscale SSH, subnet routes, exit node, DNS/routes, tagi, status, diagnostyke, pliki konfiguracyjne i dry-run. Pelna dokumentacja znajduje sie w [`linux/TAILSCALE.md`](linux/TAILSCALE.md).
+
+Przyklady Nginx Manager:
+
+```bash
+sudo bash linux/nginx-manager.sh
+bash linux/nginx-manager.sh --status
+sudo bash linux/nginx-manager.sh --non-interactive --backup
+sudo bash linux/nginx-manager.sh --non-interactive --add-site \
+  --domain example.com --root /var/www/example.com --port 80
+```
+
+Nginx Manager obsluguje Debian, Ubuntu, Linux Mint, RHEL, Rocky Linux, AlmaLinux, CentOS Stream i Fedore. Kazdy zapis konfiguracji przechodzi `nginx -t`; blad uruchamia rollback i blokuje reload. Pelna dokumentacja: [`linux/NGINX.md`](linux/NGINX.md).
 
 Skrypty modyfikujace system zwykle wymagaja uprawnien root:
 
