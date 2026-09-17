@@ -1,0 +1,82 @@
+name: Fix PR 12 runner settings
+
+on:
+  push:
+    branches:
+      - feature/multiple-self-hosted-runners
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/multiple-self-hosted-runners
+          fetch-depth: 0
+
+      - name: Preserve runner count unless changed
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('linux/install-github-selfhosted-runners.sh')
+          text = path.read_text()
+
+          old_header = '''gui_settings(){
+              local output="" rc=0 item="" current_pkg="auto" current_repo="interactive"; local -a values=()
+              local socket_state=off sudo_state=off public_state=off rebuild_state=off
+          '''
+          new_header = '''gui_settings(){
+              local output="" rc=0 item="" current_pkg="auto" current_repo="interactive"; local -a values=()
+              local socket_state=off sudo_state=off public_state=off rebuild_state=off
+              local previous_runner_instances="$RUNNER_INSTANCES" previous_runner_instances_explicit="$RUNNER_INSTANCES_EXPLICIT"
+          '''
+          if old_header not in text:
+              raise SystemExit('gui_settings header pattern not found')
+          text = text.replace(old_header, new_header, 1)
+
+          old_flag = '''    if [[ ! "$RUNNER_INSTANCES" =~ ^[1-9][0-9]*$ ]]; then dialog --msgbox "Liczba runnerów musi być liczbą całkowitą >= 1." 7 70 </dev/tty >/dev/tty 2>/dev/tty || true; RUNNER_INSTANCES=1; return 1; fi
+              RUNNER_INSTANCES_EXPLICIT=true
+              [[ "$RUNNER_PIDS_LIMIT" =~ ^[0-9]+$ ]] || { dialog --msgbox "PID limit musi być liczbą całkowitą." 7 60 </dev/tty >/dev/tty 2>/dev/tty || true; RUNNER_PIDS_LIMIT=512; }
+          '''
+          new_flag = '''    if [[ ! "$RUNNER_INSTANCES" =~ ^[1-9][0-9]*$ ]]; then dialog --msgbox "Liczba runnerów musi być liczbą całkowitą >= 1." 7 70 </dev/tty >/dev/tty 2>/dev/tty || true; RUNNER_INSTANCES=1; return 1; fi
+              if [[ "$RUNNER_INSTANCES" != "$previous_runner_instances" ]]; then
+                  RUNNER_INSTANCES_EXPLICIT=true
+              else
+                  RUNNER_INSTANCES_EXPLICIT="$previous_runner_instances_explicit"
+              fi
+              [[ "$RUNNER_PIDS_LIMIT" =~ ^[0-9]+$ ]] || { dialog --msgbox "PID limit musi być liczbą całkowitą." 7 60 </dev/tty >/dev/tty 2>/dev/tty || true; RUNNER_PIDS_LIMIT=512; }
+          '''
+          if old_flag not in text:
+              raise SystemExit('runner explicit flag pattern not found')
+          text = text.replace(old_flag, new_flag, 1)
+          path.write_text(text)
+          PY
+
+      - name: Validate runner manager
+        shell: bash
+        run: |
+          bash -n linux/install-github-selfhosted-runners.sh
+          shellcheck -e SC2155,SC2015 linux/install-github-selfhosted-runners.sh
+          if [[ -f linux/tests/test-install-github-selfhosted-runners.sh ]]; then
+            bash linux/tests/test-install-github-selfhosted-runners.sh
+          fi
+          if [[ -f linux/tests/test-install-github-selfhosted-runners-legacy-service.sh ]]; then
+            bash linux/tests/test-install-github-selfhosted-runners-legacy-service.sh
+          fi
+
+      - name: Commit fix and remove temporary workflow
+        shell: bash
+        run: |
+          rm -f .github/workflows/fix-pr12-runner-settings.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add linux/install-github-selfhosted-runners.sh .github/workflows/fix-pr12-runner-settings.yml
+          git diff --cached --check
+          git commit -m "Fix GUI runner count preservation"
+          git push origin HEAD:feature/multiple-self-hosted-runners
