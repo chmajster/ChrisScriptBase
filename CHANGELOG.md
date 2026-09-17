@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-09-17 — Nginx Manager 1.1.0
+
+- Added atomic HTTP port changes for individual Virtual Hosts.
+- Added default Nginx HTTP port changes through GUI and non-interactive CLI.
+- Preserved SSL listen ports while changing HTTP ports.
+
 ## 2026-09-17
 
 - Added Nginx Manager with dialog and non-interactive CLI modes.

@@ -27,6 +27,23 @@ if [[ "$out" == *'server_name example.com;'* && "$out" == *'try_files $uri $uri/
 out="$(bash -c 'source "$1"; generate_reverse_proxy_config api.example.com 127.0.0.1 8080 http true false' _ "$SCRIPT")"
 if [[ "$out" == *'proxy_pass http://127.0.0.1:8080;'* && "$out" == *'proxy_set_header Upgrade $http_upgrade;'* ]]; then ok "proxy websocket generator"; else not_ok "proxy websocket generator"; fi
 
+listen_cfg="$(mktemp)"
+cat > "$listen_cfg" <<'EOF_LISTEN'
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    listen 443 ssl;
+    listen [::]:443 ssl;
+}
+EOF_LISTEN
+out="$(bash -c 'source "$1"; rewrite_http_listen_ports "$2" 8080' _ "$SCRIPT" "$listen_cfg")"
+if [[ "$out" == *'listen 8080 default_server;'* && "$out" == *'listen [::]:8080 default_server;'* && "$out" == *'listen 443 ssl;'* && "$out" == *'listen [::]:443 ssl;'* ]]; then
+  ok "HTTP port rewrite preserves SSL"
+else
+  not_ok "HTTP port rewrite preserves SSL"
+fi
+rm -f -- "$listen_cfg"
+
 fakebin="$(mktemp -d)"
 fakeetc="$(mktemp -d)"
 fakebackup="$(mktemp -d)"
@@ -70,6 +87,8 @@ if [[ ! -s "$FAKE_SYSTEMCTL_LOG" ]]; then ok "no reload on invalid config"; else
 unset FAKE_NGINX_INVALID
 
 expect_failure "silent add-site requires domain" bash "$SCRIPT" --non-interactive --add-site --root /var/www/example
+expect_failure "site port change requires explicit port" bash "$SCRIPT" --non-interactive --change-site-port --domain example.com --yes
+expect_failure "default port change requires explicit port" bash "$SCRIPT" --non-interactive --set-default-port --yes
 
 source_cfg="$(mktemp)"
 printf 'server { listen 80; server_name atomic.example; }\n' > "$source_cfg"

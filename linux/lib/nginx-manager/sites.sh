@@ -49,6 +49,128 @@ find_site_file() {
     [[ -e "$file" ]] && printf '%s' "$file"
 }
 
+find_default_site_file() {
+    local candidate file resolved
+    for candidate in "$SITES_ENABLED/default" "$SITES_ENABLED/default.conf"; do
+        if [[ -f "$candidate" ]]; then
+            resolved="$(readlink -f -- "$candidate" 2>/dev/null || printf '%s' "$candidate")"
+            [[ "$resolved" == "$NGINX_ETC"/* ]] && { printf '%s' "$resolved"; return 0; }
+        fi
+    done
+    if [[ -d "$SITES_ENABLED" ]]; then
+        while IFS= read -r file; do
+            if grep -Eq '^[[:space:]]*listen[[:space:]].*default_server([[:space:];]|$)' "$file"; then
+                resolved="$(readlink -f -- "$file" 2>/dev/null || printf '%s' "$file")"
+                [[ "$resolved" == "$NGINX_ETC"/* ]] && { printf '%s' "$resolved"; return 0; }
+            fi
+        done < <(find "$SITES_ENABLED" -maxdepth 1 \( -type f -o -type l \) -print 2>/dev/null | sort)
+    fi
+    for candidate in "$SITES_AVAILABLE/default" "$SITES_AVAILABLE/default.conf" "$CONF_D/default.conf"; do
+        [[ -f "$candidate" ]] && { printf '%s' "$candidate"; return 0; }
+    done
+    while IFS= read -r file; do
+        if grep -Eq '^[[:space:]]*listen[[:space:]].*default_server([[:space:];]|$)' "$file"; then
+            printf '%s' "$file"
+            return 0
+        fi
+    done < <(site_files)
+    return 1
+}
+
+rewrite_http_listen_ports() {
+    local source="$1" port="$2"
+    awk -v port="$port" '
+      /^[[:space:]]*listen[[:space:]]/ && $0 !~ /(^|[[:space:]])ssl([[:space:];]|$)/ {
+        match($0, /^[[:space:]]*/)
+        indent = substr($0, RSTART, RLENGTH)
+        body = $0
+        sub(/^[[:space:]]*listen[[:space:]]+/, "", body)
+        match(body, /^[^[:space:];]+/)
+        endpoint = substr(body, RSTART, RLENGTH)
+        tail = substr(body, RLENGTH + 1)
+        if (endpoint ~ /^[0-9]+$/) {
+          endpoint = port
+        } else if (endpoint ~ /:[0-9]+$/) {
+          sub(/:[0-9]+$/, ":" port, endpoint)
+        }
+        print indent "listen " endpoint tail
+        changed = 1
+        next
+      }
+      { print }
+      END { if (!changed) exit 42 }
+    ' "$source"
+}
+
+change_site_port() {
+    local domain="$1" port="$2" file temp status
+    require_root
+    validate_domain "$domain" || die "$EXIT_ARGS" "Niepoprawna domena."
+    validate_port "$port" || die "$EXIT_ARGS" "Niepoprawny port."
+    file="$(find_site_file "$domain")" || die "$EXIT_ARGS" "Nie znaleziono strony $domain."
+    temp="$(make_temp)" || return "$EXIT_GENERAL"
+    rewrite_http_listen_ports "$file" "$port" > "$temp"; status=$?
+    if ((status == 42)); then
+        die "$EXIT_ARGS" "Virtual Host nie zawiera dyrektywy listen HTTP możliwej do zmiany."
+    elif ((status != 0)); then
+        return "$EXIT_GENERAL"
+    fi
+    if cmp -s -- "$file" "$temp"; then
+        info "Port strony $domain jest już ustawiony na $port."
+        return 0
+    fi
+    preview_file "$temp"
+    confirm_action "Change site port" "$domain" "Port HTTP zostanie zmieniony na $port; porty SSL pozostaną bez zmian." || return 0
+    atomic_write_config "$temp" "$file"
+    log_event change_site_port success "$domain:$port"
+}
+
+change_default_port() {
+    local port="$1" file temp status created=false
+    require_root
+    validate_port "$port" || die "$EXIT_ARGS" "Niepoprawny port."
+    if file="$(find_default_site_file)"; then
+        temp="$(make_temp)" || return "$EXIT_GENERAL"
+        rewrite_http_listen_ports "$file" "$port" > "$temp"; status=$?
+        if ((status == 42)); then
+            die "$EXIT_ARGS" "Domyślny Virtual Host nie zawiera dyrektywy listen HTTP."
+        elif ((status != 0)); then
+            return "$EXIT_GENERAL"
+        fi
+    else
+        created=true
+        if [[ "$LAYOUT" == "debian" ]]; then file="$SITES_AVAILABLE/default"; else file="$CONF_D/default.conf"; fi
+        temp="$(make_temp)" || return "$EXIT_GENERAL"
+        cat > "$temp" <<EOF
+server {
+    listen $port default_server;
+    listen [::]:$port default_server;
+    server_name _;
+    return 444;
+}
+EOF
+    fi
+    if [[ "$created" == false ]] && cmp -s -- "$file" "$temp"; then
+        info "Domyślny port Nginx jest już ustawiony na $port."
+        return 0
+    fi
+    preview_file "$temp"
+    confirm_action "Change default Nginx port" "$file" "Domyślny port HTTP zostanie ustawiony na $port." || return 0
+    atomic_write_config "$temp" "$file" || return $?
+    if [[ "$LAYOUT" == "debian" ]]; then
+        local name
+        name="$(basename "$file")"
+        mkdir -p -- "$SITES_ENABLED"
+        [[ -e "$SITES_ENABLED/$name" || -L "$SITES_ENABLED/$name" ]] || ln -s -- "$file" "$SITES_ENABLED/$name"
+        if ! test_nginx_config; then
+            rm -f -- "$SITES_ENABLED/$name"
+            return "$EXIT_CONFIG"
+        fi
+        reload_nginx
+    fi
+    log_event change_default_port success "$port"
+}
+
 generate_static_site_config() {
     local domain="$1" root="$2" port="$3" php_socket="${4:-}" ssl="${5:-false}"
     cat <<EOF

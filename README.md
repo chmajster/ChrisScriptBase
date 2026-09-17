@@ -69,6 +69,15 @@ sudo bash linux/nginx-manager.sh --non-interactive --add-proxy \
 
 Nginx Manager supports Debian, Ubuntu, Linux Mint, RHEL, Rocky Linux, AlmaLinux, CentOS Stream and Fedora. Every configuration write is tested with `nginx -t`; a failed test triggers rollback and blocks reload. See [`linux/NGINX.md`](linux/NGINX.md).
 
+HTTP ports can be changed without manual file editing:
+
+```bash
+sudo bash linux/nginx-manager.sh --non-interactive \
+  --change-site-port --domain example.com --port 8080 --yes
+sudo bash linux/nginx-manager.sh --non-interactive \
+  --set-default-port --port 8080 --yes
+```
+
 Scripts that modify the system usually require root privileges:
 
 ```bash
@@ -155,6 +164,15 @@ sudo bash linux/nginx-manager.sh --non-interactive --add-site \
 ```
 
 Nginx Manager obsluguje Debian, Ubuntu, Linux Mint, RHEL, Rocky Linux, AlmaLinux, CentOS Stream i Fedore. Kazdy zapis konfiguracji przechodzi `nginx -t`; blad uruchamia rollback i blokuje reload. Pelna dokumentacja: [`linux/NGINX.md`](linux/NGINX.md).
+
+Port HTTP strony lub domyslnego serwera mozna zmienic bez recznej edycji plikow:
+
+```bash
+sudo bash linux/nginx-manager.sh --non-interactive \
+  --change-site-port --domain example.com --port 8080 --yes
+sudo bash linux/nginx-manager.sh --non-interactive \
+  --set-default-port --port 8080 --yes
+```
 
 Skrypty modyfikujace system zwykle wymagaja uprawnien root:
 

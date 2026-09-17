@@ -70,10 +70,15 @@ gui_site_wizard() {
 gui_sites() {
     local action domain target file
     while true; do
-        action="$(ui_menu "Strony / Virtual Hosts" "Wybierz operację" list "Lista stron" add "Dodaj stronę" edit "Edytuj stronę" delete "Usuń stronę" enable "Włącz stronę" disable "Wyłącz stronę" show "Pokaż konfigurację" test "Testuj konfigurację" clone "Klonuj konfigurację" search "Wyszukaj w konfiguracji" back Powrót || true)"
+        action="$(ui_menu "Strony / Virtual Hosts" "Wybierz operację" list "Lista stron" add "Dodaj stronę" port "Zmień port strony" edit "Edytuj stronę" delete "Usuń stronę" enable "Włącz stronę" disable "Wyłącz stronę" show "Pokaż konfigurację" test "Testuj konfigurację" clone "Klonuj konfigurację" search "Wyszukaj w konfiguracji" back Powrót || true)"
         case "$action" in
             list) ui_text "Virtual Hosts" "$(list_sites 2>&1)" ;;
             add) gui_site_wizard ;;
+            port)
+                domain="$(ui_input "Port strony" "Domena:" "" || true)"; [[ -n "$domain" ]] || continue
+                target="$(ui_input "Port strony" "Nowy port HTTP:" "8080" || true)"; [[ -n "$target" ]] || continue
+                ui_yesno "Zmiana portu" "Zmienić port HTTP strony $domain na $target? Port HTTPS pozostanie bez zmian." && ASSUME_YES=true change_site_port "$domain" "$target"
+                ;;
             edit) domain="$(ui_input "Edycja" "Domena:" "" || true)"; [[ -n "$domain" ]] && { file="$(find_site_file "$domain" 2>/dev/null || true)"; [[ -n "$file" ]] && edit_config_file "$file" || ui_msg "Błąd" "Nie znaleziono strony."; } ;;
             delete|enable|disable|show)
                 domain="$(ui_input "Virtual Host" "Domena:" "" || true)"; [[ -n "$domain" ]] || continue
@@ -168,6 +173,26 @@ gui_backup() {
     esac
 }
 
+gui_ports() {
+    local action domain port
+    while true; do
+        action="$(ui_menu "Porty i połączenia" "Wybierz operację" list "Pokaż porty i procesy" site "Zmień port strony" default "Zmień domyślny port Nginx" back Powrót || true)"
+        case "$action" in
+            list) ui_text "Porty i połączenia" "$(show_ports 2>&1 || true)" ;;
+            site)
+                domain="$(ui_input "Port strony" "Domena:" "" || true)"; [[ -n "$domain" ]] || continue
+                port="$(ui_input "Port strony" "Nowy port HTTP:" "8080" || true)"; [[ -n "$port" ]] || continue
+                ui_yesno "Zmiana portu" "Zmienić port HTTP strony $domain na $port?" && ASSUME_YES=true change_site_port "$domain" "$port"
+                ;;
+            default)
+                port="$(ui_input "Domyślny port Nginx" "Nowy port HTTP:" "80" || true)"; [[ -n "$port" ]] || continue
+                ui_yesno "Zmiana domyślnego portu" "Ustawić domyślny port Nginx na $port?" && ASSUME_YES=true change_default_port "$port"
+                ;;
+            *) break ;;
+        esac
+    done
+}
+
 gui_install_remove() {
     local action
     action="$(ui_menu "Instalacja / usunięcie" "Wybierz operację" install "Install Nginx" reinstall "Reinstall Nginx" remove "Remove Nginx" purge "Purge Nginx" back Powrót || true)"
@@ -224,7 +249,7 @@ gui_main() {
             6) ui_text "nginx -t" "$(test_nginx_config 2>&1 || true)" ;;
             7) gui_logs ;;
             8) gui_status ;;
-            9) ui_text "Porty i połączenia" "$(show_ports 2>&1 || true)" ;;
+            9) gui_ports ;;
             10) gui_backup ;;
             11) name="$(ui_input "Restore" "Nazwa pliku z $BACKUP_DIR:" "" || true)"; [[ -n "$name" ]] && ASSUME_YES=true restore_backup "$BACKUP_DIR/$name" ;;
             12) ui_msg "Diagnostyka" "Raport: $(generate_diagnostic_report)" ;;
