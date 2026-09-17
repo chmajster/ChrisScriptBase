@@ -18,7 +18,7 @@ jobs:
           ref: feature/multiple-self-hosted-runners
           fetch-depth: 0
 
-      - name: Preserve runner count unless changed
+      - name: Apply runner manager fixes
         shell: bash
         run: |
           python3 - <<'PY'
@@ -27,34 +27,122 @@ jobs:
           path = Path('linux/install-github-selfhosted-runners.sh')
           text = path.read_text()
 
-          old_header = '''gui_settings(){
+          replacements = [
+              (
+                  '''gui_settings(){
               local output="" rc=0 item="" current_pkg="auto" current_repo="interactive"; local -a values=()
               local socket_state=off sudo_state=off public_state=off rebuild_state=off
-          '''
-          new_header = '''gui_settings(){
+          ''',
+                  '''gui_settings(){
               local output="" rc=0 item="" current_pkg="auto" current_repo="interactive"; local -a values=()
               local socket_state=off sudo_state=off public_state=off rebuild_state=off
               local previous_runner_instances="$RUNNER_INSTANCES" previous_runner_instances_explicit="$RUNNER_INSTANCES_EXPLICIT"
-          '''
-          if old_header not in text:
-              raise SystemExit('gui_settings header pattern not found')
-          text = text.replace(old_header, new_header, 1)
-
-          old_flag = '''    if [[ ! "$RUNNER_INSTANCES" =~ ^[1-9][0-9]*$ ]]; then dialog --msgbox "Liczba runnerów musi być liczbą całkowitą >= 1." 7 70 </dev/tty >/dev/tty 2>/dev/tty || true; RUNNER_INSTANCES=1; return 1; fi
+          ''',
+                  'gui_settings header',
+              ),
+              (
+                  '''    if [[ ! "$RUNNER_INSTANCES" =~ ^[1-9][0-9]*$ ]]; then dialog --msgbox "Liczba runnerów musi być liczbą całkowitą >= 1." 7 70 </dev/tty >/dev/tty 2>/dev/tty || true; RUNNER_INSTANCES=1; return 1; fi
               RUNNER_INSTANCES_EXPLICIT=true
               [[ "$RUNNER_PIDS_LIMIT" =~ ^[0-9]+$ ]] || { dialog --msgbox "PID limit musi być liczbą całkowitą." 7 60 </dev/tty >/dev/tty 2>/dev/tty || true; RUNNER_PIDS_LIMIT=512; }
-          '''
-          new_flag = '''    if [[ ! "$RUNNER_INSTANCES" =~ ^[1-9][0-9]*$ ]]; then dialog --msgbox "Liczba runnerów musi być liczbą całkowitą >= 1." 7 70 </dev/tty >/dev/tty 2>/dev/tty || true; RUNNER_INSTANCES=1; return 1; fi
+          ''',
+                  '''    if [[ ! "$RUNNER_INSTANCES" =~ ^[1-9][0-9]*$ ]]; then dialog --msgbox "Liczba runnerów musi być liczbą całkowitą >= 1." 7 70 </dev/tty >/dev/tty 2>/dev/tty || true; RUNNER_INSTANCES=1; return 1; fi
               if [[ "$RUNNER_INSTANCES" != "$previous_runner_instances" ]]; then
                   RUNNER_INSTANCES_EXPLICIT=true
               else
                   RUNNER_INSTANCES_EXPLICIT="$previous_runner_instances_explicit"
               fi
               [[ "$RUNNER_PIDS_LIMIT" =~ ^[0-9]+$ ]] || { dialog --msgbox "PID limit musi być liczbą całkowitą." 7 60 </dev/tty >/dev/tty 2>/dev/tty || true; RUNNER_PIDS_LIMIT=512; }
-          '''
-          if old_flag not in text:
-              raise SystemExit('runner explicit flag pattern not found')
-          text = text.replace(old_flag, new_flag, 1)
+          ''',
+                  'runner explicit flag',
+              ),
+              (
+                  '''status_repo_instance_line(){
+              local repo_name="$1" instance="$2" state_dir="$(repo_instance_state "$1" "$2")" metadata="$state_dir/metadata" runner_name="$(repo_instance_runner "$1" "$2")" container_name="$(repo_instance_container "$1" "$2")"
+              local container_state=missing github_state=missing busy=- socket=- docker_api=- cfg=- version=- row="" running=false stored_hash="" expected_hash="" display_repo="$repo_name"
+          ''',
+                  '''status_repo_instance_line(){
+              local repo_name="$1" instance="$2" state_dir="" metadata="" runner_name="" container_name=""
+              local container_state=missing github_state=missing busy=- socket=- docker_api=- cfg=- version=- row="" running=false stored_hash="" expected_hash="" display_repo="$repo_name"
+              state_dir="$(repo_instance_state "$repo_name" "$instance")"
+              metadata="$state_dir/metadata"
+              runner_name="$(repo_instance_runner "$repo_name" "$instance")"
+              container_name="$(repo_instance_container "$repo_name" "$instance")"
+          ''',
+                  'status repo locals',
+              ),
+              (
+                  '''status_org_instance_line(){
+              local instance="$1" state_dir="$(org_instance_state "$1")" metadata="$state_dir/metadata" runner_name="$(org_instance_runner "$1")" container_name="$(org_instance_container "$1")" row="" container_state=missing github_state=missing busy=- socket=- docker_api=- cfg=- version=- running=false stored_hash="" expected_hash="" display='(organization)'
+          ''',
+                  '''status_org_instance_line(){
+              local instance="$1" state_dir="" metadata="" runner_name="" container_name="" row="" container_state=missing github_state=missing busy=- socket=- docker_api=- cfg=- version=- running=false stored_hash="" expected_hash="" display='(organization)'
+              state_dir="$(org_instance_state "$instance")"
+              metadata="$state_dir/metadata"
+              runner_name="$(org_instance_runner "$instance")"
+              container_name="$(org_instance_container "$instance")"
+          ''',
+                  'status org locals',
+              ),
+              (
+                  '''remove_repo_instance(){
+              local repo_name="$1" instance="$2" state_dir="$(repo_instance_state "$1" "$2")" metadata_file="$state_dir/metadata" runner_name="$(repo_instance_runner "$1" "$2")" container_name="$(repo_instance_container "$1" "$2")"
+          ''',
+                  '''remove_repo_instance(){
+              local repo_name="$1" instance="$2" state_dir="" metadata_file="" runner_name="" container_name=""
+              state_dir="$(repo_instance_state "$repo_name" "$instance")"
+              metadata_file="$state_dir/metadata"
+              runner_name="$(repo_instance_runner "$repo_name" "$instance")"
+              container_name="$(repo_instance_container "$repo_name" "$instance")"
+          ''',
+                  'remove repo locals',
+              ),
+              (
+                  '''repair_repo_instance(){
+              local repo_name="$1" instance="$2" state_dir="$(repo_instance_state "$1" "$2")" metadata="$state_dir/metadata" runner_name="$(repo_instance_runner "$1" "$2")" container_name="$(repo_instance_container "$1" "$2")" row="" status="" running=false stored_hash="" expected_hash="" rc=0 saved_force="$FORCE_RECREATE"
+          ''',
+                  '''repair_repo_instance(){
+              local repo_name="$1" instance="$2" state_dir="" metadata="" runner_name="" container_name="" row="" status="" running=false stored_hash="" expected_hash="" rc=0 saved_force="$FORCE_RECREATE"
+              state_dir="$(repo_instance_state "$repo_name" "$instance")"
+              metadata="$state_dir/metadata"
+              runner_name="$(repo_instance_runner "$repo_name" "$instance")"
+              container_name="$(repo_instance_container "$repo_name" "$instance")"
+          ''',
+                  'repair repo locals',
+              ),
+              (
+                  '''remove_org_instance(){
+              local instance="$1" state_dir="$(org_instance_state "$1")" metadata_file="$state_dir/metadata" runner_name="$(org_instance_runner "$1")" container_name="$(org_instance_container "$1")"
+          ''',
+                  '''remove_org_instance(){
+              local instance="$1" state_dir="" metadata_file="" runner_name="" container_name=""
+              state_dir="$(org_instance_state "$instance")"
+              metadata_file="$state_dir/metadata"
+              runner_name="$(org_instance_runner "$instance")"
+              container_name="$(org_instance_container "$instance")"
+          ''',
+                  'remove org locals',
+              ),
+              (
+                  '''repair_org_instance(){
+              local instance="$1" saved_force="$FORCE_RECREATE" rc=0 state_dir="$(org_instance_state "$1")" metadata="$state_dir/metadata" runner_name="$(org_instance_runner "$1")" container_name="$(org_instance_container "$1")" row="" status="" running=false stored_hash="" expected_hash=""
+          ''',
+                  '''repair_org_instance(){
+              local instance="$1" saved_force="$FORCE_RECREATE" rc=0 state_dir="" metadata="" runner_name="" container_name="" row="" status="" running=false stored_hash="" expected_hash=""
+              state_dir="$(org_instance_state "$instance")"
+              metadata="$state_dir/metadata"
+              runner_name="$(org_instance_runner "$instance")"
+              container_name="$(org_instance_container "$instance")"
+          ''',
+                  'repair org locals',
+              ),
+              ('version=?', "version='?'", 'version placeholder'),
+          ]
+
+          for old, new, label in replacements:
+              if old not in text:
+                  raise SystemExit(f'{label} pattern not found')
+              text = text.replace(old, new, 1 if label != 'version placeholder' else 2)
+
           path.write_text(text)
           PY
 
@@ -63,12 +151,8 @@ jobs:
         run: |
           bash -n linux/install-github-selfhosted-runners.sh
           shellcheck -e SC2155,SC2015 linux/install-github-selfhosted-runners.sh
-          if [[ -f linux/tests/test-install-github-selfhosted-runners.sh ]]; then
-            bash linux/tests/test-install-github-selfhosted-runners.sh
-          fi
-          if [[ -f linux/tests/test-install-github-selfhosted-runners-legacy-service.sh ]]; then
-            bash linux/tests/test-install-github-selfhosted-runners-legacy-service.sh
-          fi
+          bash linux/tests/test-install-github-selfhosted-runners.sh
+          bash linux/tests/test-install-github-selfhosted-runners-legacy-service.sh
 
       - name: Commit fix and remove temporary workflow
         shell: bash
@@ -78,5 +162,5 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add linux/install-github-selfhosted-runners.sh .github/workflows/fix-pr12-runner-settings.yml
           git diff --cached --check
-          git commit -m "Fix GUI runner count preservation"
+          git commit -m "Fix runner pool state handling and lint issues"
           git push origin HEAD:feature/multiple-self-hosted-runners
