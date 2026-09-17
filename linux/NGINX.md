@@ -47,6 +47,7 @@ Destructive non-interactive operations require `--yes`. Use `--dry-run` to inspe
 
 - status, service lifecycle and autostart;
 - safe changes of a selected site's HTTP port or the default Nginx HTTP port;
+- Virtual Host selection lists in the dialog UI instead of requiring manual domain entry for existing sites;
 - Virtual Host discovery, creation, editing, cloning, enable/disable and deletion;
 - static, PHP-FPM and reverse-proxy generators with WebSocket headers;
 - certificate inventory, expiry warnings, Certbot, renewal, existing and self-signed certificates;

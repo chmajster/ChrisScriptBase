@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 
 SCRIPT_NAME="nginx-manager.sh"
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.1.1"
 
 EXIT_GENERAL=1
 EXIT_ARGS=2

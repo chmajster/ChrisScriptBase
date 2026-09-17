@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-09-17 — Nginx Manager 1.1.1
+
+- Replaced manual domain entry with a Virtual Host selection list for edit, port, delete, enable, disable, preview, clone and SSL operations.
+- Added status, HTTP port and configuration filename to each selection row.
+
 ## 2026-09-17 — Nginx Manager 1.1.0
 
 - Added atomic HTTP port changes for individual Virtual Hosts.

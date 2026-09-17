@@ -37,6 +37,45 @@ list_sites() {
     done < <(site_files)
 }
 
+site_primary_domain() {
+    local file="$1" domain
+    while IFS= read -r domain; do
+        validate_domain "$domain" && { printf '%s' "$domain"; return 0; }
+    done < <(sed -n -E 's/^[[:space:]]*server_name[[:space:]]+([^;]+);.*/\1/p' "$file" | tr ' ' '\n')
+    domain="$(basename "$file")"
+    domain="${domain%.disabled}"
+    domain="${domain%.conf}"
+    validate_domain "$domain" && printf '%s' "$domain"
+}
+
+site_http_port() {
+    local file="$1"
+    awk '
+      /^[[:space:]]*listen[[:space:]]/ && $0 !~ /(^|[[:space:]])ssl([[:space:];]|$)/ {
+        line = $0
+        sub(/^[[:space:]]*listen[[:space:]]+/, "", line)
+        match(line, /^[^[:space:];]+/)
+        endpoint = substr(line, RSTART, RLENGTH)
+        if (endpoint ~ /:[0-9]+$/) sub(/^.*:/, "", endpoint)
+        if (endpoint ~ /^[0-9]+$/) { print endpoint; exit }
+      }
+    ' "$file"
+}
+
+site_choice_rows() {
+    local file primary domains state port
+    while IFS= read -r file; do
+        [[ -n "$file" ]] || continue
+        primary="$(site_primary_domain "$file" || true)"
+        [[ -n "$primary" ]] || continue
+        domains="$(sed -n -E 's/^[[:space:]]*server_name[[:space:]]+([^;]+);.*/\1/p' "$file" | head -n1)"
+        [[ -n "$domains" ]] || domains="$primary"
+        if site_enabled "$file"; then state="ENABLED"; else state="DISABLED"; fi
+        port="$(site_http_port "$file")"
+        printf '%s\t%s | %s | port %s | %s\n' "$primary" "$domains" "$state" "${port:--}" "$(basename "$file")"
+    done < <(site_files)
+}
+
 find_site_file() {
     local domain="$1" file
     validate_domain "$domain" || return 1

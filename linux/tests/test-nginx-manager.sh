@@ -44,6 +44,34 @@ else
 fi
 rm -f -- "$listen_cfg"
 
+choices_dir="$(mktemp -d)"
+cat > "$choices_dir/example.conf" <<'EOF_CHOICE_ONE'
+server {
+    listen 8080;
+    listen [::]:8080;
+    server_name example.com www.example.com;
+}
+EOF_CHOICE_ONE
+cat > "$choices_dir/api.conf" <<'EOF_CHOICE_TWO'
+server {
+    listen 9000;
+    server_name api.example.com;
+}
+EOF_CHOICE_TWO
+out="$(bash -c '
+  source "$1"
+  LAYOUT=rhel
+  SITES_AVAILABLE="$2"
+  SITES_ENABLED="$2"
+  site_choice_rows
+' _ "$SCRIPT" "$choices_dir")"
+if [[ "$out" == *$'example.com\texample.com www.example.com | ENABLED | port 8080 | example.conf'* && "$out" == *$'api.example.com\tapi.example.com | ENABLED | port 9000 | api.conf'* ]]; then
+  ok "site selection rows"
+else
+  not_ok "site selection rows"
+fi
+rm -rf -- "$choices_dir"
+
 fakebin="$(mktemp -d)"
 fakeetc="$(mktemp -d)"
 fakebackup="$(mktemp -d)"
