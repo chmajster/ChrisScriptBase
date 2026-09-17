@@ -18,6 +18,7 @@ Repository: [chmajster/ChrisScriptBase](https://github.com/chmajster/ChrisScript
 | `linux/konfiguracja_samba_www_ubuntu.sh` | Installs and configures Apache, PHP, MariaDB, phpMyAdmin, and Samba on Ubuntu. |
 | `linux/web-hosts-file-manager.sh` | Installs a Flask-based web manager for `/etc/hosts`. |
 | `linux/ldapsearch.sh` | Discovers SSSD/LDAP settings and looks up LDAP/AD users, groups and netgroups with NSS/SSSD fallback. |
+| `linux/tailscale-manager.sh` | Installs and configures Tailscale with dialog/whiptail GUI, interactive CLI, or fully non-interactive silent mode. |
 | `snow/watchdog-dashboard.js` | Browser-based ServiceNow watchdog dashboard snippet. |
 
 ## Usage
@@ -44,6 +45,17 @@ bash linux/ldapsearch.sh --config
 
 The LDAP utility reads existing system LDAP/SSSD configuration. It never prints configured bind passwords and does not install LDAP client packages automatically.
 
+Tailscale manager examples:
+
+```bash
+sudo bash linux/tailscale-manager.sh --gui
+sudo bash linux/tailscale-manager.sh --silent --install \
+  --auth-key-file /root/tailscale.key --hostname server01 --ssh
+sudo bash linux/tailscale-manager.sh --silent --diagnose
+```
+
+The Tailscale manager supports Tailscale SSH, subnet routes, exit nodes, DNS/routes preferences, tags, status, diagnostics, config files and dry-run. See [`linux/TAILSCALE.md`](linux/TAILSCALE.md) for the full documentation.
+
 Scripts that modify the system usually require root privileges:
 
 ```bash
@@ -60,6 +72,7 @@ The ServiceNow dashboard script is intended to run inside an authenticated Servi
 - Adjust configuration values inside scripts that require local settings.
 - Some scripts are distribution-specific; check comments and detected OS support first.
 - `linux/ldapsearch.sh` supports SSSD, OpenLDAP and nslcd-style configuration discovery and can fall back to NSS/SSSD when direct LDAP access is unavailable.
+- `linux/tailscale-manager.sh` never stores an auth key in its saved configuration; prefer `--auth-key-file` with permissions `600` or `400`.
 
 ---
 
@@ -79,6 +92,7 @@ Repozytorium: [chmajster/ChrisScriptBase](https://github.com/chmajster/ChrisScri
 | `linux/konfiguracja_samba_www_ubuntu.sh` | Instaluje i konfiguruje Apache, PHP, MariaDB, phpMyAdmin oraz Sambe na Ubuntu. |
 | `linux/web-hosts-file-manager.sh` | Instaluje webowy manager pliku `/etc/hosts` oparty o Flask. |
 | `linux/ldapsearch.sh` | Wykrywa konfiguracje SSSD/LDAP i wyszukuje uzytkownikow LDAP/AD, grupy oraz netgroupy z fallbackiem NSS/SSSD. |
+| `linux/tailscale-manager.sh` | Instaluje i konfiguruje Tailscale w trybie GUI dialog/whiptail, interaktywnym CLI albo w pelni nieinteraktywnym silent. |
 | `snow/watchdog-dashboard.js` | Dashboard watchdog dla ServiceNow uruchamiany w przegladarce. |
 
 ## Uzycie
@@ -105,6 +119,17 @@ bash linux/ldapsearch.sh --config
 
 Skrypt LDAP korzysta z istniejacej konfiguracji LDAP/SSSD systemu. Nie wyswietla skonfigurowanych hasel bind i nie instaluje automatycznie pakietow klienta LDAP.
 
+Przyklady Tailscale Manager:
+
+```bash
+sudo bash linux/tailscale-manager.sh --gui
+sudo bash linux/tailscale-manager.sh --silent --install \
+  --auth-key-file /root/tailscale.key --hostname server01 --ssh
+sudo bash linux/tailscale-manager.sh --silent --diagnose
+```
+
+Tailscale Manager obsluguje Tailscale SSH, subnet routes, exit node, DNS/routes, tagi, status, diagnostyke, pliki konfiguracyjne i dry-run. Pelna dokumentacja znajduje sie w [`linux/TAILSCALE.md`](linux/TAILSCALE.md).
+
 Skrypty modyfikujace system zwykle wymagaja uprawnien root:
 
 ```bash
@@ -121,3 +146,4 @@ Skrypt dashboardu ServiceNow jest przeznaczony do uruchomienia w zalogowanej ses
 - Dostosuj wartosci konfiguracyjne w skryptach, ktore wymagaja lokalnych ustawien.
 - Czesc skryptow jest przeznaczona dla konkretnych dystrybucji; najpierw sprawdz komentarze i obslugiwane systemy.
 - `linux/ldapsearch.sh` obsluguje wykrywanie konfiguracji SSSD, OpenLDAP i nslcd oraz fallback NSS/SSSD, gdy bezposrednie zapytanie LDAP jest niedostepne.
+- `linux/tailscale-manager.sh` nie zapisuje auth key do zapisywanego configu; preferowany jest `--auth-key-file` z uprawnieniami `600` lub `400`.
