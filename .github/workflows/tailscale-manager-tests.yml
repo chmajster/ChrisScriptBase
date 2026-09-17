@@ -1,0 +1,28 @@
+name: Test Tailscale manager
+
+on:
+  pull_request:
+    paths:
+      - 'linux/tailscale-manager.sh'
+      - 'linux/lib/tailscale-manager/**'
+      - 'linux/TAILSCALE.md'
+      - 'linux/tailscale.conf.example'
+      - 'linux/tests/test-tailscale-manager.sh'
+      - '.github/workflows/tailscale-manager-tests.yml'
+      - 'README.md'
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ShellCheck Tailscale manager
+        run: |
+          shellcheck -x linux/tailscale-manager.sh
+          # SC2016 is intentional: child-shell test snippets expand variables after bash -c starts.
+          shellcheck -e SC2016 linux/tests/test-tailscale-manager.sh
+
+      - name: Run Tailscale manager regression tests
+        run: bash linux/tests/test-tailscale-manager.sh
