@@ -1,0 +1,30 @@
+# ChrisScriptBase Tailscale Manager example configuration
+# Priority: defaults < this file < CLI arguments
+# Do not store AUTH_KEY here. Use AUTH_KEY_FILE with mode 600/400.
+
+INSTALL=true
+CONNECT=true
+HOSTNAME=server01
+AUTH_KEY_FILE=/root/tailscale.key
+
+SSH=true
+ACCEPT_ROUTES=false
+ACCEPT_DNS=true
+
+# Example subnet router:
+# ADVERTISE_ROUTES=192.168.1.0/24,10.10.0.0/16
+ADVERTISE_ROUTES=
+
+ADVERTISE_EXIT_NODE=false
+EXIT_NODE=
+EXIT_NODE_ALLOW_LAN_ACCESS=false
+
+# Tags must exist in the tailnet policy and use the tag:name format.
+ADVERTISE_TAGS=
+OPERATOR=
+SHIELDS_UP=false
+SNAT_SUBNET_ROUTES=true
+STATEFUL_FILTERING=false
+NETFILTER_MODE=on
+AUTO_UPDATE=true
+WEBCLIENT=false
