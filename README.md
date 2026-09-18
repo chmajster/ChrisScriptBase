@@ -20,6 +20,7 @@ Repository: [chmajster/ChrisScriptBase](https://github.com/chmajster/ChrisScript
 | `linux/ldapsearch.sh` | Discovers SSSD/LDAP settings and looks up LDAP/AD users, groups and netgroups with NSS/SSSD fallback. |
 | `linux/tailscale-manager.sh` | Installs and configures Tailscale with dialog/whiptail GUI, interactive CLI, or fully non-interactive silent mode. |
 | `linux/nginx-manager.sh` | Safely manages Nginx sites, reverse proxies, SSL, backups, diagnostics and services through dialog or CLI. |
+| `linux/awx-inventory-sync.sh` | Detects AWX in Kubernetes, bootstraps SSH key authentication, imports remote Ansible inventory and installs recurring synchronization. |
 | `snow/watchdog-dashboard.js` | Browser-based ServiceNow watchdog dashboard snippet. |
 
 ## Usage
@@ -80,6 +81,14 @@ sudo bash linux/nginx-manager.sh --non-interactive \
   --disable-port-80 --port 8080 --yes
 ```
 
+AWX inventory synchronization is configured interactively on the Kubernetes host running AWX:
+
+```bash
+sudo bash linux/awx-inventory-sync.sh
+```
+
+The first run asks for the source SSH host, port, username and a one-time password. It then generates a dedicated ED25519 key, detects AWX, imports the inventory and installs a five-minute cron job. The SSH password is not persisted.
+
 Scripts that modify the system usually require root privileges:
 
 ```bash
@@ -118,6 +127,7 @@ Repozytorium: [chmajster/ChrisScriptBase](https://github.com/chmajster/ChrisScri
 | `linux/ldapsearch.sh` | Wykrywa konfiguracje SSSD/LDAP i wyszukuje uzytkownikow LDAP/AD, grupy oraz netgroupy z fallbackiem NSS/SSSD. |
 | `linux/tailscale-manager.sh` | Instaluje i konfiguruje Tailscale w trybie GUI dialog/whiptail, interaktywnym CLI albo w pelni nieinteraktywnym silent. |
 | `linux/nginx-manager.sh` | Bezpiecznie zarzadza Nginx, Virtual Hostami, reverse proxy, SSL, backupami i diagnostyka przez dialog lub CLI. |
+| `linux/awx-inventory-sync.sh` | Wykrywa AWX w Kubernetes, konfiguruje logowanie SSH kluczem, importuje zdalne inventory Ansible i instaluje cykliczna synchronizacje. |
 | `snow/watchdog-dashboard.js` | Dashboard watchdog dla ServiceNow uruchamiany w przegladarce. |
 
 ## Uzycie
@@ -175,6 +185,14 @@ sudo bash linux/nginx-manager.sh --non-interactive \
 sudo bash linux/nginx-manager.sh --non-interactive \
   --set-default-port --port 8080 --yes
 ```
+
+Synchronizacje inventory AWX konfigurujesz interaktywnie na hoscie Kubernetes, na ktorym dziala AWX:
+
+```bash
+sudo bash linux/awx-inventory-sync.sh
+```
+
+Pierwsze uruchomienie pyta o host, port, uzytkownika i jednorazowe haslo SSH. Nastepnie generuje dedykowany klucz ED25519, wykrywa AWX, importuje inventory i instaluje cron co piec minut. Haslo SSH nie jest zapisywane.
 
 Skrypty modyfikujace system zwykle wymagaja uprawnien root:
 
