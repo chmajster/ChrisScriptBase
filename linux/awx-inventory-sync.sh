@@ -607,13 +607,7 @@ bootstrap() {
     install_dependencies
     ui_ok "OpenSSH, sshpass i flock są dostępne."
 
-    ui_step 2 6 "Wykrywanie Kubernetes i AWX"
-    setup_kubernetes
-    ui_ok "Dostęp do klastra Kubernetes działa."
-    detect_awx
-    ui_ok "AWX gotowy: namespace=${AWX_NAMESPACE}, pod=${AWX_POD}, kontener=${AWX_CONTAINER}"
-
-    ui_step 3 6 "Dane serwera źródłowego"
+    ui_step 2 6 "Dane serwera źródłowego"
     read -r -p 'Adres IP/DNS serwera źródłowego: ' SOURCE_HOST
     [[ -n "$SOURCE_HOST" ]] || die "Adres serwera nie może być pusty."
 
@@ -635,11 +629,17 @@ bootstrap() {
     ui_info "Serwer: ${SOURCE_USER}@${SOURCE_HOST}:${SOURCE_PORT}"
     ui_info "Hasło pozostaje wyłącznie w pamięci tego procesu."
 
-    ui_step 4 6 "Pretest połączenia ze źródłem"
+    ui_step 3 6 "Pretest połączenia ze źródłem"
     prepare_ssh_state
     : > "$KNOWN_HOSTS"
     chmod 600 "$KNOWN_HOSTS"
     pretest_server_connection "$password"
+
+    ui_step 4 6 "Wykrywanie Kubernetes i AWX"
+    setup_kubernetes
+    ui_ok "Dostęp do klastra Kubernetes działa."
+    detect_awx
+    ui_ok "AWX gotowy: namespace=${AWX_NAMESPACE}, pod=${AWX_POD}, kontener=${AWX_CONTAINER}"
 
     ui_step 5 6 "Konfiguracja logowania kluczem SSH"
     setup_key
