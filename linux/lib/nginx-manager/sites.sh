@@ -141,6 +141,195 @@ rewrite_http_listen_ports() {
     ' "$source"
 }
 
+rewrite_specific_listen_port() {
+    local source="$1" from_port="$2" to_port="$3"
+    awk -v from="$from_port" -v to="$to_port" '
+      /^[[:space:]]*listen[[:space:]]/ {
+        match($0, /^[[:space:]]*/)
+        indent = substr($0, RSTART, RLENGTH)
+        body = $0
+        sub(/^[[:space:]]*listen[[:space:]]+/, "", body)
+        match(body, /^[^[:space:];]+/)
+        endpoint = substr(body, RSTART, RLENGTH)
+        tail = substr(body, RLENGTH + 1)
+
+        matched = 0
+        if (endpoint == from) {
+          endpoint = to
+          matched = 1
+        } else if (endpoint ~ (":" from "$")) {
+          sub(":" from "$", ":" to, endpoint)
+          matched = 1
+        }
+
+        if (matched) {
+          print indent "listen " endpoint tail
+          changed = 1
+          next
+        }
+      }
+      { print }
+      END { if (!changed) exit 42 }
+    ' "$source"
+}
+
+config_listens_on_port() {
+    local file="$1" port="$2"
+    awk -v port="$port" '
+      /^[[:space:]]*listen[[:space:]]/ {
+        body = $0
+        sub(/^[[:space:]]*listen[[:space:]]+/, "", body)
+        match(body, /^[^[:space:];]+/)
+        endpoint = substr(body, RSTART, RLENGTH)
+        if (endpoint == port || endpoint ~ (":" port "$")) exit 0
+      }
+      END { exit 1 }
+    ' "$file"
+}
+
+nginx_dump_listens_on_port() {
+    local port="$1" dump
+    dump="$(nginx -T 2>&1)" || return "$EXIT_CONFIG"
+    printf '%s\n' "$dump" | awk -v port="$port" '
+      /^[[:space:]]*listen[[:space:]]/ {
+        body = $0
+        sub(/^[[:space:]]*listen[[:space:]]+/, "", body)
+        match(body, /^[^[:space:];]+/)
+        endpoint = substr(body, RSTART, RLENGTH)
+        if (endpoint == port || endpoint ~ (":" port "$")) exit 0
+      }
+      END { exit 1 }
+    '
+}
+
+active_nginx_config_files() {
+    local dump file resolved found=false
+    nginx_installed || die "$EXIT_DEPENDENCY" "Nginx nie jest zainstalowany."
+    if ! dump="$(nginx -T 2>&1)"; then
+        printf '%s\n' "$dump" >&2
+        return "$EXIT_CONFIG"
+    fi
+
+    while IFS= read -r file; do
+        [[ -n "$file" && -f "$file" ]] || continue
+        resolved="$(readlink -f -- "$file" 2>/dev/null || printf '%s' "$file")"
+        printf '%s\n' "$resolved"
+        found=true
+    done < <(printf '%s\n' "$dump" | sed -n -E 's/^# configuration file (.*):$/\1/p')
+
+    if [[ "$found" == false ]]; then
+        [[ -f "$MAIN_CONFIG" ]] && printf '%s\n' "$(readlink -f -- "$MAIN_CONFIG" 2>/dev/null || printf '%s' "$MAIN_CONFIG")"
+        if [[ -d "$SITES_ENABLED" ]]; then
+            while IFS= read -r file; do
+                resolved="$(readlink -f -- "$file" 2>/dev/null || true)"
+                [[ -n "$resolved" && -f "$resolved" ]] && printf '%s\n' "$resolved"
+            done < <(find "$SITES_ENABLED" -maxdepth 1 \( -type f -o -type l \) -print 2>/dev/null)
+        fi
+        if [[ -d "$CONF_D" && "$CONF_D" != "$SITES_ENABLED" ]]; then
+            find "$CONF_D" -maxdepth 1 -type f -name '*.conf' -print 2>/dev/null
+        fi
+    fi
+}
+
+move_all_listen_ports() {
+    local from_port="$1" to_port="$2" files_output file temp status backup_archive i
+    local -a files=() affected=() external=() originals=() staged=()
+
+    require_root
+    validate_port "$from_port" || die "$EXIT_ARGS" "Niepoprawny port źródłowy: $from_port"
+    validate_port "$to_port" || die "$EXIT_ARGS" "Niepoprawny port docelowy: $to_port"
+    [[ "$from_port" != "$to_port" ]] || die "$EXIT_ARGS" "Port źródłowy i docelowy muszą być różne."
+    nginx_installed || die "$EXIT_DEPENDENCY" "Nginx nie jest zainstalowany."
+    test_nginx_config >/dev/null || return "$EXIT_CONFIG"
+
+    files_output="$(active_nginx_config_files)" || return $?
+    if [[ -n "$files_output" ]]; then
+        mapfile -t files < <(printf '%s\n' "$files_output" | sort -u)
+    fi
+
+    for file in "${files[@]}"; do
+        [[ -f "$file" ]] || continue
+        if config_listens_on_port "$file" "$from_port"; then
+            if [[ "$file" == "$NGINX_ETC"/* ]]; then
+                affected+=("$file")
+            else
+                external+=("$file")
+            fi
+        fi
+    done
+
+    if (("${#external[@]}" > 0)); then
+        error "Aktywna konfiguracja spoza $NGINX_ETC nadal nasłuchuje na porcie $from_port:"
+        printf '  %s\n' "${external[@]}" >&2
+        die "$EXIT_CONFIG" "Przerwano, aby nie pozostawić częściowej migracji."
+    fi
+
+    if (("${#affected[@]}" == 0)); then
+        info "Brak aktywnych dyrektyw listen na porcie $from_port."
+        return 0
+    fi
+
+    info "Aktywne pliki wymagające zmiany portu $from_port -> $to_port:"
+    printf '  %s\n' "${affected[@]}"
+    confirm_action "Move Nginx listen port" "$from_port -> $to_port" "Wszystkie aktywne dyrektywy listen na porcie $from_port zostaną przeniesione na $to_port. Inne porty pozostaną bez zmian." || return 0
+
+    if [[ "$DRY_RUN" == true ]]; then
+        for file in "${affected[@]}"; do
+            temp="$(make_temp)" || return "$EXIT_GENERAL"
+            rewrite_specific_listen_port "$file" "$from_port" "$to_port" > "$temp"; status=$?
+            ((status == 0)) || return "$EXIT_GENERAL"
+            printf '\n--- DRY RUN: %s ---\n' "$file"
+            diff -u -- "$file" "$temp" || true
+        done
+        printf '\nDRY RUN: nginx -t && systemctl reload nginx\n'
+        return 0
+    fi
+
+    backup_archive="$(create_backup)" || return "$EXIT_BACKUP"
+
+    for file in "${affected[@]}"; do
+        temp="$(make_temp)" || return "$EXIT_GENERAL"
+        rm -f -- "$temp"
+        cp -a -- "$file" "$temp" || return "$EXIT_BACKUP"
+        originals+=("$temp")
+
+        temp="$(make_temp)" || return "$EXIT_GENERAL"
+        rewrite_specific_listen_port "$file" "$from_port" "$to_port" > "$temp"; status=$?
+        if ((status != 0)); then
+            error "Nie udało się przygotować zmiany dla $file."
+            return "$EXIT_GENERAL"
+        fi
+        staged+=("$temp")
+    done
+
+    for ((i=0; i<${#affected[@]}; i++)); do
+        cat -- "${staged[$i]}" > "${affected[$i]}" || {
+            for ((i=0; i<${#originals[@]}; i++)); do cat -- "${originals[$i]}" > "${affected[$i]}" 2>/dev/null || true; done
+            return "$EXIT_GENERAL"
+        }
+    done
+
+    if ! test_nginx_config >/dev/null 2>&1 || nginx_dump_listens_on_port "$from_port"; then
+        for ((i=0; i<${#originals[@]}; i++)); do cat -- "${originals[$i]}" > "${affected[$i]}" 2>/dev/null || true; done
+        error "Migracja portu nie przeszła walidacji. Przywrócono wszystkie zmienione pliki. Backup: $backup_archive"
+        test_nginx_config >/dev/null 2>&1 || true
+        log_event move_listen_port rollback "$from_port->$to_port"
+        return "$EXIT_CONFIG"
+    fi
+
+    if ! reload_nginx; then
+        for ((i=0; i<${#originals[@]}; i++)); do cat -- "${originals[$i]}" > "${affected[$i]}" 2>/dev/null || true; done
+        test_nginx_config >/dev/null 2>&1 && reload_nginx >/dev/null 2>&1 || true
+        error "Reload po migracji nie powiódł się. Przywrócono poprzednią konfigurację. Backup: $backup_archive"
+        log_event move_listen_port rollback "$from_port->$to_port reload"
+        return "$EXIT_SERVICE"
+    fi
+
+    info "Nginx nie ma już aktywnych dyrektyw listen na porcie $from_port. Nowy port: $to_port."
+    info "Backup przed zmianą: $backup_archive"
+    log_event move_listen_port success "$from_port->$to_port files=${#affected[@]}"
+}
+
 change_site_port() {
     local domain="$1" port="$2" file temp status
     require_root
@@ -250,11 +439,11 @@ EOF
 }
 
 generate_reverse_proxy_config() {
-    local domain="$1" host="$2" port="$3" scheme="$4" websocket="$5" ssl="$6"
+    local domain="$1" host="$2" port="$3" scheme="$4" websocket="$5" ssl="$6" listen_port="${7:-80}"
     cat <<EOF
 server {
-    listen 80;
-    listen [::]:80;
+    listen $listen_port;
+    listen [::]:$listen_port;
     server_name $domain;
 
     access_log /var/log/nginx/${domain}.access.log;
@@ -322,13 +511,13 @@ create_site() {
 }
 
 create_reverse_proxy() {
-    local domain="$1" host="$2" port="$3" scheme="$4" websocket="$5" ssl="$6"
+    local domain="$1" host="$2" port="$3" scheme="$4" websocket="$5" ssl="$6" listen_port="${7:-80}"
     require_root
-    validate_domain "$domain" && validate_host "$host" && validate_port "$port" || die "$EXIT_ARGS" "Niepoprawne dane reverse proxy."
+    validate_domain "$domain" && validate_host "$host" && validate_port "$port" && validate_port "$listen_port" || die "$EXIT_ARGS" "Niepoprawne dane reverse proxy."
     [[ "$scheme" =~ ^https?$ ]] || die "$EXIT_ARGS" "Niepoprawny protokół backendu."
     local temp destination
     temp="$(make_temp)" || return "$EXIT_GENERAL"
-    generate_reverse_proxy_config "$domain" "$host" "$port" "$scheme" "$websocket" "$ssl" > "$temp"
+    generate_reverse_proxy_config "$domain" "$host" "$port" "$scheme" "$websocket" "$ssl" "$listen_port" > "$temp"
     preview_file "$temp"
     destination="$(site_config_path "$domain")"
     if [[ -e "$destination" ]]; then confirm_action "Replace configuration" "$domain" "Konfiguracja reverse proxy zostanie zastąpiona atomowo." || return 0; fi
