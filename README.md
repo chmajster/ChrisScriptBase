@@ -67,7 +67,7 @@ sudo bash linux/nginx-manager.sh --non-interactive --add-proxy \
   --domain api.example.com --backend-host 127.0.0.1 --backend-port 8080
 ```
 
-Nginx Manager supports Debian, Ubuntu, Linux Mint, RHEL, Rocky Linux, AlmaLinux, CentOS Stream and Fedora. Every configuration write is tested with `nginx -t`; a failed test triggers rollback and blocks reload. See [`linux/NGINX.md`](linux/NGINX.md).
+Nginx Manager supports Debian, Ubuntu, Linux Mint, RHEL, Rocky Linux, AlmaLinux, CentOS Stream and Fedora. Every configuration write is tested with `nginx -t`; a failed test triggers rollback and blocks reload. Global listen-port migration can remove all active Nginx listeners from port 80 while preserving unrelated ports. See [`linux/NGINX.md`](linux/NGINX.md).
 
 HTTP ports can be changed without manual file editing:
 
@@ -76,6 +76,8 @@ sudo bash linux/nginx-manager.sh --non-interactive \
   --change-site-port --domain example.com --port 8080 --yes
 sudo bash linux/nginx-manager.sh --non-interactive \
   --set-default-port --port 8080 --yes
+sudo bash linux/nginx-manager.sh --non-interactive \
+  --disable-port-80 --port 8080 --yes
 ```
 
 Scripts that modify the system usually require root privileges:
