@@ -30,8 +30,6 @@ LOG_FILE="/var/log/${APP}.log"
 LOCK_FILE="/run/${APP}.lock"
 CRON_SCHEDULE="*/5 * * * *"
 
-KUBE_MODE=""
-KUBE_SOURCE_CONFIG=""
 KUBE_CMD=()
 
 SOURCE_HOST=""
@@ -118,26 +116,22 @@ setup_kubernetes() {
     chmod 700 "$STATE_DIR"
 
     if have kubectl && [[ -s "$KUBECONFIG_FILE" ]] && kubectl --kubeconfig "$KUBECONFIG_FILE" get namespaces >/dev/null 2>&1; then
-        KUBE_MODE="kubectl"
         KUBE_CMD=(kubectl --kubeconfig "$KUBECONFIG_FILE")
         return 0
     fi
 
     if have k3s && k3s kubectl get namespaces >/dev/null 2>&1; then
-        KUBE_MODE="k3s"
         KUBE_CMD=(k3s kubectl)
         return 0
     fi
 
     if have microk8s && microk8s kubectl get namespaces >/dev/null 2>&1; then
-        KUBE_MODE="microk8s"
         KUBE_CMD=(microk8s kubectl)
         return 0
     fi
 
     if have kubectl && kubectl get namespaces >/dev/null 2>&1; then
         save_flattened_kubeconfig kubectl || die "Nie udało się zapisać kubeconfig."
-        KUBE_MODE="kubectl"
         KUBE_CMD=(kubectl --kubeconfig "$KUBECONFIG_FILE")
         return 0
     fi
@@ -156,7 +150,6 @@ setup_kubernetes() {
             [[ -n "$candidate" && -r "$candidate" ]] || continue
             if kubectl --kubeconfig "$candidate" get namespaces >/dev/null 2>&1; then
                 save_flattened_kubeconfig kubectl --kubeconfig "$candidate" || die "Nie udało się zapisać kubeconfig."
-                KUBE_MODE="kubectl"
                 KUBE_CMD=(kubectl --kubeconfig "$KUBECONFIG_FILE")
                 return 0
             fi
