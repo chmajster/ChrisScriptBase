@@ -28,6 +28,8 @@ sudo bash linux/nginx-manager.sh --non-interactive --change-site-port \
   --domain example.com --port 8080 --yes
 sudo bash linux/nginx-manager.sh --non-interactive --set-default-port \
   --port 8080 --yes
+sudo bash linux/nginx-manager.sh --non-interactive --disable-port-80 \
+  --port 8080 --yes
 ```
 
 Non-interactive examples:
@@ -37,8 +39,8 @@ sudo bash linux/nginx-manager.sh --non-interactive --add-site \
   --domain example.com --root /var/www/example.com --port 80
 
 sudo bash linux/nginx-manager.sh --non-interactive --add-proxy \
-  --domain api.example.com --backend-host 127.0.0.1 \
-  --backend-port 8080 --websocket
+  --domain api.example.com --port 8080 \
+  --backend-host 127.0.0.1 --backend-port 9000 --websocket
 ```
 
 Destructive non-interactive operations require `--yes`. Use `--dry-run` to inspect package and service commands.
@@ -47,6 +49,8 @@ Destructive non-interactive operations require `--yes`. Use `--dry-run` to inspe
 
 - status, service lifecycle and autostart;
 - safe changes of a selected site's HTTP port or the default Nginx HTTP port;
+- coordinated migration of every active `listen` directive from one port to another, including IPv4 and IPv6 listeners, with a full backup and rollback if `nginx -t` or reload fails;
+- `--disable-port-80 --port NEW_PORT` as a convenience alias for moving all active listeners away from TCP/80;
 - Virtual Host selection lists in the dialog UI instead of requiring manual domain entry for existing sites;
 - Virtual Host discovery, creation, editing, cloning, enable/disable and deletion;
 - static, PHP-FPM and reverse-proxy generators with WebSocket headers;
@@ -57,6 +61,28 @@ Destructive non-interactive operations require `--yes`. Use `--dry-run` to inspe
 - diagnostic reports without private keys or tokens;
 - security-header and TLS configuration previews;
 - CLI and non-interactive operation for Ansible, cron and SSH.
+
+## Moving Nginx away from port 80
+
+To ensure the active Nginx configuration no longer contains any `listen 80`, `listen [::]:80` or address-specific `:80` listener, use:
+
+```bash
+sudo bash linux/nginx-manager.sh --non-interactive \
+  --disable-port-80 --port 8080 --yes
+```
+
+The generic form can migrate any listen port:
+
+```bash
+sudo bash linux/nginx-manager.sh --non-interactive \
+  --move-listen-port --from-port 80 --port 8080 --yes
+```
+
+The operation discovers files used by the active Nginx configuration, modifies only listeners using the source port, preserves unrelated ports such as 443, creates a backup, runs `nginx -t`, verifies the source listener is gone and reloads Nginx. If validation or reload fails, every modified file is restored. Active configuration files outside `/etc/nginx` are not rewritten automatically; if one of them still uses the source port the migration is aborted rather than leaving a partial result.
+
+Moving away from port 80 can affect ACME HTTP-01 certificate validation and applications or firewalls that expect HTTP on TCP/80.
+
+For reverse proxies, `--port` is the Nginx frontend/listen port while `--backend-port` remains the upstream application port. The GUI asks for both values separately.
 
 ## Safe write sequence
 

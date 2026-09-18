@@ -33,9 +33,10 @@ execute_action() {
         purge) remove_nginx true ;;
         service) service_action "$SERVICE_ACTION" ;;
         add-site) create_site "$DOMAIN" "$DOCUMENT_ROOT" "$LISTEN_PORT" "$PHP_SOCKET" "$ENABLE_SSL" ;;
-        add-proxy) create_reverse_proxy "$DOMAIN" "$BACKEND_HOST" "$BACKEND_PORT" "$BACKEND_SCHEME" "$WEBSOCKET" "$ENABLE_SSL" ;;
+        add-proxy) create_reverse_proxy "$DOMAIN" "$BACKEND_HOST" "$BACKEND_PORT" "$BACKEND_SCHEME" "$WEBSOCKET" "$ENABLE_SSL" "$LISTEN_PORT" ;;
         change-site-port) change_site_port "$DOMAIN" "$LISTEN_PORT" ;;
         set-default-port) change_default_port "$LISTEN_PORT" ;;
+        move-listen-port) move_all_listen_ports "$SOURCE_PORT" "$LISTEN_PORT" ;;
         "") return 0 ;;
         *) die "$EXIT_ARGS" "Nieznana akcja: $ACTION" ;;
     esac

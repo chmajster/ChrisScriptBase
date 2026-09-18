@@ -13,6 +13,8 @@ Usage:
   nginx-manager.sh --add-proxy --domain DOMAIN --backend-host HOST --backend-port PORT [--websocket]
   nginx-manager.sh --change-site-port --domain DOMAIN --port PORT
   nginx-manager.sh --set-default-port --port PORT
+  nginx-manager.sh --move-listen-port [--from-port PORT] --port PORT
+  nginx-manager.sh --disable-port-80 --port PORT
 
 Options:
   --gui                    Wymuś interfejs dialog.
@@ -30,6 +32,9 @@ Options:
   --service ACTION         start|stop|restart|reload|enable|disable|status.
   --change-site-port       Zmień port HTTP wskazanego Virtual Hosta.
   --set-default-port       Zmień port domyślnego serwera Nginx.
+  --move-listen-port       Przenieś wszystkie aktywne dyrektywy listen z --from-port na --port.
+  --disable-port-80        Alias migracji wszystkich aktywnych listen z 80 na --port.
+  --from-port PORT         Port źródłowy dla --move-listen-port; domyślnie 80.
   --ssl                    Włącz SSL przy tworzeniu strony/proxy.
   --quiet                  Ogranicz komunikaty.
 EOF
@@ -64,6 +69,9 @@ parse_args() {
             --add-proxy) ACTION="add-proxy" ;;
             --change-site-port) ACTION="change-site-port" ;;
             --set-default-port) ACTION="set-default-port" ;;
+            --move-listen-port|--move-http-port) ACTION="move-listen-port" ;;
+            --disable-port-80) ACTION="move-listen-port"; SOURCE_PORT="80"; SOURCE_PORT_SET=true ;;
+            --from-port) [[ -n "${2:-}" ]] || die "$EXIT_ARGS" "Brak wartości --from-port"; SOURCE_PORT="$2"; SOURCE_PORT_SET=true; shift ;;
             --domain) [[ -n "${2:-}" ]] || die "$EXIT_ARGS" "Brak wartości --domain"; DOMAIN="$2"; shift ;;
             --root) [[ -n "${2:-}" ]] || die "$EXIT_ARGS" "Brak wartości --root"; DOCUMENT_ROOT="$2"; shift ;;
             --port) [[ -n "${2:-}" ]] || die "$EXIT_ARGS" "Brak wartości --port"; LISTEN_PORT="$2"; PORT_SET=true; shift ;;
@@ -92,6 +100,7 @@ validate_action_arguments() {
             validate_domain "$DOMAIN" || die "$EXIT_ARGS" "Niepoprawna domena."
             validate_host "$BACKEND_HOST" || die "$EXIT_ARGS" "Niepoprawny backend host."
             validate_port "$BACKEND_PORT" || die "$EXIT_ARGS" "Niepoprawny backend port."
+            validate_port "$LISTEN_PORT" || die "$EXIT_ARGS" "Niepoprawny port wejściowy Nginx."
             [[ "$BACKEND_SCHEME" =~ ^https?$ ]] || die "$EXIT_ARGS" "Backend scheme: tylko http lub https."
             ;;
         change-site-port)
@@ -102,6 +111,12 @@ validate_action_arguments() {
         set-default-port)
             [[ "$PORT_SET" == true ]] || die "$EXIT_ARGS" "Akcja --set-default-port wymaga --port."
             validate_port "$LISTEN_PORT" || die "$EXIT_ARGS" "Niepoprawny port."
+            ;;
+        move-listen-port)
+            [[ "$PORT_SET" == true ]] || die "$EXIT_ARGS" "Akcja --move-listen-port wymaga docelowego --port."
+            validate_port "$SOURCE_PORT" || die "$EXIT_ARGS" "Niepoprawny port źródłowy."
+            validate_port "$LISTEN_PORT" || die "$EXIT_ARGS" "Niepoprawny port docelowy."
+            [[ "$SOURCE_PORT" != "$LISTEN_PORT" ]] || die "$EXIT_ARGS" "Port źródłowy i docelowy muszą być różne."
             ;;
     esac
 }

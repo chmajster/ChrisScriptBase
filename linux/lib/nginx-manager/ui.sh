@@ -115,15 +115,16 @@ gui_sites() {
 }
 
 gui_proxy_wizard() {
-    local domain host port scheme websocket=false ssl=false
+    local domain host port listen_port scheme websocket=false ssl=false
     domain="$(ui_input "Reverse Proxy" "Domena:" "proxy.example.com" || true)"; [[ -n "$domain" ]] || return 0
+    listen_port="$(ui_input "Reverse Proxy" "Port wejściowy Nginx (listen):" "80" || true)"; [[ -n "$listen_port" ]] || return 0
     host="$(ui_input "Reverse Proxy" "Backend host:" "127.0.0.1" || true)"; [[ -n "$host" ]] || return 0
     port="$(ui_input "Reverse Proxy" "Backend port:" "8080" || true)"; [[ -n "$port" ]] || return 0
     scheme="$(ui_menu "Reverse Proxy" "Protokół backendu" http HTTP https HTTPS || true)"; [[ -n "$scheme" ]] || return 0
     ui_yesno "WebSocket" "Dodać obsługę WebSocket?" && websocket=true
     ui_yesno "SSL" "Dodać dyrektywy SSL dla Let's Encrypt?" && ssl=true
-    ASSUME_YES=true create_reverse_proxy "$domain" "$host" "$port" "$scheme" "$websocket" "$ssl"
-    ui_msg "Reverse Proxy" "Konfiguracja $domain została zapisana."
+    ASSUME_YES=true create_reverse_proxy "$domain" "$host" "$port" "$scheme" "$websocket" "$ssl" "$listen_port"
+    ui_msg "Reverse Proxy" "Konfiguracja $domain została zapisana na porcie wejściowym $listen_port."
 }
 
 gui_ssl() {
@@ -188,11 +189,16 @@ gui_backup() {
 }
 
 gui_ports() {
-    local action domain port
+    local action domain port from_port
     while true; do
-        action="$(ui_menu "Porty i połączenia" "Wybierz operację" list "Pokaż porty i procesy" site "Zmień port strony" default "Zmień domyślny port Nginx" back Powrót || true)"
+        action="$(ui_menu "Porty i połączenia" "Wybierz operację" list "Pokaż porty i procesy" global "Przenieś wszystkie aktywne listen z portu 80" site "Zmień port strony" default "Zmień domyślny port Nginx" back Powrót || true)"
         case "$action" in
             list) ui_text "Porty i połączenia" "$(show_ports 2>&1 || true)" ;;
+            global)
+                from_port="$(ui_input "Globalna zmiana portu" "Port źródłowy:" "80" || true)"; [[ -n "$from_port" ]] || continue
+                port="$(ui_input "Globalna zmiana portu" "Nowy port docelowy:" "8080" || true)"; [[ -n "$port" ]] || continue
+                ui_yesno "Globalna zmiana portu" "Przenieść WSZYSTKIE aktywne dyrektywy listen z portu $from_port na $port? Zostanie wykonany backup, nginx -t i rollback przy błędzie." && ASSUME_YES=true move_all_listen_ports "$from_port" "$port"
+                ;;
             site)
                 domain="$(ui_select_site "Port strony" || true)"; [[ -n "$domain" ]] || continue
                 port="$(ui_input "Port strony" "Nowy port HTTP:" "8080" || true)"; [[ -n "$port" ]] || continue
