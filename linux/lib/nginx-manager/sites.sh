@@ -181,9 +181,9 @@ config_listens_on_port() {
         sub(/^[[:space:]]*listen[[:space:]]+/, "", body)
         match(body, /^[^[:space:];]+/)
         endpoint = substr(body, RSTART, RLENGTH)
-        if (endpoint == port || endpoint ~ (":" port "$")) exit 0
+        if (endpoint == port || endpoint ~ (":" port "$")) { found = 1; exit }
       }
-      END { exit 1 }
+      END { exit found ? 0 : 1 }
     ' "$file"
 }
 
@@ -196,9 +196,9 @@ nginx_dump_listens_on_port() {
         sub(/^[[:space:]]*listen[[:space:]]+/, "", body)
         match(body, /^[^[:space:];]+/)
         endpoint = substr(body, RSTART, RLENGTH)
-        if (endpoint == port || endpoint ~ (":" port "$")) exit 0
+        if (endpoint == port || endpoint ~ (":" port "$")) { found = 1; exit }
       }
-      END { exit 1 }
+      END { exit found ? 0 : 1 }
     '
 }
 
