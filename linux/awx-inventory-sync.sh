@@ -32,6 +32,53 @@ CRON_SCHEDULE="*/5 * * * *"
 
 KUBE_CMD=()
 
+# Czytelny interfejs tylko podczas pracy interaktywnej. Cron/logi pozostają
+# bez kodów ANSI, dzięki czemu /var/log/${APP}.log jest łatwy do analizy.
+C_RESET=''
+C_BOLD=''
+C_BLUE=''
+C_GREEN=''
+C_YELLOW=''
+C_RED=''
+
+init_ui() {
+    if [[ -t 1 && "${TERM:-dumb}" != "dumb" && -z "${NO_COLOR:-}" ]]; then
+        C_RESET=$'\033[0m'
+        C_BOLD=$'\033[1m'
+        C_BLUE=$'\033[34m'
+        C_GREEN=$'\033[32m'
+        C_YELLOW=$'\033[33m'
+        C_RED=$'\033[31m'
+    fi
+}
+
+ui_banner() {
+    printf '\n%b============================================================%b\n' "$C_BOLD" "$C_RESET"
+    printf '%b  AWX Inventory Sync - automatyczna konfiguracja%b\n' "$C_BOLD" "$C_RESET"
+    printf '%b============================================================%b\n\n' "$C_BOLD" "$C_RESET"
+}
+
+ui_step() {
+    local current="$1" total="$2" message="$3"
+    printf '\n%b[%s/%s]%b %b%s%b\n' "$C_BLUE" "$current" "$total" "$C_RESET" "$C_BOLD" "$message" "$C_RESET"
+}
+
+ui_info() {
+    printf '  %b[INFO]%b %s\n' "$C_BLUE" "$C_RESET" "$*"
+}
+
+ui_ok() {
+    printf '  %b[ OK ]%b %s\n' "$C_GREEN" "$C_RESET" "$*"
+}
+
+ui_warn() {
+    printf '  %b[WARN]%b %s\n' "$C_YELLOW" "$C_RESET" "$*"
+}
+
+ui_fail() {
+    printf '  %b[FAIL]%b %s\n' "$C_RED" "$C_RESET" "$*" >&2
+}
+
 SOURCE_HOST=""
 SOURCE_PORT="22"
 SOURCE_USER=""
@@ -239,11 +286,15 @@ save_state() {
     mv -f "$tmp" "$STATE_FILE"
 }
 
-setup_key() {
+prepare_ssh_state() {
     mkdir -p "$STATE_DIR"
     chmod 700 "$STATE_DIR"
     touch "$KNOWN_HOSTS"
     chmod 600 "$KNOWN_HOSTS"
+}
+
+setup_key() {
+    prepare_ssh_state
 
     if [[ ! -s "$KEY_FILE" ]]; then
         log "Generuję dedykowany klucz ED25519..."
@@ -269,6 +320,91 @@ refresh_host_key() {
         chmod 600 "$KNOWN_HOSTS"
     fi
     rm -f "$scanned"
+}
+
+password_ssh() {
+    local password="$1"
+    shift
+    SSHPASS="$password" sshpass -e ssh \
+        -p "$SOURCE_PORT" \
+        -o PreferredAuthentications=password,keyboard-interactive \
+        -o PubkeyAuthentication=no \
+        -o ConnectTimeout=10 \
+        -o ConnectionAttempts=1 \
+        -o NumberOfPasswordPrompts=1 \
+        -o UserKnownHostsFile="$KNOWN_HOSTS" \
+        -o StrictHostKeyChecking=yes \
+        "${SOURCE_USER}@${SOURCE_HOST}" "$@"
+}
+
+pretest_server_connection() {
+    local password="$1"
+    local resolved="" remote_info="" remote_host="" remote_user=""
+    local inventory_probe="" home_write="" av="" inv_file=""
+
+    ui_info "Cel: ${SOURCE_USER}@${SOURCE_HOST}:${SOURCE_PORT}"
+
+    if have getent; then
+        resolved="$(getent ahosts "$SOURCE_HOST" 2>/dev/null | awk 'NR==1 {print $1}' || true)"
+        if [[ -n "$resolved" ]]; then
+            ui_ok "Rozwiązywanie adresu: ${SOURCE_HOST} -> ${resolved}"
+        elif [[ "$SOURCE_HOST" =~ ^[0-9A-Fa-f:.]+$ ]]; then
+            ui_ok "Podano bezpośredni adres IP: ${SOURCE_HOST}"
+        else
+            ui_fail "Nie można rozwiązać nazwy ${SOURCE_HOST}."
+            die "Pretest przerwany przed jakąkolwiek zmianą na serwerze źródłowym."
+        fi
+    else
+        ui_warn "Brak getent - pomijam osobny test DNS; połączenie TCP zweryfikuje adres."
+    fi
+
+    if timeout 6 bash -c 'exec 3<>/dev/tcp/$1/$2' _ "$SOURCE_HOST" "$SOURCE_PORT" >/dev/null 2>&1; then
+        ui_ok "Port TCP ${SOURCE_PORT} jest osiągalny."
+    else
+        ui_fail "Brak połączenia TCP do ${SOURCE_HOST}:${SOURCE_PORT}."
+        die "Sprawdź adres, port, firewall/routing i usługę sshd."
+    fi
+
+    ui_info "Pobieram klucz hosta SSH..."
+    refresh_host_key
+    ui_ok "Serwer odpowiada protokołem SSH i jego klucz hosta został odczytany."
+
+    ui_info "Testuję logowanie podanym użytkownikiem i hasłem..."
+    if ! remote_info="$(password_ssh "$password" 'printf "HOST=%s\n" "$(hostname -f 2>/dev/null || hostname)"; printf "USER=%s\n" "$(id -un)"; if [ -w "$HOME" ] || { [ -d "$HOME/.ssh" ] && [ -w "$HOME/.ssh" ]; }; then echo HOME_WRITE=yes; else echo HOME_WRITE=no; fi' 2>/dev/null)"; then
+        ui_fail "Logowanie SSH hasłem nie powiodło się."
+        die "Sprawdź użytkownika, hasło oraz czy serwer zezwala na PasswordAuthentication/keyboard-interactive."
+    fi
+
+    remote_host="$(printf '%s\n' "$remote_info" | sed -n 's/^HOST=//p' | head -n1)"
+    remote_user="$(printf '%s\n' "$remote_info" | sed -n 's/^USER=//p' | head -n1)"
+    home_write="$(printf '%s\n' "$remote_info" | sed -n 's/^HOME_WRITE=//p' | head -n1)"
+    ui_ok "Logowanie SSH działa: ${remote_user:-$SOURCE_USER}@${remote_host:-$SOURCE_HOST}"
+
+    if [[ "$home_write" == "yes" ]]; then
+        ui_ok "Katalog HOME/.ssh pozwala na instalację klucza."
+    else
+        ui_fail "Brak prawa zapisu do HOME ani istniejącego ~/.ssh."
+        die "Nie będzie możliwe bezpieczne zainstalowanie klucza SSH."
+    fi
+
+    ui_info "Sprawdzam źródło inventory na serwerze..."
+    inventory_probe="$(password_ssh "$password" 'if command -v ansible-inventory >/dev/null 2>&1; then echo "ANSIBLE_INVENTORY=yes"; ansible-inventory --version 2>/dev/null | head -n1 | sed "s/^/ANSIBLE_VERSION=/"; else echo "ANSIBLE_INVENTORY=no"; fi; for f in /etc/ansible/hosts /etc/ansible/inventory /etc/ansible/inventory.ini /etc/ansible/inventory.yml /etc/ansible/inventory.yaml /opt/ansible/inventory /opt/ansible/inventory.ini /opt/ansible/inventory.yml /opt/ansible/inventory.yaml "$HOME/ansible/inventory" "$HOME/ansible/inventory.ini" "$HOME/ansible/inventory.yml" "$HOME/ansible/inventory.yaml"; do [ -f "$f" ] && { echo "INVENTORY_FILE=$f"; break; }; done' 2>/dev/null || true)"
+
+    if grep -q '^ANSIBLE_INVENTORY=yes$' <<< "$inventory_probe"; then
+        av="$(printf '%s\n' "$inventory_probe" | sed -n 's/^ANSIBLE_VERSION=//p' | head -n1)"
+        ui_ok "Dostępne ansible-inventory${av:+: $av}"
+    else
+        ui_warn "Brak polecenia ansible-inventory na serwerze źródłowym."
+    fi
+
+    inv_file="$(printf '%s\n' "$inventory_probe" | sed -n 's/^INVENTORY_FILE=//p' | head -n1)"
+    if [[ -n "$inv_file" ]]; then
+        ui_ok "Wykryto statyczne inventory: $inv_file"
+    elif ! grep -q '^ANSIBLE_INVENTORY=yes$' <<< "$inventory_probe"; then
+        ui_warn "Nie wykryto inventory. Synchronizacja utworzy wpis dla samego serwera źródłowego."
+    fi
+
+    ui_ok "Pretest zakończony pomyślnie. Można rozpocząć konfigurację."
 }
 
 ssh_base() {
@@ -464,11 +600,14 @@ EOF_CRON
 bootstrap() {
     local password
     require_root
-    install_dependencies
-    setup_kubernetes
-    detect_awx
+    init_ui
+    ui_banner
 
-    printf '\nAWX Inventory Sync - konfiguracja\n\n'
+    ui_step 1 6 "Sprawdzanie lokalnych zależności"
+    install_dependencies
+    ui_ok "OpenSSH, sshpass i flock są dostępne."
+
+    ui_step 2 6 "Dane serwera źródłowego"
     read -r -p 'Adres IP/DNS serwera źródłowego: ' SOURCE_HOST
     [[ -n "$SOURCE_HOST" ]] || die "Adres serwera nie może być pusty."
 
@@ -487,40 +626,74 @@ bootstrap() {
     INVENTORY_NAME="SSH Inventory - ${SOURCE_HOST}"
     LAST_HASH=""
 
-    setup_key
+    ui_info "Serwer: ${SOURCE_USER}@${SOURCE_HOST}:${SOURCE_PORT}"
+    ui_info "Hasło pozostaje wyłącznie w pamięci tego procesu."
+
+    ui_step 3 6 "Pretest połączenia ze źródłem"
+    prepare_ssh_state
     : > "$KNOWN_HOSTS"
     chmod 600 "$KNOWN_HOSTS"
-    refresh_host_key
+    pretest_server_connection "$password"
+
+    ui_step 4 6 "Wykrywanie Kubernetes i AWX"
+    setup_kubernetes
+    ui_ok "Dostęp do klastra Kubernetes działa."
+    detect_awx
+    ui_ok "AWX gotowy: namespace=${AWX_NAMESPACE}, pod=${AWX_POD}, kontener=${AWX_CONTAINER}"
+
+    ui_step 5 6 "Konfiguracja logowania kluczem SSH"
+    setup_key
     install_public_key "$password"
+    ui_ok "Logowanie kluczem SSH działa."
     password=''
     unset password
 
     save_state
     install_self
     install_cron
+    ui_ok "Skrypt zainstalowany: $INSTALL_PATH"
+    ui_ok "Cron ustawiony: $CRON_SCHEDULE"
 
-    log "Wykonuję pierwszą synchronizację..."
+    ui_step 6 6 "Pierwsza synchronizacja z AWX"
     "$INSTALL_PATH" --sync
+    ui_ok "Pierwsza synchronizacja zakończona."
 
-    printf '\nGotowe.\n'
-    printf 'Inventory AWX: %s\n' "$INVENTORY_NAME"
-    printf 'Synchronizacja: co 5 minut\n'
-    printf 'Skrypt: %s\n' "$INSTALL_PATH"
-    printf 'Stan: %s\n' "$STATE_FILE"
-    printf 'Klucz SSH: %s\n' "$KEY_FILE"
-    printf 'Log: %s\n' "$LOG_FILE"
+    printf '\n%bGotowe%b\n' "$C_BOLD" "$C_RESET"
+    printf '  Inventory AWX : %s\n' "$INVENTORY_NAME"
+    printf '  Źródło        : %s@%s:%s\n' "$SOURCE_USER" "$SOURCE_HOST" "$SOURCE_PORT"
+    printf '  Synchronizacja: co 5 minut\n'
+    printf '  Skrypt        : %s\n' "$INSTALL_PATH"
+    printf '  Stan          : %s\n' "$STATE_FILE"
+    printf '  Klucz SSH     : %s\n' "$KEY_FILE"
+    printf '  Log           : %s\n\n' "$LOG_FILE"
 }
 
 status() {
     require_root
+    init_ui
     load_state
-    printf 'Źródło SSH: %s@%s:%s\n' "$SOURCE_USER" "$SOURCE_HOST" "$SOURCE_PORT"
-    printf 'Inventory AWX: %s\n' "$INVENTORY_NAME"
-    printf 'Cron: %s\n' "$CRON_FILE"
-    printf 'Klucz: %s\n' "$KEY_FILE"
-    printf 'Ostatni hash: %s\n' "${LAST_HASH:-brak}"
+    ui_banner
+    printf '%bKonfiguracja%b\n' "$C_BOLD" "$C_RESET"
+    printf '  Źródło SSH    : %s@%s:%s\n' "$SOURCE_USER" "$SOURCE_HOST" "$SOURCE_PORT"
+    printf '  Inventory AWX : %s\n' "$INVENTORY_NAME"
+    printf '  Cron          : %s\n' "$CRON_FILE"
+    printf '  Klucz         : %s\n' "$KEY_FILE"
+    printf '  Ostatni hash  : %s\n' "${LAST_HASH:-brak}"
+
+    printf '\n%bKontrole%b\n' "$C_BOLD" "$C_RESET"
+    if [[ -s "$KEY_FILE" ]]; then ui_ok "Klucz SSH istnieje."; else ui_fail "Brak klucza SSH."; fi
+    if [[ -f "$CRON_FILE" ]]; then ui_ok "Cron jest zainstalowany."; else ui_warn "Brak pliku cron."; fi
+
     setup_kubernetes
+    ui_ok "Dostęp do Kubernetes działa."
     detect_awx
+    ui_ok "AWX działa: namespace=${AWX_NAMESPACE}, pod=${AWX_POD}"
+
+    if remote_exec 'true' >/dev/null 2>&1; then
+        ui_ok "Połączenie SSH kluczem do serwera źródłowego działa."
+    else
+        ui_fail "Połączenie SSH kluczem do serwera źródłowego NIE działa."
+    fi
 }
 
 uninstall_sync() {
