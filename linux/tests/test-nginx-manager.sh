@@ -27,6 +27,9 @@ if [[ "$out" == *'server_name example.com;'* && "$out" == *'try_files $uri $uri/
 out="$(bash -c 'source "$1"; generate_reverse_proxy_config api.example.com 127.0.0.1 8080 http true false' _ "$SCRIPT")"
 if [[ "$out" == *'proxy_pass http://127.0.0.1:8080;'* && "$out" == *'proxy_set_header Upgrade $http_upgrade;'* ]]; then ok "proxy websocket generator"; else not_ok "proxy websocket generator"; fi
 
+out="$(bash -c 'source "$1"; generate_reverse_proxy_config api.example.com 127.0.0.1 9000 http false false 8088' _ "$SCRIPT")"
+if [[ "$out" == *'listen 8088;'* && "$out" == *'listen [::]:8088;'* && "$out" == *'proxy_pass http://127.0.0.1:9000;'* ]]; then ok "proxy custom frontend port"; else not_ok "proxy custom frontend port"; fi
+
 listen_cfg="$(mktemp)"
 cat > "$listen_cfg" <<'EOF_LISTEN'
 server {
@@ -42,6 +45,26 @@ if [[ "$out" == *'listen 8080 default_server;'* && "$out" == *'listen [::]:8080 
 else
   not_ok "HTTP port rewrite preserves SSL"
 fi
+rm -f -- "$listen_cfg"
+
+listen_cfg="$(mktemp)"
+cat > "$listen_cfg" <<'EOF_SELECTIVE_LISTEN'
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    listen 127.0.0.1:80;
+    listen 443 ssl;
+    listen 9000;
+}
+EOF_SELECTIVE_LISTEN
+out="$(bash -c 'source "$1"; rewrite_specific_listen_port "$2" 80 8088' _ "$SCRIPT" "$listen_cfg")"
+if [[ "$out" == *'listen 8088 default_server;'* && "$out" == *'listen [::]:8088 default_server;'* && "$out" == *'listen 127.0.0.1:8088;'* && "$out" == *'listen 443 ssl;'* && "$out" == *'listen 9000;'* ]]; then
+  ok "selective global port rewrite"
+else
+  not_ok "selective global port rewrite"
+fi
+expect_success "listen port detector finds 80" bash -c 'source "$1"; config_listens_on_port "$2" 80' _ "$SCRIPT" "$listen_cfg"
+expect_failure "listen port detector ignores 8088 before rewrite" bash -c 'source "$1"; config_listens_on_port "$2" 8088' _ "$SCRIPT" "$listen_cfg"
 rm -f -- "$listen_cfg"
 
 choices_dir="$(mktemp -d)"
@@ -82,8 +105,22 @@ cat > "$fakebin/nginx" <<'EOF_NGINX'
 #!/usr/bin/env bash
 case "${1:-}" in
   -v) printf '%s\n' 'nginx version: nginx/1.26.0' >&2 ;;
-  -t) [[ "${FAKE_NGINX_INVALID:-0}" == 1 ]] && { printf '%s\n' 'configuration file test failed' >&2; exit 1; }; printf '%s\n' 'configuration file test is successful' >&2 ;;
-  -T) printf '%s\n' "include ${NGINX_MANAGER_ETC}/conf.d/*.conf;" ;;
+  -t)
+    if [[ "${FAKE_NGINX_INVALID:-0}" == 1 ]] || { [[ -n "${FAKE_NGINX_REJECT_PORT:-}" ]] && grep -RqsE "^[[:space:]]*listen[[:space:]].*(:|[[:space:]])${FAKE_NGINX_REJECT_PORT}([[:space:];]|$)" "${NGINX_MANAGER_ETC}/conf.d"; }; then
+      printf '%s\n' 'configuration file test failed' >&2
+      exit 1
+    fi
+    printf '%s\n' 'configuration file test is successful' >&2
+    ;;
+  -T)
+    printf '# configuration file %s/nginx.conf:\n' "${NGINX_MANAGER_ETC}"
+    cat "${NGINX_MANAGER_ETC}/nginx.conf"
+    for file in "${NGINX_MANAGER_ETC}"/conf.d/*.conf; do
+      [[ -f "$file" ]] || continue
+      printf '# configuration file %s:\n' "$file"
+      cat "$file"
+    done
+    ;;
 esac
 EOF_NGINX
 cat > "$fakebin/systemctl" <<'EOF_SYSTEMCTL'
@@ -117,6 +154,45 @@ unset FAKE_NGINX_INVALID
 expect_failure "silent add-site requires domain" bash "$SCRIPT" --non-interactive --add-site --root /var/www/example
 expect_failure "site port change requires explicit port" bash "$SCRIPT" --non-interactive --change-site-port --domain example.com --yes
 expect_failure "default port change requires explicit port" bash "$SCRIPT" --non-interactive --set-default-port --yes
+expect_failure "global port move requires explicit target port" bash "$SCRIPT" --non-interactive --move-listen-port --yes
+
+cat > "$fakeetc/conf.d/port-migration.conf" <<'EOF_PORT_MIGRATION'
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    listen 127.0.0.1:80;
+    listen 443 ssl;
+    listen 9000;
+    server_name migration.example;
+}
+EOF_PORT_MIGRATION
+expect_success "global port migration" bash -c '
+  source "$1"
+  require_root(){ :; }
+  ASSUME_YES=true
+  detect_nginx_layout
+  move_all_listen_ports 80 8088
+' _ "$SCRIPT"
+if grep -Eq '^[[:space:]]*listen[[:space:]]+(8088|\[::\]:8088|127\.0\.0\.1:8088)' "$fakeetc/conf.d/port-migration.conf"   && ! grep -Eq '^[[:space:]]*listen[[:space:]]+(80|[^[:space:];]*:80)([[:space:];]|$)' "$fakeetc/conf.d/port-migration.conf"   && grep -q 'listen 443 ssl;' "$fakeetc/conf.d/port-migration.conf"   && grep -q 'listen 9000;' "$fakeetc/conf.d/port-migration.conf"; then
+  ok "global migration removes port 80 and preserves other ports"
+else
+  not_ok "global migration removes port 80 and preserves other ports"
+fi
+
+export FAKE_NGINX_REJECT_PORT=8099
+expect_failure "global port migration rollback on invalid config" bash -c '
+  source "$1"
+  require_root(){ :; }
+  ASSUME_YES=true
+  detect_nginx_layout
+  move_all_listen_ports 8088 8099
+' _ "$SCRIPT"
+unset FAKE_NGINX_REJECT_PORT
+if grep -q 'listen 8088 default_server;' "$fakeetc/conf.d/port-migration.conf" && ! grep -q '8099' "$fakeetc/conf.d/port-migration.conf"; then
+  ok "global migration rollback restores all listeners"
+else
+  not_ok "global migration rollback restores all listeners"
+fi
 
 source_cfg="$(mktemp)"
 printf 'server { listen 80; server_name atomic.example; }\n' > "$source_cfg"
