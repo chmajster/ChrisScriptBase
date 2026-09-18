@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-09-18 — AWX Inventory Sync
+
+- Added `linux/awx-inventory-sync.sh` for autonomous SSH-based AWX inventory synchronization.
+- Detects AWX running in Kubernetes through kubectl, K3s or MicroK8s and imports inventory with `awx-manage`.
+- Bootstraps a dedicated ED25519 key from a one-time SSH password, does not persist the password, and installs a five-minute cron synchronization.
+
 ## 2026-09-18 — Nginx Manager 1.2.0
 
 - Added global migration of active Nginx `listen` directives between ports.
