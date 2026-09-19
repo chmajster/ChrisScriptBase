@@ -45,6 +45,20 @@ ui_select_site() {
     ui_menu "$title" "Wybierz stronę z listy:" "${options[@]}"
 }
 
+ui_select_site_file() {
+    local title="$1" file description
+    local -a options=()
+    while IFS=$'\t' read -r file description; do
+        [[ -n "$file" ]] || continue
+        options+=("$file" "$description")
+    done < <(site_file_choice_rows)
+    if ((${#options[@]} == 0)); then
+        ui_msg "$title" "Nie znaleziono plików konfiguracji w sites-available, sites-enabled ani conf.d."
+        return 1
+    fi
+    ui_menu "$title" "Wybierz plik konfiguracji:" "${options[@]}"
+}
+
 gui_status() {
     local action output
     while true; do
@@ -93,14 +107,20 @@ gui_sites() {
                 target="$(ui_input "Port strony" "Nowy port HTTP:" "8080" || true)"; [[ -n "$target" ]] || continue
                 ui_yesno "Zmiana portu" "Zmienić port HTTP strony $domain na $target? Port HTTPS pozostanie bez zmian." && ASSUME_YES=true change_site_port "$domain" "$target"
                 ;;
-            edit) domain="$(ui_select_site "Edycja" || true)"; [[ -n "$domain" ]] && { file="$(find_site_file "$domain" 2>/dev/null || true)"; [[ -n "$file" ]] && edit_config_file "$file" || ui_msg "Błąd" "Nie znaleziono strony."; } ;;
-            delete|enable|disable|show)
+            edit)
+                file="$(ui_select_site_file "Edycja konfiguracji" || true)"; [[ -n "$file" ]] || continue
+                edit_config_file "$file"
+                ;;
+            show)
+                file="$(ui_select_site_file "Podgląd konfiguracji" || true)"; [[ -n "$file" ]] || continue
+                ui_text "${file#"$NGINX_ETC/"}" "$(cat "$file")"
+                ;;
+            delete|enable|disable)
                 domain="$(ui_select_site "Virtual Host" || true)"; [[ -n "$domain" ]] || continue
                 case "$action" in
                     delete) ui_yesno "Delete site" "Usunąć konfigurację $domain? Document root pozostanie." && ASSUME_YES=true delete_site "$domain" ;;
                     enable) enable_site "$domain" ;;
                     disable) ui_yesno "Disable site" "Wyłączyć $domain?" && ASSUME_YES=true disable_site "$domain" ;;
-                    show) file="$(find_site_file "$domain" 2>/dev/null || true)"; [[ -n "$file" ]] && ui_text "$domain" "$(cat "$file")" || ui_msg "Błąd" "Nie znaleziono strony." ;;
                 esac
                 ;;
             test) ui_text "nginx -t" "$(test_nginx_config 2>&1 || true)" ;;

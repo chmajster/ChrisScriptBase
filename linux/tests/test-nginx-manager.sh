@@ -83,9 +83,11 @@ server {
 EOF_CHOICE_TWO
 out="$(bash -c '
   source "$1"
+  NGINX_ETC="$2"
   LAYOUT=rhel
   SITES_AVAILABLE="$2"
   SITES_ENABLED="$2"
+  CONF_D="$2"
   site_choice_rows
 ' _ "$SCRIPT" "$choices_dir")"
 if [[ "$out" == *$'example.com\texample.com www.example.com | ENABLED | port 8080 | example.conf'* && "$out" == *$'api.example.com\tapi.example.com | ENABLED | port 9000 | api.conf'* ]]; then
@@ -94,6 +96,70 @@ else
   not_ok "site selection rows"
 fi
 rm -rf -- "$choices_dir"
+
+discover_root="$(mktemp -d)"
+mkdir -p "$discover_root/sites-available" "$discover_root/sites-enabled" "$discover_root/conf.d"
+cat > "$discover_root/sites-available/app.conf" <<'EOF_DISCOVER_AVAILABLE'
+server {
+    listen 8080;
+    server_name app.example;
+}
+EOF_DISCOVER_AVAILABLE
+ln -s ../sites-available/app.conf "$discover_root/sites-enabled/app.conf"
+cat > "$discover_root/sites-enabled/enabled-only.conf" <<'EOF_DISCOVER_ENABLED'
+server {
+    listen 8081;
+    server_name enabled-only.example;
+}
+EOF_DISCOVER_ENABLED
+cat > "$discover_root/conf.d/default" <<'EOF_DISCOVER_DEFAULT'
+server {
+    listen 8088 default_server;
+    server_name _;
+}
+EOF_DISCOVER_DEFAULT
+
+out="$(bash -c '
+  source "$1"
+  NGINX_ETC="$2"
+  LAYOUT=debian
+  SITES_AVAILABLE="$2/sites-available"
+  SITES_ENABLED="$2/sites-enabled"
+  CONF_D="$2/conf.d"
+  site_file_choice_rows
+' _ "$SCRIPT" "$discover_root")"
+
+if [[ "$out" == *"$discover_root/sites-available/app.conf"$'\t'"app.example | ENABLED | port 8080 | sites-available/app.conf"* \
+   && "$out" == *"$discover_root/sites-enabled/enabled-only.conf"$'\t'"enabled-only.example | ENABLED | port 8081 | sites-enabled/enabled-only.conf"* \
+   && "$out" == *"$discover_root/conf.d/default"$'\t'"_ | CONFIG | port 8088 | conf.d/default"* ]]; then
+  ok "discover editable configs across nginx directories"
+else
+  not_ok "discover editable configs across nginx directories"
+fi
+
+app_count="$(printf '%s\n' "$out" | grep -Fc "$discover_root/sites-available/app.conf" || true)"
+if [[ "$app_count" == 1 ]]; then
+  ok "sites-enabled symlink does not duplicate site"
+else
+  not_ok "sites-enabled symlink does not duplicate site"
+fi
+
+found_default="$(bash -c '
+  source "$1"
+  NGINX_ETC="$2"
+  LAYOUT=debian
+  SITES_AVAILABLE="$2/sites-available"
+  SITES_ENABLED="$2/sites-enabled"
+  CONF_D="$2/conf.d"
+  find_site_file default
+' _ "$SCRIPT" "$discover_root")"
+if [[ "$found_default" == "$discover_root/conf.d/default" ]]; then
+  ok "conf.d/default can be selected as site"
+else
+  not_ok "conf.d/default can be selected as site"
+fi
+
+rm -rf -- "$discover_root"
 
 fakebin="$(mktemp -d)"
 fakeetc="$(mktemp -d)"

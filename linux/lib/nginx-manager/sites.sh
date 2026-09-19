@@ -12,9 +12,30 @@ site_enabled() {
 }
 
 site_files() {
-    local dir="$SITES_AVAILABLE"
-    [[ -d "$dir" ]] || return 0
-    find "$dir" -maxdepth 1 \( -type f -o -type l \) \( -name '*.conf' -o -name '*.conf.disabled' -o ! -name '*.*' \) -print 2>/dev/null | sort
+    local dir file resolved
+    local -a dirs=()
+    local -A seen=()
+
+    [[ -n "$SITES_AVAILABLE" ]] && dirs+=("$SITES_AVAILABLE")
+    [[ -n "$SITES_ENABLED" && "$SITES_ENABLED" != "$SITES_AVAILABLE" ]] && dirs+=("$SITES_ENABLED")
+    [[ -n "$CONF_D" && "$CONF_D" != "$SITES_AVAILABLE" && "$CONF_D" != "$SITES_ENABLED" ]] && dirs+=("$CONF_D")
+
+    for dir in "${dirs[@]}"; do
+        [[ -d "$dir" ]] || continue
+        while IFS= read -r file; do
+            [[ -n "$file" ]] || continue
+            resolved="$(readlink -f -- "$file" 2>/dev/null || true)"
+            [[ -n "$resolved" && -f "$resolved" ]] || continue
+            [[ "$resolved" == "$NGINX_ETC"/* ]] || continue
+            [[ -z "${seen[$resolved]+x}" ]] || continue
+            seen["$resolved"]=1
+            printf '%s\n' "$resolved"
+        done < <(
+            find "$dir" -maxdepth 1 \( -type f -o -type l \) \
+                ! -name '*.bak.*' ! -name '*~' ! -name '*.swp' ! -name '*.tmp' \
+                ! -name '.nginx-manager.*' -print 2>/dev/null
+        )
+    done | sort
 }
 
 list_sites() {
@@ -63,7 +84,7 @@ site_http_port() {
 }
 
 site_choice_rows() {
-    local file primary domains state port
+    local file primary domains state port source
     while IFS= read -r file; do
         [[ -n "$file" ]] || continue
         primary="$(site_primary_domain "$file" || true)"
@@ -72,20 +93,59 @@ site_choice_rows() {
         [[ -n "$domains" ]] || domains="$primary"
         if site_enabled "$file"; then state="ENABLED"; else state="DISABLED"; fi
         port="$(site_http_port "$file")"
-        printf '%s\t%s | %s | port %s | %s\n' "$primary" "$domains" "$state" "${port:--}" "$(basename "$file")"
+        source="${file#"$NGINX_ETC/"}"
+        printf '%s\t%s | %s | port %s | %s\n' "$primary" "$domains" "$state" "${port:--}" "$source"
+    done < <(site_files)
+}
+
+site_file_choice_rows() {
+    local file primary domains state port source
+    while IFS= read -r file; do
+        [[ -n "$file" ]] || continue
+        primary="$(site_primary_domain "$file" || true)"
+        [[ -n "$primary" ]] || primary="$(basename "$file")"
+        domains="$(sed -n -E 's/^[[:space:]]*server_name[[:space:]]+([^;]+);.*/\1/p' "$file" | head -n1)"
+        [[ -n "$domains" ]] || domains="$primary"
+        if site_enabled "$file"; then state="ENABLED"; else state="CONFIG"; fi
+        port="$(site_http_port "$file")"
+        source="${file#"$NGINX_ETC/"}"
+        printf '%s\t%s | %s | port %s | %s\n' "$file" "$domains" "$state" "${port:--}" "$source"
     done < <(site_files)
 }
 
 find_site_file() {
-    local domain="$1" file
-    validate_domain "$domain" || return 1
+    local selector="$1" file name candidate
+
+    [[ -n "$selector" && "$selector" != *$'\n'* && "$selector" != *$'\r'* ]] || return 1
+
+    if [[ "$selector" == /* ]]; then
+        validate_safe_path "$selector" || return 1
+        [[ "$selector" == "$NGINX_ETC"/* && -f "$selector" ]] || return 1
+        printf '%s' "$(readlink -f -- "$selector" 2>/dev/null || printf '%s' "$selector")"
+        return 0
+    fi
+
     while IFS= read -r file; do
-        if sed -n -E 's/^[[:space:]]*server_name[[:space:]]+([^;]+);.*/\1/p' "$file" | tr ' ' '\n' | grep -Fqx -- "$domain"; then
-            printf '%s' "$file"; return 0
+        [[ -n "$file" ]] || continue
+
+        if validate_domain "$selector" && sed -n -E 's/^[[:space:]]*server_name[[:space:]]+([^;]+);.*/\1/p' "$file" | tr ' ' '\n' | grep -Fqx -- "$selector"; then
+            printf '%s' "$file"
+            return 0
+        fi
+
+        name="$(basename "$file")"
+        candidate="${name%.disabled}"
+        candidate="${candidate%.conf}"
+        if [[ "$candidate" == "$selector" || "${file#"$NGINX_ETC/"}" == "$selector" ]]; then
+            printf '%s' "$file"
+            return 0
         fi
     done < <(site_files)
-    file="$(site_config_path "$domain")"
-    [[ -e "$file" ]] && printf '%s' "$file"
+
+    if validate_domain "$selector"; then
+        file="$(site_config_path "$selector")"
+        [[ -e "$file" ]] && printf '%s' "$file"
+    fi
 }
 
 find_default_site_file() {
@@ -104,7 +164,7 @@ find_default_site_file() {
             fi
         done < <(find "$SITES_ENABLED" -maxdepth 1 \( -type f -o -type l \) -print 2>/dev/null | sort)
     fi
-    for candidate in "$SITES_AVAILABLE/default" "$SITES_AVAILABLE/default.conf" "$CONF_D/default.conf"; do
+    for candidate in "$SITES_AVAILABLE/default" "$SITES_AVAILABLE/default.conf" "$CONF_D/default" "$CONF_D/default.conf"; do
         [[ -f "$candidate" ]] && { printf '%s' "$candidate"; return 0; }
     done
     while IFS= read -r file; do
