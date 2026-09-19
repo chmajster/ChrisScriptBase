@@ -89,7 +89,7 @@ site_choice_rows() {
         [[ -n "$file" ]] || continue
         primary="$(site_primary_domain "$file" || true)"
         [[ -n "$primary" ]] || continue
-        domains="$(sed -n -E 's/^[[:space:]]*server_name[[:space:]]+([^;]+);.*/\\1/p' "$file" | head -n1)"
+        domains="$(sed -n -E 's/^[[:space:]]*server_name[[:space:]]+([^;]+);.*/\1/p' "$file" | head -n1)"
         [[ -n "$domains" ]] || domains="$primary"
         if site_enabled "$file"; then state="ENABLED"; else state="DISABLED"; fi
         port="$(site_http_port "$file")"
@@ -104,7 +104,7 @@ site_file_choice_rows() {
         [[ -n "$file" ]] || continue
         primary="$(site_primary_domain "$file" || true)"
         [[ -n "$primary" ]] || primary="$(basename "$file")"
-        domains="$(sed -n -E 's/^[[:space:]]*server_name[[:space:]]+([^;]+);.*/\\1/p' "$file" | head -n1)"
+        domains="$(sed -n -E 's/^[[:space:]]*server_name[[:space:]]+([^;]+);.*/\1/p' "$file" | head -n1)"
         [[ -n "$domains" ]] || domains="$primary"
         if site_enabled "$file"; then state="ENABLED"; else state="CONFIG"; fi
         port="$(site_http_port "$file")"
@@ -128,7 +128,7 @@ find_site_file() {
     while IFS= read -r file; do
         [[ -n "$file" ]] || continue
 
-        if validate_domain "$selector" && sed -n -E 's/^[[:space:]]*server_name[[:space:]]+([^;]+);.*/\\1/p' "$file" | tr ' ' '\n' | grep -Fqx -- "$selector"; then
+        if validate_domain "$selector" && sed -n -E 's/^[[:space:]]*server_name[[:space:]]+([^;]+);.*/\1/p' "$file" | tr ' ' '\n' | grep -Fqx -- "$selector"; then
             printf '%s' "$file"
             return 0
         fi
