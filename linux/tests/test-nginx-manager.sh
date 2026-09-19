@@ -83,9 +83,11 @@ server {
 EOF_CHOICE_TWO
 out="$(bash -c '
   source "$1"
+  NGINX_ETC="$2"
   LAYOUT=rhel
   SITES_AVAILABLE="$2"
   SITES_ENABLED="$2"
+  CONF_D="$2"
   site_choice_rows
 ' _ "$SCRIPT" "$choices_dir")"
 if [[ "$out" == *$'example.com\texample.com www.example.com | ENABLED | port 8080 | example.conf'* && "$out" == *$'api.example.com\tapi.example.com | ENABLED | port 9000 | api.conf'* ]]; then
