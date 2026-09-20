@@ -17,7 +17,7 @@ param(
 
     [Parameter()]
     [ValidateNotNullOrEmpty()]
-    [string]$WindowsDocumentsPath = "$env:SystemDrive\Users\$env:USERNAME\Documents",
+    [string]$WindowsDocumentsPath = "C:\Users\$env:USERNAME\Documents",
 
     [Parameter()]
     [switch]$WebDownload
@@ -390,7 +390,7 @@ echo "HOME=$home_dir"
         Write-Status WARN "Windows zglosil, ze czesc zmian systemowych wymaga restartu."
     }
 
-    Write-Status WARN "Domyslne haslo '1' jest bardzo slabe. Zmien je poleceniem 'passwd' po pierwszym uruchomieniu, jesli srodowisko nie jest wyłącznie testowe."
+    Write-Status WARN "Domyslne haslo '1' jest bardzo slabe. Zmien je poleceniem 'passwd' po pierwszym uruchomieniu, jesli srodowisko nie jest wylacznie testowe."
 }
 catch {
     Write-Host ""
