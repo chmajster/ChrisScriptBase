@@ -343,10 +343,9 @@ echo "USER=$user"
 echo "HOME=$home_dir"
 '@
 
-    $linuxSetup = $linuxSetupTemplate.
-        Replace("__USER__", $quotedUser).
-        Replace("__PASSWORD__", $quotedPassword).
-        Replace("__HOME__", $quotedHome)
+    $linuxSetup = $linuxSetupTemplate.Replace("__USER__", $quotedUser)
+    $linuxSetup = $linuxSetup.Replace("__PASSWORD__", $quotedPassword)
+    $linuxSetup = $linuxSetup.Replace("__HOME__", $quotedHome)
 
     Invoke-NativeCommand -FilePath "wsl.exe" -ArgumentList @(
         "--distribution", $Distribution,
