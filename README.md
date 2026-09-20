@@ -106,6 +106,14 @@ powershell.exe -ExecutionPolicy Bypass -File .\windows\install-wsl.ps1
 
 By default it installs Ubuntu, creates the Linux account `Chris` with password `1`, sets it as the default WSL user and uses `C:\Users\<WindowsUser>\Documents` as its home directory through `/mnt/c/Users/<WindowsUser>/Documents`. If Windows reports that a reboot is required before the distribution can finish installing, reboot and run the same script again.
 
+Windows WSL installer should be run from an elevated PowerShell session:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\windows\install-wsl.ps1
+```
+
+By default it installs Ubuntu, creates the Linux account `Chris` with password `1`, sets it as the default WSL user and uses `C:\Users\<WindowsUser>\Documents` as its home directory through `/mnt/c/Users/<WindowsUser>/Documents`. If Windows reports that a reboot is required before the distribution can finish installing, reboot and run the same script again.
+
 The ServiceNow dashboard script is intended to run inside an authenticated ServiceNow browser session as a browser snippet, userscript, or bookmarklet.
 
 ## Notes
@@ -211,6 +219,14 @@ sudo bash linux/os_patching.sh
 sudo bash linux/konfiguracja_samba_www_ubuntu.sh
 sudo bash linux/web-hosts-file-manager.sh
 ```
+
+Instalator WSL dla Windows uruchamiaj w PowerShell jako Administrator:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\windows\install-wsl.ps1
+```
+
+Domyslnie instaluje Ubuntu, tworzy konto Linux `Chris` z haslem `1`, ustawia je jako domyslnego uzytkownika WSL i ustawia HOME na `C:\Users\<uzytkownik Windows>\Documents` przez `/mnt/c/Users/<uzytkownik Windows>/Documents`. Jesli Windows wymaga restartu przed dokonczeniem instalacji dystrybucji, po restarcie uruchom ten sam skrypt ponownie.
 
 Instalator WSL dla Windows uruchamiaj w PowerShell jako Administrator:
 
