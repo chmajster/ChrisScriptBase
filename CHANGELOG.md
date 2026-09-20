@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-09-20 — Windows WSL Installer
+
+- Added `windows/install-wsl.ps1` for WSL 2 installation and bootstrap on Windows 10/11.
+- Enables Windows Subsystem for Linux and Virtual Machine Platform, installs Ubuntu and selects WSL 2.
+- Creates or updates the Linux account `Chris` with default password `1`, grants the standard administrative group and makes it the default WSL user.
+- Maps the Linux home directory to `C:\Users\<WindowsUser>\Documents` through `/mnt/c/Users/<WindowsUser>/Documents`.
+- Verifies the resulting default user and `$HOME` after restarting the WSL distribution.
+
 ## 2026-09-18 — AWX Inventory Sync
 
 - Added `linux/awx-inventory-sync.sh` for autonomous SSH-based AWX inventory synchronization.
