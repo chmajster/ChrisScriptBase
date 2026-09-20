@@ -252,41 +252,41 @@ try {
     $quotedPassword = ConvertTo-BashSingleQuoted -Value $LinuxPassword
     $quotedHome = ConvertTo-BashSingleQuoted -Value $wslHomePath
 
-    $linuxSetup = @"
+    $linuxSetupTemplate = @'
 set -e
 
-user=$quotedUser
-password=$quotedPassword
-home_dir=$quotedHome
+user=__USER__
+password=__PASSWORD__
+home_dir=__HOME__
 
-if [ ! -d "\$home_dir" ]; then
-    echo "Katalog HOME nie jest widoczny w WSL: \$home_dir" >&2
+if [ ! -d "$home_dir" ]; then
+    echo "Katalog HOME nie jest widoczny w WSL: $home_dir" >&2
     exit 20
 fi
 
-if id -u "\$user" >/dev/null 2>&1; then
-    usermod -d "\$home_dir" -s /bin/bash "\$user"
+if id -u "$user" >/dev/null 2>&1; then
+    usermod -d "$home_dir" -s /bin/bash "$user"
 else
     if useradd --help 2>&1 | grep -q -- '--badname'; then
-        useradd --badname -M -d "\$home_dir" -s /bin/bash "\$user"
+        useradd --badname -M -d "$home_dir" -s /bin/bash "$user"
     else
-        useradd -M -d "\$home_dir" -s /bin/bash "\$user"
+        useradd -M -d "$home_dir" -s /bin/bash "$user"
     fi
 fi
 
-printf '%s:%s\n' "\$user" "\$password" | chpasswd
+printf '%s:%s\n' "$user" "$password" | chpasswd
 
 if getent group sudo >/dev/null 2>&1; then
-    usermod -aG sudo "\$user"
+    usermod -aG sudo "$user"
 elif getent group wheel >/dev/null 2>&1; then
-    usermod -aG wheel "\$user"
+    usermod -aG wheel "$user"
 fi
 
 conf=/etc/wsl.conf
-tmp=\$(mktemp)
+tmp=$(mktemp)
 
-if [ -f "\$conf" ]; then
-    awk -v user="\$user" '
+if [ -f "$conf" ]; then
+    awk -v user="$user" '
         BEGIN {
             in_user = 0
             saw_user = 0
@@ -312,7 +312,7 @@ if [ -f "\$conf" ]; then
             next
         }
         {
-            if (in_user && \$0 ~ /^[[:space:]]*default[[:space:]]*=/) {
+            if (in_user && $0 ~ /^[[:space:]]*default[[:space:]]*=/) {
                 if (!wrote_default) {
                     print "default=" user
                     wrote_default = 1
@@ -331,17 +331,22 @@ if [ -f "\$conf" ]; then
                 print "default=" user
             }
         }
-    ' "\$conf" > "\$tmp"
+    ' "$conf" > "$tmp"
 else
-    printf '[user]\ndefault=%s\n' "\$user" > "\$tmp"
+    printf '[user]\ndefault=%s\n' "$user" > "$tmp"
 fi
 
-cat "\$tmp" > "\$conf"
-rm -f "\$tmp"
+cat "$tmp" > "$conf"
+rm -f "$tmp"
 
-echo "USER=\$user"
-echo "HOME=\$home_dir"
-"@
+echo "USER=$user"
+echo "HOME=$home_dir"
+'@
+
+    $linuxSetup = $linuxSetupTemplate.
+        Replace("__USER__", $quotedUser).
+        Replace("__PASSWORD__", $quotedPassword).
+        Replace("__HOME__", $quotedHome)
 
     Invoke-NativeCommand -FilePath "wsl.exe" -ArgumentList @(
         "--distribution", $Distribution,
