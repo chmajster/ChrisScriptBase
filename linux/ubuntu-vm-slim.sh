@@ -17,7 +17,7 @@ set -Eeuo pipefail
 # ============================================================
 
 SCRIPT_NAME="ubuntu-vm-slim"
-VERSION="1.0.0"
+VERSION="1.0.1"
 
 APPLY=false
 AGGRESSIVE=false
@@ -265,6 +265,11 @@ stage 3 "Ochrona krytycznych komponentów VM"
 
 RUNNING_KERNEL="$(uname -r)"
 
+REQUIRED_PACKAGES=(
+    ssh
+    curl
+)
+
 PROTECTED_PACKAGES=(
     apt
     bash
@@ -326,6 +331,24 @@ fi
 
 if is_installed cloud-init; then
     ok "cloud-init pozostanie zainstalowany"
+fi
+
+MISSING_REQUIRED=()
+
+for package in "${REQUIRED_PACKAGES[@]}"; do
+    if ! is_installed "$package"; then
+        MISSING_REQUIRED+=("$package")
+    fi
+done
+
+if [[ ${#MISSING_REQUIRED[@]} -eq 0 ]]; then
+    ok "Wymagane pakiety są zainstalowane: ssh, curl"
+else
+    warn "Brak wymaganych pakietów: ${MISSING_REQUIRED[*]}"
+
+    if [[ "$APPLY" != true ]]; then
+        info "Tryb --status: pakiety zostaną zainstalowane po uruchomieniu z --apply."
+    fi
 fi
 
 stage 4 "Wyszukiwanie zbędnych pakietów"
@@ -394,6 +417,23 @@ else
     cp -a /etc/apt/sources.list.d "${BACKUP_DIR}/" 2>/dev/null || true
 
     ok "Backup list pakietów: ${BACKUP_DIR}"
+
+    if [[ ${#MISSING_REQUIRED[@]} -gt 0 ]]; then
+        info "Aktualizuję indeks APT przed instalacją wymaganych pakietów..."
+        DEBIAN_FRONTEND=noninteractive apt-get update
+
+        info "Instaluję wymagane pakiety: ${MISSING_REQUIRED[*]}"
+        DEBIAN_FRONTEND=noninteractive apt-get install -y "${MISSING_REQUIRED[@]}"
+
+        for package in "${MISSING_REQUIRED[@]}"; do
+            if is_installed "$package"; then
+                ok "Zainstalowano wymagany pakiet: $package"
+            else
+                fail "Nie udało się zainstalować wymaganego pakietu: $package"
+                exit 1
+            fi
+        done
+    fi
 
     echo
     warn "Pakiety aplikacyjne, bazy danych, nginx, Docker itd. nie są automatycznie usuwane."
