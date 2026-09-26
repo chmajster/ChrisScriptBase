@@ -278,6 +278,8 @@ PROTECTED_PACKAGES=(
     util-linux
     openssh-server
     openssh-client
+    ssh
+    curl
     iproute2
     iputils-ping
     netplan.io
