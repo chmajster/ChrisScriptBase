@@ -17,7 +17,7 @@ set -Eeuo pipefail
 # ============================================================
 
 SCRIPT_NAME="ubuntu-vm-slim"
-VERSION="1.1.0"
+VERSION="1.1.1"
 
 APPLY=false
 AGGRESSIVE=false
@@ -268,6 +268,7 @@ stage 3 "Ochrona krytycznych komponentów VM"
 RUNNING_KERNEL="$(uname -r)"
 
 REQUIRED_PACKAGES=(
+    openssh-server
     ssh
     curl
     nano
@@ -697,11 +698,16 @@ df -h /
 echo
 
 if is_installed openssh-server; then
+    ok "openssh-server jest zainstalowany"
+
     if systemctl is-active --quiet ssh 2>/dev/null; then
         ok "SSH działa"
     else
         warn "openssh-server jest zainstalowany, ale usługa SSH nie działa."
     fi
+else
+    fail "openssh-server nie jest zainstalowany po zakończeniu operacji."
+    exit 1
 fi
 
 if is_installed qemu-guest-agent; then
