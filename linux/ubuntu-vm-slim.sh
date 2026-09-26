@@ -17,7 +17,7 @@ set -Eeuo pipefail
 # ============================================================
 
 SCRIPT_NAME="ubuntu-vm-slim"
-VERSION="1.0.1"
+VERSION="1.1.0"
 
 APPLY=false
 AGGRESSIVE=false
@@ -72,7 +72,9 @@ Użycie:
 
   sudo $0 --apply --aggressive
       Dodatkowo usuwa typowe pakiety desktopowe i peryferyjne,
-      np. GNOME, X11, LibreOffice, CUPS, Bluetooth.
+      m.in. GNOME, X11/Xorg, drukowanie, Bluetooth, audio,
+      skanery, modem/mobile broadband, firmware sprzętowy VM
+      oraz opcjonalne narzędzia developerskie/debug.
 
 Opcje:
 
@@ -268,6 +270,7 @@ RUNNING_KERNEL="$(uname -r)"
 REQUIRED_PACKAGES=(
     ssh
     curl
+    nano
 )
 
 PROTECTED_PACKAGES=(
@@ -285,6 +288,7 @@ PROTECTED_PACKAGES=(
     openssh-client
     ssh
     curl
+    nano
     iproute2
     iputils-ping
     netplan.io
@@ -333,6 +337,10 @@ if is_installed cloud-init; then
     ok "cloud-init pozostanie zainstalowany"
 fi
 
+if is_installed nano; then
+    ok "nano pozostanie zainstalowane"
+fi
+
 MISSING_REQUIRED=()
 
 for package in "${REQUIRED_PACKAGES[@]}"; do
@@ -342,7 +350,7 @@ for package in "${REQUIRED_PACKAGES[@]}"; do
 done
 
 if [[ ${#MISSING_REQUIRED[@]} -eq 0 ]]; then
-    ok "Wymagane pakiety są zainstalowane: ssh, curl"
+    ok "Wymagane pakiety są zainstalowane: ${REQUIRED_PACKAGES[*]}"
 else
     warn "Brak wymaganych pakietów: ${MISSING_REQUIRED[*]}"
 
@@ -370,7 +378,139 @@ else
     info "Do autoremove: ${#AUTOREMOVE_PACKAGES[@]} pakietów"
 fi
 
-AGGRESSIVE_REGEX='^(ubuntu-desktop|ubuntu-desktop-minimal|gnome-shell|gnome-session|gdm3|xorg|xserver-xorg.*|libreoffice.*|thunderbird|firefox|cups|cups-browsed|cups-daemon|bluez|modemmanager|brltty|speech-dispatcher.*|avahi-daemon|whoopsie|popularity-contest|fwupd)$'
+AGGRESSIVE_PATTERNS=(
+    # Ubuntu Desktop / GNOME / aplikacje GUI
+    'ubuntu-desktop'
+    'ubuntu-desktop-minimal'
+    'ubuntu-session'
+    'ubuntu-settings'
+    'ubuntu-wallpapers.*'
+    'gdm3'
+    'gjs'
+    'gnome-.*'
+    'baobab'
+    'eog'
+    'evince'
+    'firefox'
+    'nautilus.*'
+    'seahorse'
+    'yelp.*'
+    'zenity.*'
+    'tracker.*'
+    'libreoffice.*'
+    'thunderbird'
+
+    # X11 / Xorg / Wayland desktop
+    'xorg'
+    'xinit'
+    'xinput'
+    'x11-apps'
+    'x11-common'
+    'x11-session-utils'
+    'x11-utils'
+    'x11-xkb-utils'
+    'x11-xserver-utils'
+    'xauth'
+    'xbitmaps'
+    'xbrlapi'
+    'xcursor-themes'
+    'xcvt'
+    'xfonts-.*'
+    'xserver-.*'
+    'xwayland'
+
+    # Drukowanie
+    'cups.*'
+    'foomatic-db-compressed-ppds'
+    'hplip.*'
+    'ipp-usb'
+    'openprinting-ppds'
+    'printer-driver-.*'
+    'system-config-printer-.*'
+
+    # Bluetooth
+    'bluez.*'
+    'gnome-bluetooth-sendto'
+
+    # Audio desktop
+    'alsa-base'
+    'alsa-utils'
+    'pipewire'
+    'pipewire-.*'
+    'wireplumber'
+    'rtkit'
+    'sound-icons'
+    'sound-theme-freedesktop'
+    'gstreamer1\.0-alsa'
+    'gstreamer1\.0-pipewire'
+
+    # Accessibility / screen reader / braille
+    'brltty'
+    'speech-dispatcher.*'
+    'espeak-ng-data'
+    'liblouis.*'
+    'liblouisutdml.*'
+    'orca'
+
+    # Modem / mobile broadband
+    'modemmanager'
+    'mobile-broadband-provider-info'
+    'usb-modeswitch.*'
+    'libmbim-.*'
+    'libqmi-.*'
+    'libqrtr-glib0'
+
+    # Skanery
+    'sane-.*'
+    'libsane.*'
+
+    # GUI aktualizacji
+    'update-manager'
+    'update-notifier'
+    'software-properties-gtk'
+    'ubuntu-release-upgrader-gtk'
+    'aptdaemon.*'
+
+    # Funkcje laptop/desktop niepotrzebne na typowej VM
+    'fprintd'
+    'bolt'
+    'iio-sensor-proxy'
+    'power-profiles-daemon'
+    'switcheroo-control'
+    'thermald'
+    'gamemode.*'
+
+    # Dokumentacja developerska / desktopowa
+    'ubuntu-docs'
+    'gnome-user-docs.*'
+    'xorg-docs-core'
+    'manpages-dev'
+
+    # Opcjonalne narzędzia debug/development
+    'gdb'
+    'strace'
+    'bpfcc-tools'
+    'bpftrace'
+    'trace-cmd'
+    'linux-tools-.*'
+    'libc6-dbg'
+    'libc-devtools'
+    'libc6-dev'
+    'cpp'
+    'cpp-[0-9].*'
+    'cpp-x86-64-linux-gnu'
+
+    # Firmware fizycznego sprzętu zwykle zbędny w VM
+    'linux-firmware-(amd-graphics|amd-misc|broadcom-wireless|intel-graphics|intel-misc|intel-wireless|marvell-prestera|marvell-wireless|mediatek|mellanox-spectrum|netronome|nvidia-graphics|qlogic|qualcomm-graphics|qualcomm-misc|qualcomm-wireless|realtek)'
+
+    # Pozostałe typowe usługi desktopowe
+    'avahi-daemon'
+    'whoopsie'
+    'popularity-contest'
+    'fwupd'
+)
+
+AGGRESSIVE_REGEX="^($(IFS='|'; echo "${AGGRESSIVE_PATTERNS[*]}"))$"
 
 mapfile -t AGGRESSIVE_PACKAGES < <(
     dpkg-query -W -f='${binary:Package}\n' 2>/dev/null \
@@ -378,6 +518,34 @@ mapfile -t AGGRESSIVE_PACKAGES < <(
         | grep -E "$AGGRESSIVE_REGEX" \
         | sort -u || true
 )
+
+# Symulacja APT: profil aggressive nie może usunąć pakietów chronionych
+# jako efekt uboczny zależności.
+PROTECTED_REMOVALS=()
+
+if [[ "$AGGRESSIVE" == true && ${#AGGRESSIVE_PACKAGES[@]} -gt 0 ]]; then
+    mapfile -t AGGRESSIVE_REMOVAL_PLAN < <(
+        apt-get -s purge "${AGGRESSIVE_PACKAGES[@]}" 2>/dev/null \
+            | awk '/^Remv / {print $2}' \
+            | sed 's/:.*$//' \
+            | sort -u
+    )
+
+    for package in "${INSTALLED_PROTECTED[@]}"; do
+        package="${package%%:*}"
+
+        if printf '%s\n' "${AGGRESSIVE_REMOVAL_PLAN[@]}" \
+            | grep -Fxq "$package"; then
+            PROTECTED_REMOVALS+=("$package")
+        fi
+    done
+
+    if [[ ${#PROTECTED_REMOVALS[@]} -gt 0 ]]; then
+        fail "APT chciałby usunąć chronione pakiety: ${PROTECTED_REMOVALS[*]}"
+        fail "Przerywam profil aggressive zamiast ryzykować uszkodzenie VM."
+        exit 1
+    fi
+fi
 
 if [[ "$AGGRESSIVE" == true ]]; then
     echo
@@ -542,6 +710,13 @@ if is_installed qemu-guest-agent; then
     else
         warn "QEMU Guest Agent jest zainstalowany, ale obecnie nie działa."
     fi
+fi
+
+if is_installed nano; then
+    ok "nano jest zainstalowane"
+else
+    fail "nano nie jest zainstalowane po zakończeniu operacji."
+    exit 1
 fi
 
 if ip route show default 2>/dev/null | grep -q '^default'; then
