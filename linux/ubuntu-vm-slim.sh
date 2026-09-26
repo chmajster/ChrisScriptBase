@@ -17,7 +17,7 @@ set -Eeuo pipefail
 # ============================================================
 
 SCRIPT_NAME="ubuntu-vm-slim"
-VERSION="1.1.1"
+VERSION="1.1.2"
 
 APPLY=false
 AGGRESSIVE=false
@@ -604,6 +604,24 @@ else
         done
     fi
 
+    if is_installed openssh-server; then
+        info "Włączam i uruchamiam usługę SSH..."
+        systemctl enable ssh >/dev/null 2>&1 || {
+            fail "Nie udało się włączyć ssh.service."
+            exit 1
+        }
+
+        systemctl restart ssh >/dev/null 2>&1 || {
+            fail "Nie udało się uruchomić ssh.service."
+            exit 1
+        }
+
+        ok "ssh.service jest włączona i uruchomiona"
+    else
+        fail "Brak openssh-server po etapie instalacji wymaganych pakietów."
+        exit 1
+    fi
+
     echo
     warn "Pakiety aplikacyjne, bazy danych, nginx, Docker itd. nie są automatycznie usuwane."
     warn "Profil aggressive usuwa GUI i typowe komponenty desktop/peripherals."
@@ -700,10 +718,18 @@ echo
 if is_installed openssh-server; then
     ok "openssh-server jest zainstalowany"
 
+    if systemctl is-enabled --quiet ssh 2>/dev/null; then
+        ok "SSH jest włączony przy starcie"
+    else
+        fail "ssh.service nie jest włączona przy starcie."
+        exit 1
+    fi
+
     if systemctl is-active --quiet ssh 2>/dev/null; then
         ok "SSH działa"
     else
-        warn "openssh-server jest zainstalowany, ale usługa SSH nie działa."
+        fail "ssh.service nie działa."
+        exit 1
     fi
 else
     fail "openssh-server nie jest zainstalowany po zakończeniu operacji."
