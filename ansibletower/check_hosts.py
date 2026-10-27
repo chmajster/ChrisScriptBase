@@ -2,14 +2,14 @@
 """Check whether hosts exist in Ansible Tower (Python 3.9+, no dependencies)."""
 
 import argparse
-import getpass
 import json
-import os
 import ssl
 import sys
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import urlencode
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
+
+from tower_auth import CredentialsError, load_credentials
 
 
 # Wklej tutaj hosty rozdzielone spacjami, tabulatorami lub nowymi liniami.
@@ -75,7 +75,7 @@ def positive_int(value):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hosts", default=HOSTS, help='Host list, e.g. "CXCX CXC cxzczxc "')
-    parser.add_argument("--url", default=os.environ.get("TOWER_URL"), help="Tower URL or TOWER_URL")
+    parser.add_argument("--url", help="Tower URL (overrides shared configuration)")
     parser.add_argument("--inventory", type=positive_int, help="Optional inventory ID")
     parser.add_argument("--timeout", type=positive_int, default=15, help="Request timeout in seconds (15)")
     parser.add_argument("--ca-cert", help="PEM file containing a trusted corporate CA certificate")
@@ -83,21 +83,18 @@ def main(argv=None):
     hosts = parse_hosts(args.hosts)
     if not hosts:
         parser.error("Host list is empty.")
-    url = urlsplit(args.url or "")
-    if (url.scheme != "https" or not url.hostname or url.username is not None
-            or url.password is not None or url.query or url.fragment):
-        parser.error("Set TOWER_URL or --url, e.g. https://tower.example.com (without credentials).")
-
     try:
-        token = (os.environ.get("TOWER_TOKEN") or getpass.getpass("Tower API token: ")).strip()
-        if not token:
-            parser.error("API token is empty.")
+        try:
+            credentials = load_credentials(args.url)
+        except CredentialsError as exc:
+            parser.error(str(exc))
         context = ssl.create_default_context(cafile=args.ca_cert)
         opener = build_opener(HTTPSHandler(context=context), NoRedirect())
         missing = 0
         for host in hosts:
             try:
-                exists = host_exists(opener, args.url, token, host, args.inventory, args.timeout)
+                exists = host_exists(opener, credentials.url, credentials.token, host,
+                                     args.inventory, args.timeout)
             except TowerError as exc:
                 print(f"ERROR [{host}]: {exc} Check aborted.", file=sys.stderr)
                 return 2
