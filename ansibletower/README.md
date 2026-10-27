@@ -32,17 +32,18 @@ python check_hosts.py --url https://tower.example.com --ca-cert C:\certyfikaty\f
 
 Domyslnie przeszukiwane sa wszystkie hosty widoczne dla tokenu.
 `--inventory` ogranicza wyszukiwanie do podanego identyfikatora inventory.
-`BRAK` oznacza brak hosta w wynikach widocznych dla tokenu w wybranym zakresie.
+Wszystkie komunikaty skryptu sa w jezyku angielskim.
+`MISSING` oznacza brak hosta w wynikach widocznych dla tokenu w wybranym zakresie.
 Weryfikacja TLS jest wlaczona; `--ca-cert` pozwala zaufac firmowemu CA.
 Limit czasu pojedynczego zapytania wynosi 15 sekund, mozna go zmienic przez `--timeout`.
 
 Przykladowy wynik:
 
 ```text
-ISTNIEJE: CXCX
-BRAK: CXC
-ISTNIEJE: cxzczxc
-Podsumowanie: sprawdzono 3, istnieje 2, brak 1.
+EXISTS: CXCX
+MISSING: CXC
+EXISTS: cxzczxc
+Summary: checked 3, exists 2, missing 1.
 ```
 
 Kody zakonczenia: `0` - wszystkie hosty istnieja, `1` - co najmniej jednego brakuje,
