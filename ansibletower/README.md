@@ -1,4 +1,4 @@
-# Sprawdzanie hostow w Ansible Tower
+# Skrypty do hostow w Ansible Tower
 
 Skrypt `check_hosts.py` wymaga Pythona 3.9 lub nowszego. Nie wymaga instalowania bibliotek.
 W pliku zmien liste na swoje hosty:
@@ -87,7 +87,54 @@ Uzywa filtra `name__iexact` oraz pola `count`, wiec wystarczy jedna strona na ho
 Dokumentacja: [filtrowanie API](https://docs.ansible.com/ansible-tower/2.4.3/html/towerapi/intro.html#filtering),
 [uwierzytelnianie tokenem](https://origin-www.ansible.com/blog/summary-of-authentication-methods-in-red-hat-ansible-tower/).
 
-Testy lokalne (bez dostepu do Tower):
+## Dodawanie hostow
+
+`add_hosts.py` korzysta z tego samego `tower_auth.py` i `tower_credentials.json`.
+Token musi miec uprawnienia do odczytu oraz tworzenia hostow w docelowym inventory.
+Podaj identyfikator istniejacego inventory oraz hosty rozdzielone bialymi znakami:
+
+```powershell
+python add_hosts.py --inventory 42 --hosts "host01 host02 host03"
+```
+
+Mozesz tez wkleic liste do stalej `HOSTS` w pliku `add_hosts.py`, a potem uruchomic:
+
+```powershell
+python add_hosts.py --inventory 42
+```
+
+Lista w nowym skrypcie jest domyslnie pusta; przed uruchomieniem trzeba podac hosty.
+Kazdy host jest sprawdzany w docelowym inventory bez rozrozniania wielkosci liter.
+Powtorzenia na liscie oraz hosty juz obecne sa pomijane. Istniejace hosty nie sa
+modyfikowane. Nowe hosty sa wlaczone (`enabled: true`); skrypt nie dodaje ich do grup.
+Host w innym inventory nie blokuje utworzenia hosta w docelowym inventory.
+
+Podglad bez zapisu (wykonuje zapytania odczytujace do Tower):
+
+```powershell
+python add_hosts.py --inventory 42 --hosts "host01 host02" --dry-run
+```
+
+Opcje `--url`, `--ca-cert` i `--timeout` dzialaja tak samo jak w `check_hosts.py`.
+Wynik jest po angielsku, np.:
+
+```text
+SKIPPED (already exists): host01
+ADDED: host02 (ID 123)
+Summary: processed 2, added 1, skipped 1.
+```
+
+Kod zakonczenia `0` oznacza powodzenie (takze gdy wszystkie hosty juz istnieja),
+`2` oznacza blad lub przerwanie. Blad przerywa dalsze dodawanie; wczesniej utworzone
+hosty pozostaja w Tower. Po zerwaniu polaczenia podczas POST wynik moze byc nieznany:
+sprawdz inventory przed ponownym uruchomieniem. Skrypt nie ponawia automatycznie POST.
+
+Tworzenie hosta korzysta z `POST /api/v2/hosts/`, a sprawdzanie z filtrowanego GET.
+Dokumentacja: [referencja API AWX/Tower](https://docs.ansible.com/projects/awx/en/latest/rest_api/api_ref.html).
+
+## Testy
+
+Testy lokalne wszystkich skryptow (bez dostepu do Tower):
 
 ```powershell
 python -m unittest discover -s tests -v
