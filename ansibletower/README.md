@@ -11,16 +11,48 @@ Spacje, tabulatory i nowe linie rozdzielaja hosty. Powtorzenia sa pomijane.
 Skrypt porownuje pelne nazwy hostow bez rozrozniania wielkosci liter.
 Nie porownuje adresow `ansible_host` ze zmiennych ani nazw skroconych z FQDN.
 
-Uruchomienie w PowerShell, z katalogu `ansibletower`:
+Wspolne dane uwierzytelniania sa w lokalnym pliku `tower_credentials.json`,
+obok modulu `tower_auth.py`. Uzupelnij go adresem Tower oraz tokenem API:
+
+```json
+{
+  "url": "https://tower.example.com",
+  "token": "YOUR_API_TOKEN"
+}
+```
+
+Plik `tower_credentials.json` jest ignorowany przez Git. W repozytorium jest
+szablon `tower_credentials.example.json`; po sklonowaniu utworz lokalna kopie:
 
 ```powershell
-$env:TOWER_URL = "https://tower.example.com"
+Copy-Item tower_credentials.example.json tower_credentials.json
+```
+
+Po uzupelnieniu pliku uruchom z katalogu `ansibletower`:
+
+```powershell
 python check_hosts.py
 ```
 
-Skrypt poprosi o token API (wpisywane znaki sa ukryte). Mozesz tez ustawic
-zmienna srodowiskowa `TOWER_TOKEN`, np. na potrzeby automatyzacji.
+Jesli nie wpiszesz tokenu w pliku, skrypt poprosi o niego (znaki sa ukryte).
+Zmienne srodowiskowe `TOWER_URL` i `TOWER_TOKEN` maja pierwszenstwo przed plikiem.
+Opcja `--url` ma pierwszenstwo przed zmienna `TOWER_URL`.
 Token musi miec uprawnienia do odczytu odpowiednich inventory i hostow.
+
+Inne skrypty Pythona w tym katalogu moga uzywac tego samego modulu:
+
+```python
+from tower_auth import load_credentials
+
+credentials = load_credentials()
+tower_url = credentials.url
+headers = {"Authorization": "Bearer " + credentials.token}
+```
+
+Import nie wykonuje logowania ani zapytan sieciowych. Plik jest odczytywany
+wzgledem polozenia `tower_auth.py`, niezaleznie od katalogu uruchomienia.
+`load_credentials(prompt=False)` wylacza pytanie o token w automatyzacji.
+Token nie jest pokazywany w reprezentacji obiektu `credentials`.
 
 Liste mozna podac bez edytowania pliku; adres mozna podac przez `--url`:
 
