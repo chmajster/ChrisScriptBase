@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sprawdz obecnosc hostow w Ansible Tower (Python 3.9+, bez zaleznosci)."""
+"""Check whether hosts exist in Ansible Tower (Python 3.9+, no dependencies)."""
 
 import argparse
 import getpass
@@ -48,50 +48,50 @@ def host_exists(opener, tower_url, token, host, inventory=None, timeout=15):
             data = json.load(response)
     except HTTPError as exc:
         messages = {
-            401: "Nieprawidlowy lub wygasly token (HTTP 401).",
-            403: "Brak uprawnien do odczytu hostow (HTTP 403).",
+            401: "Invalid or expired token (HTTP 401).",
+            403: "Permission denied when reading hosts (HTTP 403).",
         }
         raise TowerError(messages.get(
-            exc.code, f"API zwrocilo HTTP {exc.code}; sprawdz adres Tower."
+            exc.code, f"API returned HTTP {exc.code}; check the Tower URL."
         )) from exc
     except (URLError, OSError) as exc:
-        raise TowerError("Blad polaczenia z Tower; sprawdz adres, siec i certyfikat TLS.") from exc
+        raise TowerError("Cannot connect to Tower; check the URL, network and TLS certificate.") from exc
     except (ValueError, UnicodeError) as exc:
-        raise TowerError("Tower nie zwrocil poprawnego JSON.") from exc
+        raise TowerError("Tower did not return valid JSON.") from exc
 
     count = data.get("count") if isinstance(data, dict) else None
     if type(count) is not int or count < 0:
-        raise TowerError("Nieprawidlowa odpowiedz API: brak poprawnego pola count.")
+        raise TowerError("Invalid API response: missing or invalid count field.")
     return count > 0
 
 
 def positive_int(value):
     number = int(value)
     if number <= 0:
-        raise argparse.ArgumentTypeError("Wartosc musi byc wieksza od zera.")
+        raise argparse.ArgumentTypeError("Value must be greater than zero.")
     return number
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--hosts", default=HOSTS, help='Lista, np. "CXCX CXC cxzczxc "')
-    parser.add_argument("--url", default=os.environ.get("TOWER_URL"), help="Adres Tower lub TOWER_URL")
-    parser.add_argument("--inventory", type=positive_int, help="Opcjonalny identyfikator inventory")
-    parser.add_argument("--timeout", type=positive_int, default=15, help="Limit sekund na zapytanie (15)")
-    parser.add_argument("--ca-cert", help="Plik PEM z zaufanym certyfikatem CA firmy")
+    parser.add_argument("--hosts", default=HOSTS, help='Host list, e.g. "CXCX CXC cxzczxc "')
+    parser.add_argument("--url", default=os.environ.get("TOWER_URL"), help="Tower URL or TOWER_URL")
+    parser.add_argument("--inventory", type=positive_int, help="Optional inventory ID")
+    parser.add_argument("--timeout", type=positive_int, default=15, help="Request timeout in seconds (15)")
+    parser.add_argument("--ca-cert", help="PEM file containing a trusted corporate CA certificate")
     args = parser.parse_args(argv)
     hosts = parse_hosts(args.hosts)
     if not hosts:
-        parser.error("Lista hostow jest pusta.")
+        parser.error("Host list is empty.")
     url = urlsplit(args.url or "")
     if (url.scheme != "https" or not url.hostname or url.username is not None
             or url.password is not None or url.query or url.fragment):
-        parser.error("Ustaw TOWER_URL lub --url, np. https://tower.example.com (bez danych logowania).")
+        parser.error("Set TOWER_URL or --url, e.g. https://tower.example.com (without credentials).")
 
     try:
-        token = (os.environ.get("TOWER_TOKEN") or getpass.getpass("Token API Tower: ")).strip()
+        token = (os.environ.get("TOWER_TOKEN") or getpass.getpass("Tower API token: ")).strip()
         if not token:
-            parser.error("Token API jest pusty.")
+            parser.error("API token is empty.")
         context = ssl.create_default_context(cafile=args.ca_cert)
         opener = build_opener(HTTPSHandler(context=context), NoRedirect())
         missing = 0
@@ -99,18 +99,18 @@ def main(argv=None):
             try:
                 exists = host_exists(opener, args.url, token, host, args.inventory, args.timeout)
             except TowerError as exc:
-                print(f"BLAD [{host}]: {exc} Sprawdzanie przerwane.", file=sys.stderr)
+                print(f"ERROR [{host}]: {exc} Check aborted.", file=sys.stderr)
                 return 2
-            print(f"{'ISTNIEJE' if exists else 'BRAK'}: {host}")
+            print(f"{'EXISTS' if exists else 'MISSING'}: {host}")
             missing += not exists
     except (OSError, ValueError, EOFError) as exc:
-        print(f"BLAD: Nie udalo sie przygotowac polaczenia lub tokenu ({type(exc).__name__}).", file=sys.stderr)
+        print(f"ERROR: Could not prepare the connection or token ({type(exc).__name__}).", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
-        print("\nSprawdzanie przerwane.", file=sys.stderr)
+        print("\nCheck aborted.", file=sys.stderr)
         return 2
 
-    print(f"Podsumowanie: sprawdzono {len(hosts)}, istnieje {len(hosts) - missing}, brak {missing}.")
+    print(f"Summary: checked {len(hosts)}, exists {len(hosts) - missing}, missing {missing}.")
     return 1 if missing else 0
 
 

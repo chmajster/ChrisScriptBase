@@ -80,19 +80,19 @@ class TowerTests(unittest.TestCase):
                 code, out, err, lookup = self.run_main(results)
                 self.assertEqual(code, expected)
                 self.assertEqual(lookup.call_count, 2)
-                self.assertIn("ISTNIEJE: host01", out)
-                self.assertIn("sprawdzono 2", out)
+                self.assertIn("EXISTS: host01", out)
+                self.assertIn("Summary: checked 2", out)
                 self.assertEqual(err, "")
                 if expected == 1:
-                    self.assertIn("BRAK: host02", out)
+                    self.assertIn("MISSING: host02", out)
 
     def test_api_error_stops_without_reporting_missing(self):
         code, out, err, lookup = self.run_main([check_hosts.TowerError("HTTP 403")])
         self.assertEqual(code, 2)
         lookup.assert_called_once()
-        self.assertNotIn("BRAK", out)
-        self.assertNotIn("Podsumowanie", out)
-        self.assertIn("BLAD [host01]", err)
+        self.assertNotIn("MISSING", out)
+        self.assertNotIn("Summary", out)
+        self.assertIn("ERROR [host01]", err)
         self.assertNotIn("secret", err)
 
     def test_invalid_configuration_does_not_query_tower(self):
