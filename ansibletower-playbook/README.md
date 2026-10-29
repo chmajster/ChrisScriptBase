@@ -43,6 +43,7 @@ Omit `--ask-become-pass` when using root or passwordless sudo.
 | `ubuntu_vm_slim_mode` | `apply` | `apply` performs cleanup; `status` only analyzes packages. |
 | `ubuntu_vm_slim_aggressive` | `false` | Adds `--aggressive` to remove desktop and peripheral packages. |
 | `ubuntu_vm_slim_remove_snapd` | `false` | Adds `--remove-snapd`; the script removes snapd only if no snaps are installed. |
+| `ubuntu_vm_slim_post_action` | `none` | `none`, `reboot` or `shutdown`; reboot/poweroff requires `apply` mode and script v1.2.0 or newer. |
 | `ubuntu_vm_slim_ref` | `main` | Git branch, tag or commit to download. |
 | `ubuntu_vm_slim_path` | `/usr/local/sbin/ubuntu-vm-slim` | Absolute destination on the remote server; its parent directory must exist. |
 
@@ -64,6 +65,21 @@ To enable aggressive cleanup, set:
 ```yaml
 ubuntu_vm_slim_aggressive: true
 ```
+
+To restart the VM after successful cleanup and final validation, set:
+
+```yaml
+ubuntu_vm_slim_mode: apply
+ubuntu_vm_slim_post_action: reboot
+```
+
+Use `ubuntu_vm_slim_post_action: shutdown` to power the VM off instead. The script
+schedules the requested action with a one-minute delay, and the Tower job confirms
+that it was scheduled. The job does not wait for the restart or poweroff.
+The default `none` leaves the VM running and omits `--post-action`, so older pinned
+script revisions can still use the default behavior. The playbook rejects power
+actions in `status` mode before downloading or executing the script. Job Type
+**Check** skips script execution and schedules no action.
 
 Every Run job executes the script, even when the downloaded file is unchanged.
 The execution task reports a change in `apply` mode and no change in `status` mode.
