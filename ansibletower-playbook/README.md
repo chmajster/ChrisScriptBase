@@ -2,6 +2,7 @@
 
 - `ubuntu-vm-slim.yml`: download and run the Ubuntu VM cleanup script.
 - `ubuntu-update.yml`: update Ubuntu packages with an optional reboot.
+- `update_awx.yaml`: back up and upgrade an existing AWX installation on K3s.
 
 ## Ubuntu VM Slim
 
@@ -106,3 +107,76 @@ ubuntu_update_reboot: true
 
 When enabled, Ansible waits for the server to restart and accept commands before
 moving on to the next host. Omit `--ask-become-pass` with root or passwordless sudo.
+
+## AWX updates on K3s
+
+`update_awx.yaml` follows the installation layout in `initial_awx.yaml`:
+namespace `awx`, instance `awx`, work directory `/opt/awx`, local-path storage and
+NodePort `30080`. It upgrades AWX by installing the published AWX Operator release
+that manages the corresponding AWX version, following the
+[operator upgrade procedure](https://docs.ansible.com/projects/awx-operator/en/latest/upgrade/upgrading.html).
+
+Run this playbook **on the K3s server, from outside the AWX instance being upgraded**.
+An AWX job that upgrades its own instance can be interrupted as its task pod is
+replaced. Use a maintenance window after existing jobs have finished.
+The host needs Ansible, Python 3, Git, root access, `/usr/local/bin/k3s` and access
+to GitHub and the container registries used by the operator.
+
+```bash
+sudo ansible-playbook -i localhost, ansibletower-playbook/update_awx.yaml
+```
+
+The default `awx_operator_version: latest` resolves GitHub's latest published
+release. If both the requested operator and its bundled AWX version are already
+running, the playbook finishes after preflight. For a specific published release:
+
+```bash
+sudo ansible-playbook -i localhost, ansibletower-playbook/update_awx.yaml \
+  -e awx_operator_version=2.19.1
+```
+
+The playbook validates the existing installation and creates an `AWXBackup` using
+the current operator. It waits for `status.backupDirectory`, which the backup role
+publishes after completing the database and secrets backup, before applying the
+new operator. It then verifies the expected images in both AWX deployments, waits
+for their rollouts and checks that the API serves the bundled AWX version.
+Backup failure stops the upgrade before the operator changes; later failures
+produce diagnostics and fail the playbook.
+
+The existing AWX resource and its storage/settings are reused, including LDAP
+settings in the database. The playbook requires the standard upstream AWX image,
+enabled `auto_upgrade` and an unset `spec.image_version`; downgrades are rejected.
+It updates AWX and its operator rather than the K3s installation.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `awx_operator_version` | `latest` | Latest published release or an explicit operator version. |
+| `awx_namespace` / `awx_name` | `awx` / `awx` | Existing namespace and AWX resource name. |
+| `awx_workdir` | `/opt/awx` | Parent directory for private upgrade reports and manifests. |
+| `awx_api_url` | Detected server IPv4 address, HTTP port `30080` | Base URL for unauthenticated `/api/v2/ping/` checks; override for HTTPS or a different endpoint. |
+| `awx_backup_storage_class` | `local-path` | StorageClass for the backup PVC. |
+| `awx_backup_storage_size` | `20Gi` | Requested backup storage; allow enough space for the database and retained backups. |
+| `awx_wait_retries` / `awx_wait_delay` | `120` / `10` seconds | Backup, image reconciliation and API polling limits. |
+
+Reports, the original AWX/operator JSON and the completed backup reference are
+saved under `/opt/awx/upgrades/<timestamp>/` with private permissions. The operator
+retains backup archives in the `awx-backup-claim` PVC (or the equivalent name for
+`awx_name`). The native backup covers the database, selected secrets and AWX
+configuration; manually maintained files in the projects PVC need a separate
+volume backup. See the
+[backup role](https://github.com/ansible/awx-operator/blob/2.19.1/roles/backup/README.md)
+and [restore role](https://github.com/ansible/awx-operator/blob/2.19.1/roles/restore/README.md)
+for recovery. Database migrations require restoring a compatible backup for
+rollback; this playbook does not perform automatic rollback.
+
+`--check` performs read-only preflight against the existing cluster and AWX API,
+then shows the version plan. It creates no backup or local upgrade files and
+does not apply Kubernetes changes. After an upgrade, use this update playbook for
+maintenance; rerunning an older installer can select its older operator version.
+
+Tests use real Ansible with simulated Kubernetes and HTTP endpoints, so they do
+not require an AWX/K3s cluster:
+
+```bash
+python ansibletower-playbook/tests/test_update_awx.py
+```
