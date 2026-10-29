@@ -9,7 +9,7 @@ Uruchom: python awx_inventory_hosts.py
 Hosty z Excela: python awx_inventory_hosts.py -file input.xlsx
 Diagnostyka: python awx_inventory_hosts.py -file input.xlsx -d
 Plik wejściowy: kolumna host_limit z nazwami hostów z wybranego inventory.
-Token: zmienna AWX_TOKEN w sekcji konfiguracji poniżej.
+Token: AWX_TOKEN=... w pliku .api_credential obok skryptu.
 API: https://docs.ansible.com/projects/awx/en/latest/open_api/explorer.html
 """
 
@@ -40,7 +40,7 @@ except ImportError:
 
 # ========================== KONFIGURACJA ==========================
 AWX_URL = "http://10.0.0.204:30080"
-AWX_TOKEN = "XhUJQQAbseBOUzqr0sG24649GSahs6"
+API_CREDENTIAL_FILE = Path(__file__).resolve().with_name(".api_credential")
 INVENTORY = "it2_inventory"  # Nazwa inventory albo ID jako liczba, np. 7.
 # Główne zmienne grupowe pokazywane w kolumnie Credential.
 CREDENTIAL_VARIABLES = ["os_credential"]
@@ -71,9 +71,9 @@ class DebugFormatter(logging.Formatter):
         return message.replace(self.token, "***") if self.token else message
 
 
-def configure_debug(enabled):
+def configure_debug(enabled, token=""):
     handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(DebugFormatter(AWX_TOKEN.strip()))
+    handler.setFormatter(DebugFormatter(token))
     LOGGER.handlers.clear()
     LOGGER.addHandler(handler)
     LOGGER.setLevel(logging.DEBUG if enabled else logging.WARNING)
@@ -86,6 +86,34 @@ def debug_variables(label, values):
 
 class AWXError(RuntimeError):
     """Błąd API, konfiguracji lub danych wejściowych."""
+
+
+def read_api_token(credential_file=None):
+    """Odczytaj AWX_TOKEN z lokalnego pliku z danymi dostępu."""
+    credential_file = Path(credential_file) if credential_file is not None else API_CREDENTIAL_FILE
+    LOGGER.debug("Token AWX: odczyt z pliku %s", credential_file)
+    try:
+        content = credential_file.read_text(encoding="utf-8-sig")
+    except FileNotFoundError:
+        raise AWXError(f"Brak pliku {credential_file}. Utwórz go z wpisem AWX_TOKEN=twoj_token.") from None
+    except (OSError, UnicodeError):
+        raise AWXError(f"Nie można odczytać pliku {credential_file}. Sprawdź dostęp i kodowanie UTF-8.") from None
+
+    tokens = []
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, separator, value = line.partition("=")
+        if not separator or key.strip().casefold() != "awx_token":
+            raise AWXError(f"Niepoprawny format {credential_file}. Oczekiwany wpis: AWX_TOKEN=twoj_token.")
+        value = value.strip()
+        if len(value) >= 2 and value[0] in ("'", '"') and value[-1] == value[0]:
+            value = value[1:-1].strip()
+        tokens.append(value)
+    if len(tokens) != 1 or not tokens[0]:
+        raise AWXError(f"Plik {credential_file} musi zawierać jeden niepusty wpis AWX_TOKEN.")
+    return tokens[0]
 
 
 def parse_arguments(argv=None):
@@ -600,16 +628,19 @@ def save_excel(headers, rows, output_file):
 def main(argv=None):
     args = parse_arguments(argv)
     configure_debug(args.debug)
-    debug_variables("Konfiguracja", {
-        "AWX_URL": AWX_URL, "AWX_TOKEN": "***", "INVENTORY": INVENTORY,
-        "CREDENTIAL_VARIABLES": CREDENTIAL_VARIABLES,
-        "EXTRA_CREDENTIAL_VARIABLES": EXTRA_CREDENTIAL_VARIABLES,
-        "FULL_CREDENTIAL_SEPARATOR": FULL_CREDENTIAL_SEPARATOR,
-        "OUTPUT_FILE": OUTPUT_FILE, "EXCEL_OUTPUT_FILE": EXCEL_OUTPUT_FILE,
-        "TIMEOUT": TIMEOUT, "PAGE_SIZE": PAGE_SIZE, "input_file": args.input_file,
-    })
     client = None
     try:
+        token = read_api_token()
+        configure_debug(args.debug, token)
+        debug_variables("Konfiguracja", {
+            "AWX_URL": AWX_URL, "API_CREDENTIAL_FILE": API_CREDENTIAL_FILE,
+            "AWX_TOKEN": "***", "INVENTORY": INVENTORY,
+            "CREDENTIAL_VARIABLES": CREDENTIAL_VARIABLES,
+            "EXTRA_CREDENTIAL_VARIABLES": EXTRA_CREDENTIAL_VARIABLES,
+            "FULL_CREDENTIAL_SEPARATOR": FULL_CREDENTIAL_SEPARATOR,
+            "OUTPUT_FILE": OUTPUT_FILE, "EXCEL_OUTPUT_FILE": EXCEL_OUTPUT_FILE,
+            "TIMEOUT": TIMEOUT, "PAGE_SIZE": PAGE_SIZE, "input_file": args.input_file,
+        })
         hostnames = None
         if args.input_file is not None:
             if args.input_file.resolve() == EXCEL_OUTPUT_FILE.resolve():
@@ -618,10 +649,6 @@ def main(argv=None):
                     "Zmień EXCEL_OUTPUT_FILE w konfiguracji."
                 )
             hostnames = read_host_limits(args.input_file)
-
-        token = AWX_TOKEN.strip()
-        if not token:
-            raise AWXError("Ustaw token w zmiennej AWX_TOKEN w pliku.")
 
         client = AWXClient(AWX_URL, token)
         report = fetch_report(client, INVENTORY, hostnames=hostnames)
