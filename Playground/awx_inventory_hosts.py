@@ -10,6 +10,7 @@ Hosty z Excela: python awx_inventory_hosts.py -file input.xlsx
 Diagnostyka: python awx_inventory_hosts.py -file input.xlsx -d
 Plik wejściowy: kolumna host_limit z nazwami hostów z wybranego inventory.
 Token: AWX_TOKEN=... w pliku .api_credential obok skryptu.
+AWX_URL: adres serwera albo pełna baza API, np. https://serwer/api/controller/v2/.
 API: https://docs.ansible.com/projects/awx/en/latest/open_api/explorer.html
 """
 
@@ -22,7 +23,7 @@ import sys
 import time
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urljoin, urlsplit
+from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 from xml.etree.ElementTree import ParseError
 from zipfile import BadZipFile
@@ -39,6 +40,7 @@ except ImportError:
 
 
 # ========================== KONFIGURACJA ==========================
+# Adres serwera lub pełna baza API, np. "https://serwer/api/controller/v2/".
 AWX_URL = "http://10.0.0.204:30080"
 API_CREDENTIAL_FILE = Path(__file__).resolve().with_name(".api_credential")
 INVENTORY = "it2_inventory"  # Nazwa inventory albo ID jako liczba, np. 7.
@@ -192,20 +194,54 @@ class NoRedirect(HTTPRedirectHandler):
 
 class AWXClient:
     def __init__(self, base_url, token):
-        self.base_url = base_url.rstrip("/") + "/"
-        parsed = urlsplit(self.base_url)
+        parsed = urlsplit(base_url.strip())
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
             raise AWXError("AWX_URL musi zawierać http:// albo https:// i adres serwera.")
-        self.origin = (parsed.scheme, parsed.netloc)
+        if parsed.query or parsed.fragment:
+            raise AWXError("AWX_URL musi wskazywać serwer lub bazę API, bez parametrów i fragmentu #.")
+
+        path = parsed.path.rstrip("/")
+        if path.casefold().endswith("/v2"):
+            self.api_path = path + "/"
+        elif path.casefold().endswith("/api"):
+            self.api_path = path + "/v2/"
+        else:
+            self.api_path = path + "/api/v2/"
+        self.base_url = urlunsplit((parsed.scheme, parsed.netloc, self.api_path, "", ""))
+        self.origin = self._origin(parsed)
         self.token = token
         self.opener = build_opener(NoRedirect())
         self.request_count = 0
+        LOGGER.debug("Baza API używana do zapytań: %s", self.base_url)
+
+    @staticmethod
+    def _origin(parsed):
+        try:
+            port = parsed.port
+        except ValueError:
+            raise AWXError("Adres API zawiera niepoprawny numer portu.") from None
+        return (parsed.scheme, (parsed.hostname or "").casefold(), port or (443 if parsed.scheme == "https" else 80))
+
+    def _resolve_url(self, path, *, relative_to=None):
+        """Zachowaj skonfigurowaną bazę API także w linkach kolejnych stron."""
+        url = urljoin(relative_to or self.base_url, path)
+        parsed = urlsplit(url)
+        if self._origin(parsed) != self.origin:
+            raise AWXError("API zwróciło odnośnik do innego serwera niż AWX_URL.")
+
+        # Niektóre proxy zwracają w next wewnętrzny prefiks /api/v2/.
+        # Przenosimy taki link do bazy API wskazanej przez użytkownika.
+        if not parsed.path.startswith(self.api_path):
+            for prefix in ("/api/controller/v2/", "/controller/v2/", "/api/v2/"):
+                if parsed.path.casefold().startswith(prefix):
+                    new_path = self.api_path + parsed.path[len(prefix):]
+                    LOGGER.debug("Dopasowanie ścieżki API: %s -> %s", parsed.path, new_path)
+                    return urlunsplit((parsed.scheme, parsed.netloc, new_path, parsed.query, ""))
+        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))
 
     def get(self, path, *, purpose="Odczyt zasobu AWX"):
-        url = urljoin(self.base_url, path)
+        url = self._resolve_url(path)
         parsed = urlsplit(url)
-        if (parsed.scheme, parsed.netloc) != self.origin:
-            raise AWXError("API zwróciło odnośnik do innego serwera niż AWX_URL.")
 
         request = Request(
             url,
@@ -268,7 +304,8 @@ class AWXClient:
         parameters = {"page_size": PAGE_SIZE, **filters}
         debug_variables(f"Parametry: {purpose}", parameters)
         query = urlencode(parameters)
-        url = urljoin(self.base_url, path) + "?" + query
+        url = self._resolve_url(path)
+        url += ("&" if urlsplit(url).query else "?") + query
         visited = set()
         page_number = 0
         record_count = 0
@@ -283,7 +320,7 @@ class AWXClient:
             record_count += len(page["results"])
             yield from page["results"]
             next_page = page.get("next")
-            url = urljoin(url, next_page) if next_page else None
+            url = self._resolve_url(next_page, relative_to=url) if next_page else None
         LOGGER.debug(
             "Zakończono: %s; pobrano %d rekordów z %d stron",
             purpose, record_count, page_number,
@@ -295,14 +332,14 @@ def find_inventory(client, selector):
         if selector < 1:
             raise AWXError("ID inventory musi być dodatnie.")
         return client.get(
-            f"/api/v2/inventories/{selector}/",
+            f"inventories/{selector}/",
             purpose=f"Pobieranie szczegółów inventory o ID {selector}",
         )
 
     if not isinstance(selector, str) or not selector.strip():
         raise AWXError("Ustaw INVENTORY na nazwę albo ID inventory.")
     matches = list(client.items(
-        "/api/v2/inventories/", name=selector,
+        "inventories/", name=selector,
         purpose=f"Wyszukiwanie inventory o nazwie {selector!r}",
     ))
     if not matches:
@@ -469,7 +506,7 @@ def fetch_report(client, selector, hostnames=None):
     if requested is not None:
         host_purpose += f" dla {len(requested)} nazw z pliku wejściowego"
     for host in client.items(
-        f"/api/v2/inventories/{inventory['id']}/hosts/", purpose=host_purpose, **host_filters
+        f"inventories/{inventory['id']}/hosts/", purpose=host_purpose, **host_filters
     ):
         if requested_names is not None and host["name"] not in requested_names:
             continue
@@ -478,13 +515,13 @@ def fetch_report(client, selector, hostnames=None):
         if source_id not in group_indexes:
             LOGGER.debug("Ładowanie indeksu grup źródłowego inventory o ID %s", source_id)
             groups = list(client.items(
-                f"/api/v2/inventories/{source_id}/groups/", order_by="name",
+                f"inventories/{source_id}/groups/", order_by="name",
                 purpose=f"Pobieranie nazw i ID grup ze źródłowego inventory o ID {source_id}",
             ))
             # all=1 uwzględnia także wyłączone hosty. Bez hostvars nie pobieramy
             # niepotrzebnych zmiennych hostów. vars w eksporcie to zmienne grup.
             exported = client.get(
-                f"/api/v2/inventories/{source_id}/script/?all=1",
+                f"inventories/{source_id}/script/?all=1",
                 purpose=(
                     f"Pobieranie przypisań hostów, hierarchii i zmiennych grup ze źródłowego inventory o ID {source_id}; "
                     "uwzględniam także wyłączone hosty"
