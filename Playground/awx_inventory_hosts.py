@@ -1,26 +1,29 @@
 #!/usr/bin/env python3
-"""Pobierz hosty i grupowe credentiale z AWX oraz dodaj gotowe wartości credentiali.
+"""Fetch AWX hosts and group credentials, then add configured credential values.
 
-Wymaga Pythona 3.9+ i biblioteki openpyxl.
-Instalacja zależności: python -m pip install -r requirements.txt
-Grupy, ich zmienne i powiązania są pobierane zbiorczo dla każdego inventory.
+Requires Python 3.9+ and openpyxl.
+Install the dependency: python -m pip install openpyxl
+Groups, their variables, and memberships are fetched in bulk for each inventory.
 
-Uruchom: python awx_inventory_hosts.py
-Hosty z Excela: python awx_inventory_hosts.py -file input.xlsx
-Diagnostyka: python awx_inventory_hosts.py -file input.xlsx -d
-Plik wejściowy: kolumna host_limit z nazwami hostów z wybranego inventory.
-Token: AWX_TOKEN=... w pliku .api_credential obok skryptu.
-AWX_URL: adres serwera albo pełna baza API, np. https://serwer/api/controller/v2/.
+Run: python awx_inventory_hosts.py
+Hosts from Excel: python awx_inventory_hosts.py -file input.xlsx
+Debug logging: python awx_inventory_hosts.py -file input.xlsx -d
+Input file: a host_limit column containing hostnames from the selected inventory.
+Settings: awx_invenotry_hosts_variables next to the script, using NAME = value.
+If the file is missing, the script uses the defaults defined below.
+AWX_URL: a server address or full API base URL, e.g. https://server/api/controller/v2/.
 API: https://docs.ansible.com/projects/awx/en/latest/open_api/explorer.html
 """
 
 import argparse
+import ast
 import json
 import logging
 import math
 import re
 import sys
 import time
+from copy import deepcopy
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
@@ -35,25 +38,40 @@ try:
     from openpyxl.utils.exceptions import InvalidFileException
 except ImportError:
     raise SystemExit(
-        "Brak biblioteki openpyxl. Zainstaluj ją poleceniem: python -m pip install openpyxl"
+        "The openpyxl package is missing. Install it with: python -m pip install openpyxl"
     ) from None
 
 
-# ========================== KONFIGURACJA ==========================
-# Adres serwera lub pełna baza API, np. "https://serwer/api/controller/v2/".
+# ======================== DEFAULT SETTINGS =======================
+# VARIABLES_FILE overrides these values; defaults apply when the file is missing.
+# Server address or full API base URL, e.g. "https://server/api/controller/v2/".
 AWX_URL = "http://10.0.0.204:30080"
-API_CREDENTIAL_FILE = Path(__file__).resolve().with_name(".api_credential")
-INVENTORY = "it2_inventory"  # Nazwa inventory albo ID jako liczba, np. 7.
-# Główne zmienne grupowe pokazywane w kolumnie Credential.
+AWX_TOKEN = 'XhUJQQAbseBOUzqr0sG24649GSahs6'
+VARIABLES_FILE = Path(__file__).resolve().with_name("awx_invenotry_hosts_variables")
+INVENTORY = "it2_inventory"  # Inventory name or numeric ID, e.g. 7.
+# Group variable names whose values appear in the Credential column.
 CREDENTIAL_VARIABLES = ["os_credential"]
-# Gotowe wartości credentiali dopisywane każdemu hostowi przed Credential.
-EXTRA_CREDENTIAL_VARIABLES = ["xd","123"]  # Np. ["wartosc_1", "wartosc_2"]
-FULL_CREDENTIAL_SEPARATOR = ", "  # Najpierw gotowe EXTRA, potem wartości zmiennych CREDENTIAL_VARIABLES.
+# Literal credential values added to every host before Credential.
+EXTRA_CREDENTIAL_VARIABLES = ["xd","123"]  # E.g. ["value_1", "value_2"]
+FULL_CREDENTIAL_SEPARATOR = ", "  # Literal extras first, then values from CREDENTIAL_VARIABLES.
 OUTPUT_FILE = Path("awx_inventory_hosts.json")
 EXCEL_OUTPUT_FILE = Path("awx_inventory_hosts.xlsx")
-TIMEOUT = 30  # Limit czasu jednego żądania, w sekundach.
+TIMEOUT = 30  # Timeout for a single request, in seconds.
 PAGE_SIZE = 200
 # =================================================================
+
+DEFAULT_SETTINGS = {
+    "AWX_URL": AWX_URL,
+    "AWX_TOKEN": AWX_TOKEN,
+    "INVENTORY": INVENTORY,
+    "CREDENTIAL_VARIABLES": CREDENTIAL_VARIABLES,
+    "EXTRA_CREDENTIAL_VARIABLES": EXTRA_CREDENTIAL_VARIABLES,
+    "FULL_CREDENTIAL_SEPARATOR": FULL_CREDENTIAL_SEPARATOR,
+    "OUTPUT_FILE": OUTPUT_FILE,
+    "EXCEL_OUTPUT_FILE": EXCEL_OUTPUT_FILE,
+    "TIMEOUT": TIMEOUT,
+    "PAGE_SIZE": PAGE_SIZE,
+}
 
 LOGGER = logging.getLogger("awx_inventory_hosts")
 LOGGER.addHandler(logging.NullHandler())
@@ -62,7 +80,7 @@ LOGGER.propagate = False
 
 
 class DebugFormatter(logging.Formatter):
-    """Maskuj token także wtedy, gdy pojawi się w danych odpowiedzi API."""
+    """Redact the token, including any occurrences in API response data."""
 
     def __init__(self, token):
         super().__init__("[%(levelname)s] %(message)s")
@@ -87,62 +105,112 @@ def debug_variables(label, values):
 
 
 class AWXError(RuntimeError):
-    """Błąd API, konfiguracji lub danych wejściowych."""
+    """An API, configuration, or input error."""
 
 
-def read_api_token(credential_file=None):
-    """Odczytaj AWX_TOKEN z lokalnego pliku z danymi dostępu."""
-    credential_file = Path(credential_file) if credential_file is not None else API_CREDENTIAL_FILE
-    LOGGER.debug("Token AWX: odczyt z pliku %s", credential_file)
+def validate_settings(settings):
+    """Validate setting types and prepare output file paths."""
+    for name in ("AWX_URL", "AWX_TOKEN"):
+        if not isinstance(settings[name], str) or not settings[name].strip():
+            raise AWXError(f"{name} must be a nonempty string.")
+    inventory = settings["INVENTORY"]
+    if not (
+        isinstance(inventory, str) and inventory.strip()
+        or type(inventory) is int and inventory > 0
+    ):
+        raise AWXError("INVENTORY must be a name or a positive numeric ID.")
+    variables = settings["CREDENTIAL_VARIABLES"]
+    if not isinstance(variables, (list, tuple)) or any(
+        not isinstance(name, str) or not name.strip() for name in variables
+    ):
+        raise AWXError("CREDENTIAL_VARIABLES must be a list of nonempty variable names.")
+    extras = settings["EXTRA_CREDENTIAL_VARIABLES"]
+    if not isinstance(extras, (list, tuple)) or any(
+        value is not None and not isinstance(value, (str, int, float, bool)) for value in extras
+    ):
+        raise AWXError("EXTRA_CREDENTIAL_VARIABLES must be a list of literal credential values.")
+    if not isinstance(settings["FULL_CREDENTIAL_SEPARATOR"], str):
+        raise AWXError("FULL_CREDENTIAL_SEPARATOR must be a string.")
+    for name in ("OUTPUT_FILE", "EXCEL_OUTPUT_FILE"):
+        value = settings[name]
+        if not isinstance(value, (str, Path)) or not str(value).strip():
+            raise AWXError(f"{name} must be a file path.")
+        settings[name] = Path(value)
+    timeout = settings["TIMEOUT"]
+    if type(timeout) not in (int, float) or timeout <= 0 or (
+        isinstance(timeout, float) and not math.isfinite(timeout)
+    ):
+        raise AWXError("TIMEOUT must be a positive number of seconds.")
+    if type(settings["PAGE_SIZE"]) is not int or settings["PAGE_SIZE"] <= 0:
+        raise AWXError("PAGE_SIZE must be a positive integer.")
+    return settings
+
+
+def read_settings(variables_file=None):
+    """Override defaults with literal values read from the settings file."""
+    variables_file = Path(variables_file) if variables_file is not None else VARIABLES_FILE
+    settings = deepcopy(DEFAULT_SETTINGS)
+    LOGGER.debug("Configuration: reading settings from %s", variables_file)
     try:
-        content = credential_file.read_text(encoding="utf-8-sig")
+        content = variables_file.read_text(encoding="utf-8-sig")
     except FileNotFoundError:
-        raise AWXError(f"Brak pliku {credential_file}. Utwórz go z wpisem AWX_TOKEN=twoj_token.") from None
+        LOGGER.debug("Settings file %s is missing; using the defaults defined in the script", variables_file)
+        return validate_settings(settings)
     except (OSError, UnicodeError):
-        raise AWXError(f"Nie można odczytać pliku {credential_file}. Sprawdź dostęp i kodowanie UTF-8.") from None
+        raise AWXError(f"Cannot read settings file {variables_file}. Check file access and UTF-8 encoding.") from None
 
-    tokens = []
-    for line in content.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        key, separator, value = line.partition("=")
-        if not separator or key.strip().casefold() != "awx_token":
-            raise AWXError(f"Niepoprawny format {credential_file}. Oczekiwany wpis: AWX_TOKEN=twoj_token.")
-        value = value.strip()
-        if len(value) >= 2 and value[0] in ("'", '"') and value[-1] == value[0]:
-            value = value[1:-1].strip()
-        tokens.append(value)
-    if len(tokens) != 1 or not tokens[0]:
-        raise AWXError(f"Plik {credential_file} musi zawierać jeden niepusty wpis AWX_TOKEN.")
-    return tokens[0]
+    try:
+        tree = ast.parse(content, filename=str(variables_file))
+    except SyntaxError as exc:
+        raise AWXError(f"Syntax error in {variables_file}, line {exc.lineno}. Use NAME = value.") from None
+    seen = set()
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+            raise AWXError(f"File {variables_file}, line {node.lineno}: only NAME = value assignments are allowed.")
+        name = node.targets[0].id.upper()
+        if name not in DEFAULT_SETTINGS:
+            raise AWXError(f"Unknown setting in {variables_file}, line {node.lineno}.")
+        if name in seen:
+            raise AWXError(f"Setting {name} is duplicated in {variables_file}.")
+        seen.add(name)
+        try:
+            settings[name] = ast.literal_eval(node.value)
+        except (ValueError, TypeError, SyntaxError):
+            raise AWXError(f"Setting {name}, line {node.lineno}: use a quoted string, a number, or a list.") from None
+    LOGGER.debug("Loaded %d settings from the file; remaining settings use defaults", len(seen))
+    return validate_settings(settings)
+
+
+def apply_settings(settings):
+    """Make validated settings available to the rest of the script."""
+    globals().update({name: settings[name] for name in DEFAULT_SETTINGS})
 
 
 def parse_arguments(argv=None):
     parser = argparse.ArgumentParser(
-        description="Pobierz hosty i credentiale z AWX oraz zapisz wyniki w Excelu."
+        description="Fetch hosts and credentials from AWX and export the results to Excel."
     )
     parser.add_argument(
         "-file", "--file", dest="input_file", type=Path, metavar="INPUT.xlsx",
-        help="Użyj tylko hostów z kolumny host_limit wskazanego pliku Excel.",
+        help="Use only hostnames from the host_limit column of the specified Excel file.",
     )
     parser.add_argument(
         "-d", "-debug", "--debug", action="store_true",
-        help="Pokaż zmienne, cele i wyniki zapytań oraz licznik zapytań API na stderr.",
+        help="Show variables, request purposes, responses, and the API request count on stderr.",
     )
     return parser.parse_args(argv)
 
 
 def read_host_limits(input_file):
-    """Odczytaj unikalne hosty z kolumn host_limit, zachowując kolejność z pliku."""
-    LOGGER.debug("Wejście Excel: otwieram %s i szukam kolumny host_limit", input_file)
+    """Read unique hostnames from host_limit columns, preserving file order."""
+    LOGGER.debug("Excel input: opening %s and looking for the host_limit column", input_file)
     workbook = None
     hostnames = {}
     found_column = False
     try:
         workbook = load_workbook(input_file, read_only=True, data_only=True, keep_links=False)
         for sheet in workbook.worksheets:
-            LOGGER.debug("Wejście Excel: przeszukuję arkusz %r", sheet.title)
+            LOGGER.debug("Excel input: searching worksheet %r", sheet.title)
             column_index = None
             for row_number, row in enumerate(sheet.iter_rows(values_only=True), start=1):
                 if column_index is None:
@@ -152,14 +220,14 @@ def read_host_limits(input_file):
                     ]
                     if len(matching_columns) > 1:
                         raise AWXError(
-                            f"Arkusz {sheet.title!r}, wiersz {row_number}: "
-                            "więcej niż jedna kolumna host_limit."
+                            f"Worksheet {sheet.title!r}, row {row_number}: "
+                            "more than one host_limit column was found."
                         )
                     if matching_columns:
                         column_index = matching_columns[0]
                         found_column = True
                         LOGGER.debug(
-                            "Wejście Excel: znaleziono host_limit w arkuszu %r, wiersz %d, kolumna %s",
+                            "Excel input: found host_limit in worksheet %r, row %d, column %s",
                             sheet.title, row_number, get_column_letter(column_index + 1),
                         )
                     continue
@@ -171,22 +239,22 @@ def read_host_limits(input_file):
                     if hostname:
                         hostnames.setdefault(hostname, None)
     except (OSError, InvalidFileException, BadZipFile, ParseError) as exc:
-        raise AWXError(f"Nie można odczytać pliku Excel {input_file}: {exc}") from None
+        raise AWXError(f"Cannot read Excel file {input_file}: {exc}") from None
     finally:
         if workbook is not None:
             workbook.close()
 
     if not found_column:
-        raise AWXError(f"Nie znaleziono kolumny host_limit w pliku {input_file}.")
+        raise AWXError(f"No host_limit column was found in {input_file}.")
     if not hostnames:
-        raise AWXError(f"Kolumna host_limit w pliku {input_file} nie zawiera żadnych hostów.")
-    LOGGER.debug("Wejście Excel: odczytano %d unikalnych nazw hostów", len(hostnames))
-    debug_variables(f"Hosty z pliku {input_file}", list(hostnames))
+        raise AWXError(f"The host_limit column in {input_file} contains no hostnames.")
+    LOGGER.debug("Excel input: read %d unique hostnames", len(hostnames))
+    debug_variables(f"Hostnames from {input_file}", list(hostnames))
     return list(hostnames)
 
 
 class NoRedirect(HTTPRedirectHandler):
-    """Nie przekazuj nagłówka z tokenem przy przekierowaniu HTTP."""
+    """Do not forward the token header across HTTP redirects."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -196,9 +264,9 @@ class AWXClient:
     def __init__(self, base_url, token):
         parsed = urlsplit(base_url.strip())
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
-            raise AWXError("AWX_URL musi zawierać http:// albo https:// i adres serwera.")
+            raise AWXError("AWX_URL must include http:// or https:// and a server address.")
         if parsed.query or parsed.fragment:
-            raise AWXError("AWX_URL musi wskazywać serwer lub bazę API, bez parametrów i fragmentu #.")
+            raise AWXError("AWX_URL must point to a server or API base URL without query parameters or a # fragment.")
 
         path = parsed.path.rstrip("/")
         if path.casefold().endswith("/v2"):
@@ -212,36 +280,36 @@ class AWXClient:
         self.token = token
         self.opener = build_opener(NoRedirect())
         self.request_count = 0
-        LOGGER.debug("Baza API używana do zapytań: %s", self.base_url)
+        LOGGER.debug("API base URL used for requests: %s", self.base_url)
 
     @staticmethod
     def _origin(parsed):
         try:
             port = parsed.port
         except ValueError:
-            raise AWXError("Adres API zawiera niepoprawny numer portu.") from None
+            raise AWXError("The API URL contains an invalid port number.") from None
         if port is None:
             port = 443 if parsed.scheme == "https" else 80
         return (parsed.scheme, (parsed.hostname or "").casefold(), port)
 
     def _resolve_url(self, path, *, relative_to=None):
-        """Zachowaj skonfigurowaną bazę API także w linkach kolejnych stron."""
+        """Preserve the configured API base URL in pagination links."""
         url = urljoin(relative_to or self.base_url, path)
         parsed = urlsplit(url)
         if self._origin(parsed) != self.origin:
-            raise AWXError("API zwróciło odnośnik do innego serwera niż AWX_URL.")
+            raise AWXError("The API returned a link to a different server than AWX_URL.")
 
-        # Niektóre proxy zwracają w next wewnętrzny prefiks /api/v2/.
-        # Przenosimy taki link do bazy API wskazanej przez użytkownika.
+        # Some proxies return the internal /api/v2/ prefix in next links.
+        # Map those links to the API base URL configured by the user.
         if not parsed.path.startswith(self.api_path):
             for prefix in ("/api/controller/v2/", "/controller/v2/", "/api/v2/"):
                 if parsed.path.casefold().startswith(prefix):
                     new_path = self.api_path + parsed.path[len(prefix):]
-                    LOGGER.debug("Dopasowanie ścieżki API: %s -> %s", parsed.path, new_path)
+                    LOGGER.debug("API path mapping: %s -> %s", parsed.path, new_path)
                     return urlunsplit((parsed.scheme, parsed.netloc, new_path, parsed.query, ""))
         return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))
 
-    def get(self, path, *, purpose="Odczyt zasobu AWX"):
+    def get(self, path, *, purpose="Fetch an AWX resource"):
         url = self._resolve_url(path)
         parsed = urlsplit(url)
 
@@ -253,8 +321,8 @@ class AWXClient:
         self.request_count += 1
         request_number = self.request_count
         started = time.perf_counter()
-        LOGGER.debug("Cel zapytania #%d: %s", request_number, purpose)
-        LOGGER.debug("Zapytanie #%d: GET %s", request_number, url)
+        LOGGER.debug("Request #%d purpose: %s", request_number, purpose)
+        LOGGER.debug("Request #%d: GET %s", request_number, url)
         try:
             with self.opener.open(request, timeout=TIMEOUT) as response:
                 status = getattr(response, "status", None)
@@ -263,48 +331,48 @@ class AWXClient:
             code = exc.code
             exc.close()
             LOGGER.debug(
-                "Odpowiedź #%d: błąd HTTP %d; czas %.3f s",
+                "Response #%d: HTTP %d error; elapsed %.3f s",
                 request_number, code, time.perf_counter() - started,
             )
             hint = {
-                401: "Token jest nieprawidłowy lub wygasł.",
-                403: "Token nie ma uprawnień do odczytu tego zasobu.",
-                404: "Zasób nie istnieje albo nie jest widoczny dla tego tokena.",
-                301: "Sprawdź AWX_URL: serwer przekierowuje żądanie.",
-                302: "Sprawdź AWX_URL: serwer przekierowuje żądanie.",
-            }.get(code, "Serwer AWX zgłosił błąd.")
+                401: "The token is invalid or has expired.",
+                403: "The token does not have permission to read this resource.",
+                404: "The resource does not exist or is not visible to this token.",
+                301: "Check AWX_URL: the server is redirecting the request.",
+                302: "Check AWX_URL: the server is redirecting the request.",
+            }.get(code, "The AWX server returned an error.")
             raise AWXError(f"HTTP {code}, {parsed.path}: {hint}") from None
         except (URLError, OSError) as exc:
             LOGGER.debug(
-                "Odpowiedź #%d: błąd połączenia po %.3f s: %s",
+                "Response #%d: connection error after %.3f s: %s",
                 request_number, time.perf_counter() - started, exc,
             )
-            raise AWXError(f"Nie można pobrać {parsed.path}: {exc}") from None
+            raise AWXError(f"Cannot fetch {parsed.path}: {exc}") from None
         except (ValueError, UnicodeError):
-            LOGGER.debug("Odpowiedź #%d: niepoprawny JSON", request_number)
-            raise AWXError(f"Odpowiedź z {parsed.path} nie jest poprawnym JSON-em.") from None
+            LOGGER.debug("Response #%d: invalid JSON", request_number)
+            raise AWXError(f"The response from {parsed.path} is not valid JSON.") from None
 
         if not isinstance(payload, dict):
-            LOGGER.debug("Odpowiedź #%d: nieoczekiwany typ danych %s", request_number, type(payload).__name__)
-            raise AWXError(f"Nieoczekiwany format odpowiedzi z {parsed.path}.")
+            LOGGER.debug("Response #%d: unexpected data type %s", request_number, type(payload).__name__)
+            raise AWXError(f"Unexpected response format from {parsed.path}.")
         LOGGER.debug(
-            "Odpowiedź #%d: HTTP %s; czas %.3f s",
-            request_number, status if status is not None else "nieznany", time.perf_counter() - started,
+            "Response #%d: HTTP %s; elapsed %.3f s",
+            request_number, status if status is not None else "unknown", time.perf_counter() - started,
         )
         if isinstance(payload.get("results"), list):
             LOGGER.debug(
-                "Wynik zapytania #%d: rekordów na stronie=%d; łącznie według API=%s; kolejna strona=%s",
-                request_number, len(payload["results"]), payload.get("count", "nie podano"),
-                "tak" if payload.get("next") else "nie",
+                "Request #%d result: records on page=%d; total reported by API=%s; next page=%s",
+                request_number, len(payload["results"]), payload.get("count", "not provided"),
+                "yes" if payload.get("next") else "no",
             )
         else:
-            LOGGER.debug("Wynik zapytania #%d: odebrano obiekt JSON (%d pól)", request_number, len(payload))
+            LOGGER.debug("Request #%d result: received a JSON object (%d fields)", request_number, len(payload))
         return payload
 
-    def items(self, path, *, purpose="Pobieranie listy zasobów AWX", **filters):
-        """Pobierz wszystkie strony, podążając za polem next z API."""
+    def items(self, path, *, purpose="Fetch an AWX resource list", **filters):
+        """Fetch all pages by following the API's next links."""
         parameters = {"page_size": PAGE_SIZE, **filters}
-        debug_variables(f"Parametry: {purpose}", parameters)
+        debug_variables(f"Parameters: {purpose}", parameters)
         query = urlencode(parameters)
         url = self._resolve_url(path)
         url += ("&" if urlsplit(url).query else "?") + query
@@ -313,18 +381,18 @@ class AWXClient:
         record_count = 0
         while url:
             if url in visited:
-                raise AWXError("API zwróciło powtarzający się odnośnik do następnej strony.")
+                raise AWXError("The API returned a repeated pagination link.")
             visited.add(url)
             page_number += 1
-            page = self.get(url, purpose=f"{purpose}; strona {page_number}")
+            page = self.get(url, purpose=f"{purpose}; page {page_number}")
             if not isinstance(page.get("results"), list):
-                raise AWXError("W odpowiedzi API brakuje listy results.")
+                raise AWXError("The API response is missing the results list.")
             record_count += len(page["results"])
             yield from page["results"]
             next_page = page.get("next")
             url = self._resolve_url(next_page, relative_to=url) if next_page else None
         LOGGER.debug(
-            "Zakończono: %s; pobrano %d rekordów z %d stron",
+            "Completed: %s; fetched %d records across %d pages",
             purpose, record_count, page_number,
         )
 
@@ -332,48 +400,48 @@ class AWXClient:
 def find_inventory(client, selector):
     if isinstance(selector, int):
         if selector < 1:
-            raise AWXError("ID inventory musi być dodatnie.")
+            raise AWXError("The inventory ID must be positive.")
         return client.get(
             f"inventories/{selector}/",
-            purpose=f"Pobieranie szczegółów inventory o ID {selector}",
+            purpose=f"Fetch details for inventory ID {selector}",
         )
 
     if not isinstance(selector, str) or not selector.strip():
-        raise AWXError("Ustaw INVENTORY na nazwę albo ID inventory.")
+        raise AWXError("Set INVENTORY to an inventory name or numeric ID.")
     matches = list(client.items(
         "inventories/", name=selector,
-        purpose=f"Wyszukiwanie inventory o nazwie {selector!r}",
+        purpose=f"Find inventory named {selector!r}",
     ))
     if not matches:
-        raise AWXError(f"Nie znaleziono dostępnego inventory o nazwie {selector!r}.")
+        raise AWXError(f"No accessible inventory named {selector!r} was found.")
     if len(matches) > 1:
         ids = ", ".join(str(item["id"]) for item in matches)
         raise AWXError(
-            f"Nazwa {selector!r} jest niejednoznaczna. Ustaw INVENTORY na jedno z ID: {ids}."
+            f"The name {selector!r} is ambiguous. Set INVENTORY to one of these IDs: {ids}."
         )
     return matches[0]
 
 
 def credential_variable_names():
-    """Nazwy zmiennych, których wartości są odczytywane z grup AWX."""
+    """Return the variable names whose values are read from AWX groups."""
     variables = CREDENTIAL_VARIABLES
     if not isinstance(variables, (list, tuple)) or any(
         not isinstance(name, str) or not name.strip() for name in variables
     ):
-        raise AWXError("CREDENTIAL_VARIABLES musi być listą niepustych nazw zmiennych.")
+        raise AWXError("CREDENTIAL_VARIABLES must be a list of nonempty variable names.")
     return tuple(dict.fromkeys(name.strip() for name in variables))
 
 
 def extra_credential_values():
-    """Gotowe wartości z konfiguracji, wspólne dla wszystkich hostów."""
+    """Return literal values from the configuration, shared by all hosts."""
     if not isinstance(EXTRA_CREDENTIAL_VARIABLES, (list, tuple)):
-        raise AWXError("EXTRA_CREDENTIAL_VARIABLES musi być listą gotowych wartości credentiali.")
+        raise AWXError("EXTRA_CREDENTIAL_VARIABLES must be a list of literal credential values.")
     values = []
     for value in EXTRA_CREDENTIAL_VARIABLES:
         if value is None:
             continue
         if not isinstance(value, (str, int, float, bool)):
-            raise AWXError("Wartości w EXTRA_CREDENTIAL_VARIABLES muszą być tekstem lub liczbą.")
+            raise AWXError("Values in EXTRA_CREDENTIAL_VARIABLES must be strings or numbers.")
         text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
         if text.strip() and text not in values:
             values.append(text)
@@ -381,7 +449,7 @@ def extra_credential_values():
 
 
 class InventoryGroupIndex:
-    """Lokalny indeks grup i ich powiązań, wspólny dla wszystkich hostów."""
+    """A local index of groups and memberships, shared by all hosts."""
 
     def __init__(self, groups, exported, credential_variables=("os_credential",)):
         self.credential_variables = credential_variables
@@ -396,22 +464,22 @@ class InventoryGroupIndex:
         for name in self.groups:
             group_data = exported.get(name, {})
             if not isinstance(group_data, dict) or not isinstance(group_data.get("vars", {}), dict):
-                raise AWXError(f"Niepoprawne dane grupy {name!r} w eksporcie inventory.")
-            # Eksport zwraca słowniki także dla zmiennych zapisanych w AWX jako YAML.
+                raise AWXError(f"Invalid data for group {name!r} in the inventory export.")
+            # The export returns dictionaries even for variables stored as YAML in AWX.
             self.variables[name] = group_data.get("vars", {})
-            debug_variables(f"Zmienne grupy {name!r} (ID {self.groups[name]['id']})", self.variables[name])
+            debug_variables(f"Variables for group {name!r} (ID {self.groups[name]['id']})", self.variables[name])
             for hostname in group_data.get("hosts", []):
                 self.direct_by_host.setdefault(hostname, set()).add(name)
             for child_name in group_data.get("children", []):
                 if child_name not in self.parents:
                     raise AWXError(
-                        f"Grupa {child_name!r} nie występuje na liście grup. "
-                        "Inventory mogło się zmienić podczas odczytu; uruchom skrypt ponownie."
+                        f"Group {child_name!r} is missing from the group list. "
+                        "The inventory may have changed during retrieval; run the script again."
                     )
                 self.parents[child_name].add(name)
 
     def all_group_names(self, name):
-        """Wyznacz grupę i jej przodków raz, także przy wielu ścieżkach dziedziczenia."""
+        """Resolve each group and its ancestors once, including multiple inheritance paths."""
         if name not in self.all_groups_cache:
             found = set()
             pending = [name]
@@ -430,7 +498,7 @@ class InventoryGroupIndex:
         for name in direct_names:
             all_names.update(self.all_group_names(name))
         LOGGER.debug(
-            "Host %s: szukam zmiennych %s lokalnie w %d grupach (bezpośrednich=%d, nadrzędnych=%d)",
+            "Host %s: looking for variables %s locally in %d groups (direct=%d, inherited=%d)",
             hostname, self.credential_variables, len(all_names), len(direct_names),
             len(all_names - direct_names),
         )
@@ -442,9 +510,9 @@ class InventoryGroupIndex:
             for name in sorted_names:
                 if variable in self.variables[name]:
                     LOGGER.debug(
-                        "Host %s: znaleziono %s w grupie %r (%s)",
+                        "Host %s: found %s in group %r (%s)",
                         hostname, variable, name,
-                        "bezpośrednia" if name in direct_names else "nadrzędna",
+                        "direct" if name in direct_names else "inherited",
                     )
                     matches.append(
                         {
@@ -455,7 +523,7 @@ class InventoryGroupIndex:
                         }
                     )
             if len(matches) == previous_matches:
-                LOGGER.debug("Host %s: nie znaleziono zmiennej %s w jego grupach", hostname, variable)
+                LOGGER.debug("Host %s: variable %s was not found in its groups", hostname, variable)
         result = {
             "groups": [self.groups[name] for name in sorted(direct_names)],
             "all_groups": [self.groups[name] for name in sorted_names],
@@ -477,66 +545,66 @@ class InventoryGroupIndex:
 def fetch_report(client, selector, hostnames=None):
     credential_variables = credential_variable_names()
     extra_credentials = extra_credential_values()
-    debug_variables("Gotowe dodatkowe wartości credentiali z konfiguracji", extra_credentials)
+    debug_variables("Literal extra credential values from configuration", extra_credentials)
     inventory = find_inventory(client, selector)
     LOGGER.debug(
-        "Wybrane inventory: ID=%s; nazwa=%r; typ=%s",
-        inventory["id"], inventory["name"], inventory.get("kind") or "standardowe",
+        "Selected inventory: ID=%s; name=%r; type=%s",
+        inventory["id"], inventory["name"], inventory.get("kind") or "standard",
     )
-    debug_variables("Wyszukiwane zmienne credentiali", credential_variables)
+    debug_variables("Credential variables to look up", credential_variables)
     requested = list(dict.fromkeys(hostnames)) if hostnames is not None else None
     requested_names = set(requested) if requested is not None else None
     host_filters = {"order_by": "id"}
     if requested:
-        # Krótką listę filtruje AWX. Długą dopasujemy lokalnie po zbiorczym
-        # odczycie, aby nie przekraczać długości URL i nie pytać o każdy host.
+        # AWX filters short lists. Match long lists locally after a bulk fetch
+        # to stay within URL length limits and avoid per-host requests.
         candidate = {**host_filters, "page_size": PAGE_SIZE, "name__in": ",".join(requested)}
         if len(urlencode(candidate)) <= 6000:
             host_filters["name__in"] = candidate["name__in"]
-            LOGGER.debug("Wyszukiwanie hostów: przekazuję %d nazw jako filtr name__in do AWX", len(requested))
+            LOGGER.debug("Host search: sending %d names to AWX using the name__in filter", len(requested))
         else:
-            LOGGER.debug("Wyszukiwanie hostów: dopasuję %d nazw lokalnie po odczycie zbiorczym", len(requested))
+            LOGGER.debug("Host search: matching %d names locally after a bulk fetch", len(requested))
     else:
         LOGGER.debug(
-            "Wyszukiwanie hostów: pobieram wszystkie hosty z inventory o ID %s (nazwa: %r)",
+            "Host search: fetching all hosts from inventory ID %s (name: %r)",
             inventory["id"], inventory["name"],
         )
-    debug_variables("Filtr hostów AWX", host_filters)
+    debug_variables("AWX host filters", host_filters)
     hosts = []
     group_indexes = {}
-    host_purpose = f"Pobieranie hostów z inventory o ID {inventory['id']} (nazwa: {inventory['name']!r})"
+    host_purpose = f"Fetch hosts from inventory ID {inventory['id']} (name: {inventory['name']!r})"
     if requested is not None:
-        host_purpose += f" dla {len(requested)} nazw z pliku wejściowego"
+        host_purpose += f" for {len(requested)} names from the input file"
     for host in client.items(
         f"inventories/{inventory['id']}/hosts/", purpose=host_purpose, **host_filters
     ):
         if requested_names is not None and host["name"] not in requested_names:
             continue
-        # Hosty Smart Inventory mogą należeć do różnych inventory źródłowych.
+        # Smart Inventory hosts may belong to different source inventories.
         source_id = host.get("inventory") or inventory["id"]
         if source_id not in group_indexes:
-            LOGGER.debug("Ładowanie indeksu grup źródłowego inventory o ID %s", source_id)
+            LOGGER.debug("Loading the group index for source inventory ID %s", source_id)
             groups = list(client.items(
                 f"inventories/{source_id}/groups/", order_by="name",
-                purpose=f"Pobieranie nazw i ID grup ze źródłowego inventory o ID {source_id}",
+                purpose=f"Fetch group names and IDs from source inventory ID {source_id}",
             ))
-            # all=1 uwzględnia także wyłączone hosty. Bez hostvars nie pobieramy
-            # niepotrzebnych zmiennych hostów. vars w eksporcie to zmienne grup.
+            # all=1 includes disabled hosts. Omitting hostvars avoids fetching
+            # unnecessary host variables. Exported vars contain group variables.
             exported = client.get(
                 f"inventories/{source_id}/script/?all=1",
                 purpose=(
-                    f"Pobieranie przypisań hostów, hierarchii i zmiennych grup ze źródłowego inventory o ID {source_id}; "
-                    "uwzględniam także wyłączone hosty"
+                    f"Fetch host memberships, group hierarchy, and group variables from source inventory ID {source_id}; "
+                    "include disabled hosts"
                 ),
             ) if groups else {}
             group_indexes[source_id] = InventoryGroupIndex(groups, exported, credential_variables)
             LOGGER.debug(
-                "Indeks grup źródłowego inventory o ID %s gotowy: %d grup i %d hostów z przypisaniami do grup; "
-                "wyszukiwanie credentiali odbywa się lokalnie",
+                "Group index for source inventory ID %s is ready: %d groups and %d hosts with group memberships; "
+                "credential lookup runs locally",
                 source_id, len(groups), len(group_indexes[source_id].direct_by_host),
             )
         else:
-            LOGGER.debug("Host %s: użycie indeksu grup źródłowego inventory o ID %s z pamięci", host["name"], source_id)
+            LOGGER.debug("Host %s: reusing the cached group index for source inventory ID %s", host["name"], source_id)
         hosts.append(
             {
                 "id": host["id"],
@@ -553,13 +621,13 @@ def fetch_report(client, selector, hostnames=None):
     if requested is not None:
         if not hosts:
             raise AWXError(
-                f"Żaden z hostów podanych w pliku nie występuje w inventory {inventory['name']!r}."
+                f"None of the hosts listed in the file exist in inventory {inventory['name']!r}."
             )
         order = {name: index for index, name in enumerate(requested)}
         hosts.sort(key=lambda host: order[host["name"]])
         found_names = {host["name"] for host in hosts}
         report["missing_hosts"] = [name for name in requested if name not in found_names]
-    debug_variables("Podsumowanie hostów", {
+    debug_variables("Host summary", {
         "host_count": len(hosts), "source_inventory_count": len(group_indexes),
         "source_inventory_ids": list(group_indexes),
         "missing_hosts": report.get("missing_hosts", []),
@@ -568,13 +636,13 @@ def fetch_report(client, selector, hostnames=None):
 
 
 def build_output_rows(report):
-    """Przygotuj wspólne wiersze i uzupełnij hosty w JSON o dodatkowe i pełne credentiale."""
+    """Build shared output rows and add extra and full credentials to JSON host records."""
     primary_variables = credential_variable_names()
     extra_credentials = extra_credential_values()
     if not isinstance(FULL_CREDENTIAL_SEPARATOR, str):
-        raise AWXError("FULL_CREDENTIAL_SEPARATOR musi być tekstem.")
+        raise AWXError("FULL_CREDENTIAL_SEPARATOR must be a string.")
     headers = ["hostname", "Extra_Credentials", "Credential", "Full_Credential"]
-    extra_text = FULL_CREDENTIAL_SEPARATOR.join(extra_credentials) or "brak"
+    extra_text = FULL_CREDENTIAL_SEPARATOR.join(extra_credentials) or "none"
     rows = []
     for host in report["hosts"]:
         values_by_variable = {}
@@ -595,28 +663,28 @@ def build_output_rows(report):
         full_parts = list(extra_credentials)
         for variable in primary_variables:
             full_parts.extend(full_values_by_variable.get(variable, []))
-        full_credential = FULL_CREDENTIAL_SEPARATOR.join(dict.fromkeys(full_parts)) or "brak"
+        full_credential = FULL_CREDENTIAL_SEPARATOR.join(dict.fromkeys(full_parts)) or "none"
         host["Extra_Credentials"] = list(extra_credentials)
         host["Full_Credential"] = full_credential
-        LOGGER.debug("Host %s: dopisuję %d gotowych wartości credentiali z konfiguracji", host["name"], len(extra_credentials))
-        debug_variables(f"Full_Credential hosta {host['name']!r}", full_credential)
+        LOGGER.debug("Host %s: adding %d literal credential values from configuration", host["name"], len(extra_credentials))
+        debug_variables(f"Full_Credential for host {host['name']!r}", full_credential)
 
         fields = [host["name"], extra_text]
         credentials = list(dict.fromkeys(
             value for variable in primary_variables for value in values_by_variable.get(variable, [])
         ))
-        for credential in credentials or ["brak"]:
+        for credential in credentials or ["none"]:
             rows.append([*fields, credential, full_credential])
     return headers, rows
 
 
 def save_excel(headers, rows, output_file):
-    """Zapisz wyniki jako tekst z filtrowaniem i zamrożonymi nagłówkami."""
+    """Save text results with filtering and frozen headers."""
     output_file = Path(output_file)
-    LOGGER.debug("Zapis Excel: %d wierszy wyników, %d kolumn, plik %s", len(rows), len(headers), output_file)
+    LOGGER.debug("Excel export: %d result rows, %d columns, file %s", len(rows), len(headers), output_file)
     workbook = Workbook()
     sheet = workbook.active
-    sheet.title = "Wyniki"
+    sheet.title = "Results"
     sheet.sheet_view.showGridLines = False
     sheet.freeze_panes = "B2"
     sheet.append(headers)
@@ -637,7 +705,7 @@ def save_excel(headers, rows, output_file):
     for row in sheet.iter_rows():
         line_count = 1
         for index, cell in enumerate(row):
-            # Nazwy i wartości credentiali są tekstem, także gdy zaczynają się od '='.
+            # Credential names and values are text, even when they start with '='.
             cell.data_type = "s"
             cell.number_format = "@"
             cell.font = header_font if cell.row == 1 else body_font
@@ -659,20 +727,22 @@ def save_excel(headers, rows, output_file):
     try:
         workbook.save(output_file)
     except PermissionError:
-        raise AWXError(f"Nie można zapisać {output_file}. Zamknij plik w Excelu i spróbuj ponownie.") from None
+        raise AWXError(f"Cannot save {output_file}. Close the file in Excel and try again.") from None
     finally:
         workbook.close()
 
 
 def main(argv=None):
     args = parse_arguments(argv)
-    configure_debug(args.debug)
+    configure_debug(args.debug, AWX_TOKEN if isinstance(AWX_TOKEN, str) else "")
     client = None
     try:
-        token = read_api_token()
+        settings = read_settings()
+        apply_settings(settings)
+        token = AWX_TOKEN.strip()
         configure_debug(args.debug, token)
-        debug_variables("Konfiguracja", {
-            "AWX_URL": AWX_URL, "API_CREDENTIAL_FILE": API_CREDENTIAL_FILE,
+        debug_variables("Configuration", {
+            "AWX_URL": AWX_URL, "VARIABLES_FILE": VARIABLES_FILE,
             "AWX_TOKEN": "***", "INVENTORY": INVENTORY,
             "CREDENTIAL_VARIABLES": CREDENTIAL_VARIABLES,
             "EXTRA_CREDENTIAL_VARIABLES": EXTRA_CREDENTIAL_VARIABLES,
@@ -684,8 +754,8 @@ def main(argv=None):
         if args.input_file is not None:
             if args.input_file.resolve() == EXCEL_OUTPUT_FILE.resolve():
                 raise AWXError(
-                    "Plik wejściowy i wynikowy Excel muszą mieć różne ścieżki. "
-                    "Zmień EXCEL_OUTPUT_FILE w konfiguracji."
+                    "The input and output Excel files must use different paths. "
+                    "Change EXCEL_OUTPUT_FILE in the configuration."
                 )
             hostnames = read_host_limits(args.input_file)
 
@@ -696,29 +766,29 @@ def main(argv=None):
             details = ", ".join(missing[:20])
             if len(missing) > 20:
                 details += f" ... (+{len(missing) - 20})"
-            print(f"Nie znaleziono w inventory {len(missing)} hostów: {details}", file=sys.stderr)
+            print(f"Missing hosts ({len(missing)}): {details}", file=sys.stderr)
         headers, rows = build_output_rows(report)
         for row in rows:
             print(" , ".join(f"{header} : {value}" for header, value in zip(headers, row)))
         sys.stdout.flush()
 
-        LOGGER.debug("Zapis JSON: %d hostów, plik %s", report["host_count"], OUTPUT_FILE)
+        LOGGER.debug("JSON export: %d hosts, file %s", report["host_count"], OUTPUT_FILE)
         OUTPUT_FILE.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         save_excel(headers, rows, EXCEL_OUTPUT_FILE)
-        debug_variables("Zapisane wyniki", {
+        debug_variables("Saved results", {
             "json": OUTPUT_FILE.resolve(), "excel": EXCEL_OUTPUT_FILE.resolve(), "rows": len(rows),
         })
         return 0
     finally:
-        LOGGER.debug("Łączna liczba zapytań API: %d", client.request_count if client is not None else 0)
+        LOGGER.debug("Total API requests: %d", client.request_count if client is not None else 0)
 
 
 if __name__ == "__main__":
     try:
         sys.exit(main())
     except (AWXError, OSError) as exc:
-        print(f"Błąd: {exc}", file=sys.stderr)
+        print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
     except KeyboardInterrupt:
-        print("\nPrzerwano.", file=sys.stderr)
+        print("\nInterrupted.", file=sys.stderr)
         sys.exit(130)
