@@ -5,6 +5,8 @@ on:
     paths:
       - 'linux/ubuntu-vm-slim.sh'
       - 'linux/tests/test_ubuntu_vm_slim.py'
+      - 'ansibletower-playbook/ubuntu-vm-slim.yml'
+      - 'ansibletower-playbook/tests/test_ubuntu_vm_slim.py'
       - '.github/workflows/ubuntu-vm-slim-tests.yml'
   workflow_dispatch:
 
@@ -23,3 +25,14 @@ jobs:
         run: shellcheck -e SC2016 linux/ubuntu-vm-slim.sh
       - name: Test post-cleanup actions with mocked system commands
         run: sudo python3 linux/tests/test_ubuntu_vm_slim.py
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install Ansible validation tools
+        run: python -m pip install ansible-core==2.21.5 ansible-lint
+      - name: Check playbook syntax
+        run: ansible-playbook -i localhost, --syntax-check ansibletower-playbook/ubuntu-vm-slim.yml
+      - name: Lint the playbook
+        run: ansible-lint --offline ansibletower-playbook/ubuntu-vm-slim.yml
+      - name: Test playbook actions with mocked system commands
+        run: sudo env "PATH=$PATH" python ansibletower-playbook/tests/test_ubuntu_vm_slim.py

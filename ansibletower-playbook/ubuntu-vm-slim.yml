@@ -10,6 +10,7 @@
     ubuntu_vm_slim_mode: apply
     ubuntu_vm_slim_aggressive: false
     ubuntu_vm_slim_remove_snapd: false
+    ubuntu_vm_slim_post_action: none
 
   pre_tasks:
     - name: Verify the target runs Ubuntu
@@ -23,6 +24,15 @@
         that:
           - ubuntu_vm_slim_mode in ['apply', 'status']
         fail_msg: ubuntu_vm_slim_mode must be apply or status.
+
+    - name: Validate the post-cleanup action
+      ansible.builtin.assert:
+        that:
+          - ubuntu_vm_slim_post_action in ['none', 'reboot', 'shutdown']
+          - ubuntu_vm_slim_mode == 'apply' or ubuntu_vm_slim_post_action == 'none'
+        fail_msg: >-
+          ubuntu_vm_slim_post_action must be none, reboot or shutdown.
+          Reboot and shutdown require ubuntu_vm_slim_mode=apply.
 
   tasks:
     - name: Download the script from GitHub
@@ -51,6 +61,7 @@
             ['/bin/bash', ubuntu_vm_slim_path, '--' ~ ubuntu_vm_slim_mode, '--yes']
             + (['--aggressive'] if ubuntu_vm_slim_aggressive | bool else [])
             + (['--remove-snapd'] if ubuntu_vm_slim_remove_snapd | bool else [])
+            + (['--post-action', ubuntu_vm_slim_post_action] if ubuntu_vm_slim_post_action != 'none' else [])
           }}
       environment:
         DEBIAN_FRONTEND: noninteractive
