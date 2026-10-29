@@ -1,0 +1,46 @@
+---
+- name: Update Ubuntu packages
+  hosts: all
+  become: true
+  gather_facts: true
+  serial: 1
+
+  vars:
+    ubuntu_update_reboot: false
+
+  pre_tasks:
+    - name: Verify the target runs Ubuntu
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['distribution'] == 'Ubuntu'
+        fail_msg: This playbook supports Ubuntu servers only.
+
+  tasks:
+    - name: Refresh the APT package index
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+        lock_timeout: 120
+
+    - name: Upgrade installed packages and their dependencies
+      ansible.builtin.apt:
+        upgrade: dist
+        lock_timeout: 120
+
+    - name: Check whether Ubuntu requires a reboot
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: ubuntu_update_reboot_required
+
+    - name: Report reboot status
+      ansible.builtin.debug:
+        msg: >-
+          Reboot required: {{ ubuntu_update_reboot_required.stat.exists }}.
+          Automatic reboot enabled: {{ ubuntu_update_reboot | bool }}.
+
+    - name: Reboot when required and explicitly enabled
+      ansible.builtin.reboot:
+        reboot_timeout: 900
+      when:
+        - ubuntu_update_reboot | bool
+        - ubuntu_update_reboot_required.stat.exists
