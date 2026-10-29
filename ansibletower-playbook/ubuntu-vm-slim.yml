@@ -1,0 +1,65 @@
+---
+- name: Download and run Ubuntu VM Slim
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    ubuntu_vm_slim_ref: main
+    ubuntu_vm_slim_path: /usr/local/sbin/ubuntu-vm-slim
+    ubuntu_vm_slim_mode: apply
+    ubuntu_vm_slim_aggressive: false
+    ubuntu_vm_slim_remove_snapd: false
+
+  pre_tasks:
+    - name: Verify the target runs Ubuntu
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['distribution'] == 'Ubuntu'
+        fail_msg: This playbook supports Ubuntu servers only.
+
+    - name: Validate the requested mode
+      ansible.builtin.assert:
+        that:
+          - ubuntu_vm_slim_mode in ['apply', 'status']
+        fail_msg: ubuntu_vm_slim_mode must be apply or status.
+
+  tasks:
+    - name: Download the script from GitHub
+      ansible.builtin.get_url:
+        url: "https://raw.githubusercontent.com/chmajster/ChrisScriptBase/{{ ubuntu_vm_slim_ref }}/linux/ubuntu-vm-slim.sh"
+        dest: "{{ ubuntu_vm_slim_path }}"
+        owner: root
+        group: root
+        mode: '0750'
+        force: true
+        timeout: 60
+
+    - name: Validate Bash syntax before execution
+      ansible.builtin.command:
+        argv:
+          - /bin/bash
+          - -n
+          - "{{ ubuntu_vm_slim_path }}"
+      changed_when: false
+      when: not ansible_check_mode
+
+    - name: Run Ubuntu VM Slim without interactive prompts
+      ansible.builtin.command:
+        argv: >-
+          {{
+            ['/bin/bash', ubuntu_vm_slim_path, '--' ~ ubuntu_vm_slim_mode, '--yes']
+            + (['--aggressive'] if ubuntu_vm_slim_aggressive | bool else [])
+            + (['--remove-snapd'] if ubuntu_vm_slim_remove_snapd | bool else [])
+          }}
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+        NO_COLOR: '1'
+      register: ubuntu_vm_slim_result
+      changed_when: ubuntu_vm_slim_mode == 'apply'
+      when: not ansible_check_mode
+
+    - name: Show the script output in the job log
+      ansible.builtin.debug:
+        var: ubuntu_vm_slim_result.stdout_lines
+      when: not ansible_check_mode
