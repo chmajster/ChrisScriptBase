@@ -1,0 +1,105 @@
+---
+- name: Dodaj serwer do Ansible Tower / AWX
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    # Tower / AWX
+    #tower_url: "https://awx.example.com"
+    tower_url: "https://10.0.0.204:300080"
+    #tower_token: "{{ lookup('env', 'TOWER_TOKEN') }}"
+    tower_token: "F8JneLariJ771zoRCTLbnT1ykFPSth"
+    tower_validate_certs: false
+
+    # Inventory
+    tower_inventory_id: 2
+
+    # Serwer
+    server_name: "srv-linux-001"
+    server_ip: "10.0.0.204"
+
+    # Parametry Ansible dla hosta
+    server_ansible_user: "ansible"
+    server_ansible_port: 22
+
+  tasks:
+
+    - name: Sprawdź czy podano token API
+      ansible.builtin.assert:
+        that:
+          - tower_token | length > 0
+        fail_msg: >
+          Brak tokenu API.
+          Ustaw zmienną środowiskową TOWER_TOKEN.
+
+    - name: Sprawdź czy host istnieje w Inventory
+      ansible.builtin.uri:
+        url: >-
+          {{ tower_url }}/api/v2/inventories/{{ tower_inventory_id }}/hosts/?name={{ server_name | urlencode }}
+        method: GET
+
+        headers:
+          Authorization: "Bearer {{ tower_token }}"
+          Accept: "application/json"
+
+        validate_certs: "{{ tower_validate_certs }}"
+        return_content: true
+        status_code:
+          - 200
+
+      register: tower_host_lookup
+
+    - name: Pokaż wynik wyszukiwania
+      ansible.builtin.debug:
+        msg: >-
+          Host {{ server_name }}:
+          {{ 'istnieje' if tower_host_lookup.json.count | int > 0 else 'nie istnieje' }}
+
+    - name: Dodaj host do Ansible Tower
+      ansible.builtin.uri:
+        url: >-
+          {{ tower_url }}/api/v2/inventories/{{ tower_inventory_id }}/hosts/
+        method: POST
+
+        headers:
+          Authorization: "Bearer {{ tower_token }}"
+          Content-Type: "application/json"
+          Accept: "application/json"
+
+        body_format: json
+
+        body:
+          name: "{{ server_name }}"
+          description: "Host dodany automatycznie przez Ansible"
+          enabled: true
+          variables: |
+            ansible_host: {{ server_ip }}
+            ansible_user: {{ server_ansible_user }}
+            ansible_port: {{ server_ansible_port }}
+
+        validate_certs: "{{ tower_validate_certs }}"
+        return_content: true
+        status_code:
+          - 201
+
+      register: tower_host_create
+
+      when:
+        - tower_host_lookup.json.count | int == 0
+
+    - name: Informacja - host utworzony
+      ansible.builtin.debug:
+        msg: >-
+          Dodano host {{ server_name }}
+          (ID={{ tower_host_create.json.id }})
+          do Inventory ID={{ tower_inventory_id }}
+      when:
+        - tower_host_create is not skipped
+
+    - name: Informacja - host już istnieje
+      ansible.builtin.debug:
+        msg: >-
+          Host {{ server_name }} już istnieje.
+          ID={{ tower_host_lookup.json.results[0].id }}
+      when:
+        - tower_host_lookup.json.count | int > 0

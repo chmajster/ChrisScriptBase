@@ -1,0 +1,934 @@
+---
+- name: Install AWX on K3s
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+
+  vars:
+    awx_namespace: awx
+    awx_name: awx
+    awx_operator_version: "2.19.1"
+
+    awx_admin_user: admin
+    awx_admin_password: "1"
+
+    awx_service_type: NodePort
+    awx_nodeport: 30080
+
+    awx_workdir: /opt/awx
+
+    # Persistent Storage (K3s default StorageClass)
+    awx_storage_class: local-path
+    awx_postgres_storage_size: 20Gi
+    awx_projects_storage_size: 10Gi
+    awx_projects_storage_access_mode: ReadWriteOnce
+
+    # LDAP / LLDAP
+    # Set to true after providing a bind password.
+    awx_ldap_enabled: true
+    awx_ldap_server_uri: "ldap://100.118.132.40:3890"
+    awx_ldap_host: "100.118.132.40"
+    awx_ldap_port: 3890
+    awx_ldap_base_dn: "dc=kynlab,dc=com"
+    awx_ldap_bind_dn: "uid=admin,ou=people,dc=kynlab,dc=com"
+    awx_ldap_bind_password: "{{ lookup('ansible.builtin.env', 'AWX_LDAP_BIND_PASSWORD') | default('', true) }}"
+    awx_ldap_start_tls: false
+    awx_ldap_user_base_dn: "ou=people,dc=kynlab,dc=com"
+    awx_ldap_group_base_dn: "ou=groups,dc=kynlab,dc=com"
+    awx_ldap_require_group: ""
+    # If true, LDAP configuration errors are reported but do not stop AWX installation.
+    awx_ldap_optional: true
+
+    # Final report
+    awx_report_file: "{{ awx_workdir }}/installation-report.txt"
+
+  tasks:
+    # =======================================================
+    # SYSTEM
+    # =======================================================
+
+    - name: Install required packages
+      ansible.builtin.apt:
+        name:
+          - curl
+          - git
+          - ca-certificates
+        state: present
+        update_cache: true
+
+    # =======================================================
+    # K3S
+    # =======================================================
+
+    - name: Check if K3s is installed
+      ansible.builtin.stat:
+        path: /usr/local/bin/k3s
+      register: k3s_binary
+
+    - name: Install K3s
+      ansible.builtin.shell: |
+        curl -sfL https://get.k3s.io | sh -
+      args:
+        executable: /bin/bash
+      when: not k3s_binary.stat.exists
+
+    - name: Ensure K3s service is enabled and running
+      ansible.builtin.systemd:
+        name: k3s
+        enabled: true
+        state: started
+
+    - name: Wait for Kubernetes API
+      ansible.builtin.command:
+        cmd: k3s kubectl get nodes
+      register: k3s_status
+      retries: 30
+      delay: 5
+      until: k3s_status.rc == 0
+      changed_when: false
+
+    - name: Create kubectl symlink
+      ansible.builtin.file:
+        src: /usr/local/bin/k3s
+        dest: /usr/local/bin/kubectl
+        state: link
+        force: true
+
+    # =======================================================
+    # AWX DIRECTORY
+    # =======================================================
+
+    - name: Create AWX working directory
+      ansible.builtin.file:
+        path: "{{ awx_workdir }}"
+        state: directory
+        mode: "0755"
+
+    # =======================================================
+    # NAMESPACE
+    # =======================================================
+
+    - name: Create AWX namespace
+      ansible.builtin.shell: |
+        kubectl create namespace {{ awx_namespace }} \
+          --dry-run=client \
+          -o yaml | kubectl apply -f -
+      args:
+        executable: /bin/bash
+      register: namespace_apply
+      changed_when: >
+        'created' in namespace_apply.stdout or
+        'configured' in namespace_apply.stdout
+
+    # =======================================================
+    # AWX OPERATOR KUSTOMIZATION
+    # IMPORTANT: install operator/CRDs first, AWX CR later
+    # =======================================================
+
+    - name: Create AWX Operator kustomization
+      ansible.builtin.copy:
+        dest: "{{ awx_workdir }}/kustomization.yaml"
+        mode: "0644"
+        content: |
+          ---
+          apiVersion: kustomize.config.k8s.io/v1beta1
+          kind: Kustomization
+
+          namespace: {{ awx_namespace }}
+
+          resources:
+            - github.com/ansible/awx-operator/config/default?ref={{ awx_operator_version }}
+
+          images:
+            - name: quay.io/ansible/awx-operator
+              newTag: {{ awx_operator_version }}
+
+            - name: gcr.io/kubebuilder/kube-rbac-proxy
+              newName: quay.io/brancz/kube-rbac-proxy
+              newTag: v0.15.0
+
+    - name: Install AWX Operator and CRDs
+      ansible.builtin.command:
+        cmd: kubectl apply -k {{ awx_workdir }}
+      register: operator_apply
+      changed_when: >
+        'created' in operator_apply.stdout or
+        'configured' in operator_apply.stdout
+
+    # =======================================================
+    # WAIT FOR CRD
+    # =======================================================
+
+    - name: Wait until AWX CRD exists
+      ansible.builtin.command:
+        cmd: kubectl get crd awxs.awx.ansible.com
+      register: awx_crd_exists
+      retries: 30
+      delay: 5
+      until: awx_crd_exists.rc == 0
+      changed_when: false
+
+    - name: Wait until AWX CRD is established
+      ansible.builtin.command:
+        cmd: >
+          kubectl wait
+          --for=condition=Established
+          crd/awxs.awx.ansible.com
+          --timeout=300s
+      changed_when: false
+
+    # =======================================================
+    # WAIT FOR OPERATOR
+    # =======================================================
+
+    - name: Wait until AWX Operator deployment exists
+      ansible.builtin.command:
+        cmd: >
+          kubectl get deployment
+          awx-operator-controller-manager
+          -n {{ awx_namespace }}
+      register: awx_operator_exists
+      retries: 60
+      delay: 5
+      until: awx_operator_exists.rc == 0
+      changed_when: false
+
+    - name: Wait for AWX Operator deployment
+      ansible.builtin.command:
+        cmd: >
+          kubectl wait
+          --for=condition=Available
+          deployment/awx-operator-controller-manager
+          -n {{ awx_namespace }}
+          --timeout=600s
+      changed_when: false
+
+    # =======================================================
+    # ADMIN PASSWORD
+    # =======================================================
+
+    - name: Create AWX admin password secret manifest
+      ansible.builtin.copy:
+        dest: "{{ awx_workdir }}/admin-password-secret.yaml"
+        mode: "0600"
+        content: |
+          ---
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: {{ awx_name }}-admin-password
+            namespace: {{ awx_namespace }}
+          type: Opaque
+          stringData:
+            password: "{{ awx_admin_password }}"
+
+    - name: Apply AWX admin password secret
+      ansible.builtin.command:
+        cmd: kubectl apply -f {{ awx_workdir }}/admin-password-secret.yaml
+      register: admin_secret_apply
+      changed_when: >
+        'created' in admin_secret_apply.stdout or
+        'configured' in admin_secret_apply.stdout
+
+    # =======================================================
+    # NODEPORT PREFLIGHT
+    # =======================================================
+
+    - name: Check whether requested AWX NodePort is already used
+      ansible.builtin.shell: |
+        set -o pipefail
+        kubectl get svc -A \
+          -o jsonpath='{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\t"}{range .spec.ports[*]}{.nodePort}{" "}{end}{"\n"}{end}' |
+        awk -v port="{{ awx_nodeport }}" \
+            -v awx_ns="{{ awx_namespace }}" \
+            -v awx_svc="{{ awx_name }}-service" '
+          {
+            for (i = 3; i <= NF; i++) {
+              if ($i == port && !($1 == awx_ns && $2 == awx_svc)) {
+                print $0
+              }
+            }
+          }
+        '
+      args:
+        executable: /bin/bash
+      register: awx_nodeport_conflicts
+      changed_when: false
+
+    - name: Stop if AWX NodePort is already used by another Service
+      ansible.builtin.assert:
+        that:
+          - awx_nodeport_conflicts.stdout | trim | length == 0
+        fail_msg: >-
+          NodePort {{ awx_nodeport }} is already used by another Kubernetes Service:
+          {{ awx_nodeport_conflicts.stdout | default('unknown') }}
+
+    # =======================================================
+    # AWX RESOURCE
+    # Applied only AFTER the AWX CRD is established
+    # =======================================================
+
+    - name: Create AWX manifest
+      ansible.builtin.copy:
+        dest: "{{ awx_workdir }}/awx.yaml"
+        mode: "0644"
+        content: |
+          ---
+          apiVersion: awx.ansible.com/v1beta1
+          kind: AWX
+          metadata:
+            name: {{ awx_name }}
+            namespace: {{ awx_namespace }}
+          spec:
+            admin_user: {{ awx_admin_user }}
+            admin_password_secret: {{ awx_name }}-admin-password
+
+            service_type: {{ awx_service_type }}
+            nodeport_port: {{ awx_nodeport }}
+
+            ingress_type: none
+
+            # Persistent PostgreSQL data
+            postgres_data_volume_init: true
+            postgres_storage_class: {{ awx_storage_class }}
+            postgres_storage_requirements:
+              requests:
+                storage: {{ awx_postgres_storage_size }}
+
+            # Persistent /var/lib/projects
+            projects_persistence: true
+            projects_storage_class: {{ awx_storage_class }}
+            projects_storage_size: {{ awx_projects_storage_size }}
+            projects_storage_access_mode: {{ awx_projects_storage_access_mode }}
+
+    - name: Apply AWX resource
+      ansible.builtin.command:
+        cmd: kubectl apply -f {{ awx_workdir }}/awx.yaml
+      register: awx_apply
+      changed_when: >
+        'created' in awx_apply.stdout or
+        'configured' in awx_apply.stdout
+
+    # =======================================================
+    # WAIT FOR POSTGRES
+    # =======================================================
+
+    # AWX Operator 2.19.1 normally creates a StatefulSet such as
+    # awx-postgres-15. Do not depend on a single Kubernetes label because
+    # labels can differ while the operator is reconciling.
+    - name: Wait for PostgreSQL managed by AWX Operator
+      block:
+        - name: Verify configured StorageClass exists
+          ansible.builtin.command:
+            cmd: kubectl get storageclass {{ awx_storage_class }}
+          changed_when: false
+
+        - name: Verify local-path provisioner deployment exists
+          ansible.builtin.command:
+            cmd: kubectl get deployment local-path-provisioner -n kube-system
+          register: local_path_provisioner_deployment
+          changed_when: false
+          when: awx_storage_class == 'local-path'
+
+        - name: Wait for local-path provisioner to be available
+          ansible.builtin.command:
+            cmd: >
+              kubectl rollout status
+              deployment/local-path-provisioner
+              -n kube-system
+              --timeout=180s
+          changed_when: false
+          when: awx_storage_class == 'local-path'
+
+        - name: Verify K3s storage filesystem is accessible
+          ansible.builtin.command:
+            cmd: df -h /var/lib/rancher/k3s
+          register: k3s_storage_df
+          changed_when: false
+          when: awx_storage_class == 'local-path'
+
+        - name: Verify K3s storage filesystem has available inodes
+          ansible.builtin.command:
+            cmd: df -i /var/lib/rancher/k3s
+          register: k3s_storage_inodes
+          changed_when: false
+          when: awx_storage_class == 'local-path'
+
+        - name: Wait until PostgreSQL StatefulSet exists
+          ansible.builtin.shell: |
+            set -o pipefail
+            kubectl get statefulset \
+              -n {{ awx_namespace }} \
+              -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
+            | awk '/^{{ awx_name }}-postgres/ { print; exit }' \
+            | grep -q .
+          args:
+            executable: /bin/bash
+          register: postgres_statefulset_exists
+          retries: 60
+          delay: 10
+          until: postgres_statefulset_exists.rc == 0
+          changed_when: false
+
+        - name: Detect PostgreSQL StatefulSet name
+          ansible.builtin.shell: |
+            set -o pipefail
+            kubectl get statefulset \
+              -n {{ awx_namespace }} \
+              -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
+            | awk '/^{{ awx_name }}-postgres/ { print; exit }'
+          args:
+            executable: /bin/bash
+          register: postgres_statefulset
+          changed_when: false
+
+        - name: Wait for PostgreSQL StatefulSet rollout
+          ansible.builtin.command:
+            cmd: >
+              kubectl rollout status
+              statefulset/{{ postgres_statefulset.stdout | trim }}
+              -n {{ awx_namespace }}
+              --timeout=900s
+          register: postgres_rollout
+          changed_when: false
+
+        - name: Verify PostgreSQL pod is Running and Ready
+          ansible.builtin.shell: |
+            set -o pipefail
+            kubectl get pods \
+              -n {{ awx_namespace }} \
+              -o custom-columns=NAME:.metadata.name,PHASE:.status.phase,READY:'{.status.containerStatuses[*].ready}' \
+              --no-headers \
+            | awk '$1 ~ /^{{ awx_name }}-postgres/ && $2 == "Running" && $3 !~ /false/ { found=1 } END { exit(found ? 0 : 1) }'
+          args:
+            executable: /bin/bash
+          register: postgres_status
+          retries: 30
+          delay: 10
+          until: postgres_status.rc == 0
+          changed_when: false
+
+      rescue:
+        - name: Collect AWX custom resource status
+          ansible.builtin.command:
+            cmd: kubectl get awx {{ awx_name }} -n {{ awx_namespace }} -o yaml
+          register: awx_cr_debug
+          changed_when: false
+          failed_when: false
+
+        - name: Collect AWX namespace resources
+          ansible.builtin.command:
+            cmd: kubectl get pods,statefulsets,deployments,svc,pvc -n {{ awx_namespace }} -o wide
+          register: awx_resources_debug
+          changed_when: false
+          failed_when: false
+
+        - name: Collect StorageClass status
+          ansible.builtin.command:
+            cmd: kubectl get storageclass -o wide
+          register: awx_storage_debug
+          changed_when: false
+          failed_when: false
+
+        - name: Collect recent AWX namespace events
+          ansible.builtin.command:
+            cmd: kubectl get events -n {{ awx_namespace }} --sort-by=.lastTimestamp
+          register: awx_events_debug
+          changed_when: false
+          failed_when: false
+
+        - name: Collect AWX Operator logs
+          ansible.builtin.command:
+            cmd: >
+              kubectl logs
+              deployment/awx-operator-controller-manager
+              -n {{ awx_namespace }}
+              --all-containers=true
+              --tail=400
+          register: awx_operator_logs_debug
+          changed_when: false
+          failed_when: false
+
+        - name: Collect PostgreSQL pod descriptions
+          ansible.builtin.shell: |
+            set -o pipefail
+            pods="$(kubectl get pods -n {{ awx_namespace }} -o name | grep '^pod/{{ awx_name }}-postgres' || true)"
+            if [ -z "$pods" ]; then
+              echo "No PostgreSQL pods exist."
+              exit 0
+            fi
+            for pod in $pods; do
+              echo "===== $pod ====="
+              kubectl describe -n {{ awx_namespace }} "$pod" || true
+            done
+          args:
+            executable: /bin/bash
+          register: awx_postgres_describe_debug
+          changed_when: false
+          failed_when: false
+
+        - name: Save PostgreSQL diagnostics
+          ansible.builtin.copy:
+            dest: "{{ awx_workdir }}/postgres-diagnostics.txt"
+            mode: "0640"
+            content: |
+              AWX CR
+              ============================================================
+              {{ awx_cr_debug.stdout | default('') }}
+
+              RESOURCES
+              ============================================================
+              {{ awx_resources_debug.stdout | default('') }}
+
+              STORAGE CLASSES
+              ============================================================
+              {{ awx_storage_debug.stdout | default('') }}
+
+              EVENTS
+              ============================================================
+              {{ awx_events_debug.stdout | default('') }}
+
+              POSTGRES POD DESCRIBE
+              ============================================================
+              {{ awx_postgres_describe_debug.stdout | default('') }}
+
+              OPERATOR LOGS
+              ============================================================
+              {{ awx_operator_logs_debug.stdout | default('') }}
+
+        - name: Detect AWX Operator immutable StatefulSet update bug
+          ansible.builtin.set_fact:
+            awx_postgres_immutable_statefulset_error: >-
+              {{
+                ('Forbidden: updates to statefulset spec' in (awx_operator_logs_debug.stdout | default('')))
+                or
+                (
+                  'StatefulSet.apps' in (awx_operator_logs_debug.stdout | default(''))
+                  and 'is invalid' in (awx_operator_logs_debug.stdout | default(''))
+                  and 'Forbidden' in (awx_operator_logs_debug.stdout | default(''))
+                )
+              }}
+
+        - name: Repair stale PostgreSQL StatefulSet without deleting PVCs
+          ansible.builtin.shell: |
+            set -o pipefail
+            statefulsets="$(
+              kubectl get statefulset -n {{ awx_namespace }} -o name \
+              | grep '^statefulset.apps/{{ awx_name }}-postgres' || true
+            )"
+            if [ -z "$statefulsets" ]; then
+              echo "No stale PostgreSQL StatefulSet found to recreate."
+              exit 0
+            fi
+            for sts in $statefulsets; do
+              echo "Deleting stale $sts; PVCs are intentionally preserved."
+              kubectl delete -n {{ awx_namespace }} "$sts" --wait=true
+            done
+          args:
+            executable: /bin/bash
+          register: postgres_statefulset_repair
+          changed_when: "'Deleting stale' in postgres_statefulset_repair.stdout"
+          when: awx_postgres_immutable_statefulset_error | bool
+
+        - name: Restart AWX Operator after PostgreSQL StatefulSet repair
+          ansible.builtin.command:
+            cmd: kubectl rollout restart deployment/awx-operator-controller-manager -n {{ awx_namespace }}
+          when: awx_postgres_immutable_statefulset_error | bool
+          changed_when: true
+
+        - name: Wait for AWX Operator after repair
+          ansible.builtin.command:
+            cmd: >
+              kubectl rollout status
+              deployment/awx-operator-controller-manager
+              -n {{ awx_namespace }}
+              --timeout=300s
+          when: awx_postgres_immutable_statefulset_error | bool
+          changed_when: false
+
+        - name: Force AWX reconciliation after repair
+          ansible.builtin.shell: |
+            kubectl annotate awx {{ awx_name }} \
+              -n {{ awx_namespace }} \
+              awx.ansible.com/reconcile-at="$(date +%s)" \
+              --overwrite
+          args:
+            executable: /bin/bash
+          when: awx_postgres_immutable_statefulset_error | bool
+          changed_when: true
+
+        - name: Wait for PostgreSQL StatefulSet to be recreated
+          ansible.builtin.shell: |
+            set -o pipefail
+            kubectl get statefulset \
+              -n {{ awx_namespace }} \
+              -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
+            | awk '/^{{ awx_name }}-postgres/ { print; exit }'
+          args:
+            executable: /bin/bash
+          register: postgres_statefulset_recreated
+          retries: 60
+          delay: 10
+          until: postgres_statefulset_recreated.rc == 0 and (postgres_statefulset_recreated.stdout | trim | length > 0)
+          changed_when: false
+          when: awx_postgres_immutable_statefulset_error | bool
+
+        - name: Wait for repaired PostgreSQL StatefulSet rollout
+          ansible.builtin.command:
+            cmd: >
+              kubectl rollout status
+              statefulset/{{ postgres_statefulset_recreated.stdout | trim }}
+              -n {{ awx_namespace }}
+              --timeout=900s
+          register: postgres_repaired_rollout
+          changed_when: false
+          when: awx_postgres_immutable_statefulset_error | bool
+
+        - name: Mark automatic PostgreSQL repair as successful
+          ansible.builtin.set_fact:
+            awx_postgres_repair_succeeded: true
+          when:
+            - awx_postgres_immutable_statefulset_error | bool
+            - postgres_repaired_rollout is defined
+            - (postgres_repaired_rollout.rc | default(1)) == 0
+
+        - name: Show PostgreSQL/AWX diagnostics location
+          ansible.builtin.debug:
+            msg:
+              - "PostgreSQL diagnostics: {{ awx_workdir }}/postgres-diagnostics.txt"
+              - "Immutable StatefulSet error detected: {{ awx_postgres_immutable_statefulset_error | bool }}"
+              - "Automatic repair succeeded: {{ awx_postgres_repair_succeeded | default(false) | bool }}"
+
+        - name: Stop because AWX Operator did not create a healthy PostgreSQL instance
+          ansible.builtin.fail:
+            msg: >-
+              AWX Operator still did not create a healthy PostgreSQL instance.
+              Full diagnostics were saved to {{ awx_workdir }}/postgres-diagnostics.txt.
+              Check the EVENTS, POSTGRES POD DESCRIBE and OPERATOR LOGS sections.
+          when: not (awx_postgres_repair_succeeded | default(false) | bool)
+
+    # =======================================================
+    # WAIT FOR AWX WEB
+    # =======================================================
+
+    - name: Wait until AWX web deployment exists
+      ansible.builtin.command:
+        cmd: >
+          kubectl get deployment
+          {{ awx_name }}-web
+          -n {{ awx_namespace }}
+      register: awx_web_exists
+      retries: 90
+      delay: 10
+      until: awx_web_exists.rc == 0
+      changed_when: false
+
+    - name: Wait for AWX web deployment
+      ansible.builtin.command:
+        cmd: >
+          kubectl wait
+          --for=condition=Available
+          deployment/{{ awx_name }}-web
+          -n {{ awx_namespace }}
+          --timeout=900s
+      changed_when: false
+
+    # =======================================================
+    # WAIT FOR AWX TASK
+    # =======================================================
+
+    - name: Wait until AWX task deployment exists
+      ansible.builtin.command:
+        cmd: >
+          kubectl get deployment
+          {{ awx_name }}-task
+          -n {{ awx_namespace }}
+      register: awx_task_exists
+      retries: 90
+      delay: 10
+      until: awx_task_exists.rc == 0
+      changed_when: false
+
+    - name: Wait for AWX task deployment
+      ansible.builtin.command:
+        cmd: >
+          kubectl wait
+          --for=condition=Available
+          deployment/{{ awx_name }}-task
+          -n {{ awx_namespace }}
+          --timeout=900s
+      changed_when: false
+
+    # =======================================================
+    # AWX API HEALTH CHECK
+    # =======================================================
+
+    - name: Detect server IP for NodePort health check
+      ansible.builtin.set_fact:
+        awx_server_ip: "{{ ansible_default_ipv4.address }}"
+
+    - name: Wait for AWX API
+      ansible.builtin.uri:
+        url: "http://{{ awx_server_ip }}:{{ awx_nodeport }}/api/v2/ping/"
+        method: GET
+        url_username: "{{ awx_admin_user }}"
+        url_password: "{{ awx_admin_password }}"
+        force_basic_auth: true
+        status_code: 200
+        return_content: true
+      register: awx_ping
+      retries: 60
+      delay: 10
+      until: awx_ping.status == 200
+      changed_when: false
+
+    # =======================================================
+    # LDAP / LLDAP
+    # =======================================================
+
+    - name: Mark LDAP as disabled when LDAP integration is disabled
+      ansible.builtin.set_fact:
+        awx_ldap_configuration_status: "disabled"
+      when: not (awx_ldap_enabled | bool)
+
+    - name: Configure AWX LDAP/LLDAP authentication
+      when: awx_ldap_enabled | bool
+      block:
+        # Configuration is written to AWX first. Connectivity/LDAP errors below
+        # are diagnostic only and do not remove the saved AWX LDAP settings.
+        - name: Build AWX LDAP settings payload
+          ansible.builtin.set_fact:
+            awx_ldap_payload:
+              AUTH_LDAP_SERVER_URI: "{{ awx_ldap_server_uri }}"
+              AUTH_LDAP_BIND_DN: "{{ awx_ldap_bind_dn }}"
+              AUTH_LDAP_START_TLS: "{{ awx_ldap_start_tls | bool }}"
+              AUTH_LDAP_USER_SEARCH:
+                - "{{ awx_ldap_user_base_dn }}"
+                - SCOPE_SUBTREE
+                - "(&(objectClass=person)(uid=%(user)s))"
+              AUTH_LDAP_GROUP_SEARCH:
+                - "{{ awx_ldap_group_base_dn }}"
+                - SCOPE_SUBTREE
+                - "(objectClass=groupOfUniqueNames)"
+              AUTH_LDAP_GROUP_TYPE: GroupOfUniqueNamesType
+              AUTH_LDAP_GROUP_TYPE_PARAMS:
+                name_attr: cn
+                member_attr: uniqueMember
+              AUTH_LDAP_USER_ATTR_MAP:
+                first_name: givenName
+                last_name: sn
+                email: mail
+              AUTH_LDAP_REQUIRE_GROUP: "{{ awx_ldap_require_group }}"
+          no_log: true
+
+        - name: Add LDAP bind password to payload when provided
+          ansible.builtin.set_fact:
+            awx_ldap_payload: >-
+              {{
+                awx_ldap_payload | combine(
+                  {'AUTH_LDAP_BIND_PASSWORD': awx_ldap_bind_password}
+                )
+              }}
+          when: awx_ldap_bind_password | length > 0
+          no_log: true
+
+        - name: Save LDAP configuration in AWX
+          ansible.builtin.uri:
+            url: "http://{{ awx_server_ip }}:{{ awx_nodeport }}/api/v2/settings/ldap/"
+            method: PATCH
+            url_username: "{{ awx_admin_user }}"
+            url_password: "{{ awx_admin_password }}"
+            force_basic_auth: true
+            body_format: json
+            body: "{{ awx_ldap_payload }}"
+            status_code:
+              - 200
+              - 400
+              - 401
+              - 403
+              - 500
+            return_content: true
+          register: awx_ldap_config_result
+          failed_when: false
+          no_log: true
+
+        - name: Record LDAP configuration save result
+          ansible.builtin.set_fact:
+            awx_ldap_configuration_status: >-
+              {{
+                'configured'
+                if (awx_ldap_config_result.status | default(0) | int) == 200
+                else 'save failed - AWX returned HTTP ' ~ (awx_ldap_config_result.status | default('unknown') | string)
+              }}
+
+        - name: Check LDAP TCP connectivity after saving configuration
+          ansible.builtin.wait_for:
+            host: "{{ awx_ldap_host }}"
+            port: "{{ awx_ldap_port }}"
+            timeout: 15
+            state: started
+          register: awx_ldap_tcp_check
+          failed_when: false
+
+        - name: Report LDAP connectivity warning without removing configuration
+          ansible.builtin.debug:
+            msg: >-
+              LDAP settings remain configured in AWX, but TCP connectivity to
+              {{ awx_ldap_host }}:{{ awx_ldap_port }} currently fails.
+          when: awx_ldap_tcp_check.failed | default(false) | bool
+
+        - name: Read back LDAP settings from AWX
+          ansible.builtin.uri:
+            url: "http://{{ awx_server_ip }}:{{ awx_nodeport }}/api/v2/settings/ldap/"
+            method: GET
+            url_username: "{{ awx_admin_user }}"
+            url_password: "{{ awx_admin_password }}"
+            force_basic_auth: true
+            status_code: 200
+            return_content: true
+          register: awx_ldap_settings
+          changed_when: false
+          failed_when: false
+          no_log: true
+
+        - name: Continue when LDAP configuration could not be saved
+          ansible.builtin.debug:
+            msg: >-
+              AWX rejected the LDAP settings, so they could not be persisted.
+              Installation continues because awx_ldap_optional=true.
+              HTTP status: {{ awx_ldap_config_result.status | default('unknown') }}.
+          when:
+            - (awx_ldap_config_result.status | default(0) | int) != 200
+            - awx_ldap_optional | bool
+
+        - name: Stop when LDAP configuration is required and AWX rejected it
+          ansible.builtin.fail:
+            msg: >-
+              AWX rejected the LDAP settings and awx_ldap_optional=false.
+              HTTP status: {{ awx_ldap_config_result.status | default('unknown') }}.
+          when:
+            - (awx_ldap_config_result.status | default(0) | int) != 200
+            - not (awx_ldap_optional | bool)
+
+    # =======================================================
+    # PERSISTENT STORAGE VERIFICATION
+    # =======================================================
+
+    - name: Wait for AWX projects PVC to become Bound
+      ansible.builtin.command:
+        cmd: >
+          kubectl get pvc {{ awx_name }}-projects-claim
+          -n {{ awx_namespace }}
+          -o jsonpath={.status.phase}
+      register: awx_projects_pvc_phase
+      retries: 60
+      delay: 5
+      until:
+        - awx_projects_pvc_phase.rc == 0
+        - awx_projects_pvc_phase.stdout | trim == 'Bound'
+      changed_when: false
+
+    - name: Wait for all PostgreSQL PVCs to become Bound
+      ansible.builtin.shell: |
+        set -o pipefail
+        pvc_data="$(kubectl get pvc -n {{ awx_namespace }} \
+          -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.phase}{"\n"}{end}' | \
+          awk '$1 ~ /postgres/ {print}')"
+
+        test -n "$pvc_data" || exit 1
+        echo "$pvc_data"
+        echo "$pvc_data" | awk '$2 != "Bound" { bad=1 } END { exit bad ? 1 : 0 }'
+      args:
+        executable: /bin/bash
+      register: awx_postgres_pvc_bound
+      retries: 60
+      delay: 5
+      until: awx_postgres_pvc_bound.rc == 0
+      changed_when: false
+
+    - name: Get AWX PVC report
+      ansible.builtin.command:
+        cmd: kubectl get pvc -n {{ awx_namespace }} -o wide
+      register: awx_pvcs
+      changed_when: false
+
+    # =======================================================
+    # SERVICE
+    # =======================================================
+
+    - name: Get AWX service
+      ansible.builtin.command:
+        cmd: kubectl get svc {{ awx_name }}-service -n {{ awx_namespace }}
+      register: awx_service
+      changed_when: false
+
+    # =======================================================
+    # PODS
+    # =======================================================
+
+    - name: Get AWX pods
+      ansible.builtin.command:
+        cmd: kubectl get pods -n {{ awx_namespace }} -o wide
+      register: awx_pods
+      changed_when: false
+
+    - name: Show AWX pods
+      ansible.builtin.debug:
+        var: awx_pods.stdout_lines
+
+    # =======================================================
+    # FINAL REPORT
+    # =======================================================
+
+    - name: Build final installation report
+      ansible.builtin.set_fact:
+        awx_final_report: |
+          ============================================================
+          AWX INSTALLATION REPORT
+          ============================================================
+          Status: OK
+          Namespace: {{ awx_namespace }}
+          AWX name: {{ awx_name }}
+          AWX version: {{ awx_ping.json.version | default('unknown') }}
+          AWX Operator: {{ awx_operator_version }}
+          URL: http://{{ awx_server_ip }}:{{ awx_nodeport }}
+          Admin user: {{ awx_admin_user }}
+          Admin password secret: {{ awx_name }}-admin-password
+
+          PERSISTENT STORAGE
+          ------------------------------------------------------------
+          StorageClass: {{ awx_storage_class }}
+          PostgreSQL requested size: {{ awx_postgres_storage_size }}
+          Projects requested size: {{ awx_projects_storage_size }}
+          Projects access mode: {{ awx_projects_storage_access_mode }}
+
+          PVCs:
+          {{ awx_pvcs.stdout | indent(10, true) }}
+
+          LDAP / LLDAP
+          ------------------------------------------------------------
+          Enabled: {{ awx_ldap_enabled | bool }}
+          Configuration status: {{ awx_ldap_configuration_status | default('unknown') }}
+          Server: {{ awx_ldap_server_uri if (awx_ldap_enabled | bool) else 'disabled' }}
+          Base DN: {{ awx_ldap_base_dn if (awx_ldap_enabled | bool) else 'disabled' }}
+          User search base: {{ awx_ldap_user_base_dn if (awx_ldap_enabled | bool) else 'disabled' }}
+          Group search base: {{ awx_ldap_group_base_dn if (awx_ldap_enabled | bool) else 'disabled' }}
+
+          PODS
+          ------------------------------------------------------------
+          {{ awx_pods.stdout | indent(10, true) }}
+
+          Service:
+          {{ awx_service.stdout | indent(10, true) }}
+          ============================================================
+
+    - name: Save final installation report
+      ansible.builtin.copy:
+        dest: "{{ awx_report_file }}"
+        mode: "0640"
+        content: "{{ awx_final_report }}\n"
+
+    - name: Show final installation report
+      ansible.builtin.debug:
+        msg: "{{ awx_final_report.split('\n') }}"
