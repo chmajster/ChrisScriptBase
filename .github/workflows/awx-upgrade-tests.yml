@@ -1,0 +1,30 @@
+name: Test AWX upgrade playbook
+
+on:
+  pull_request:
+    paths:
+      - 'ansibletower-playbook/update_awx.yaml'
+      - 'ansibletower-playbook/tests/test_update_awx.py'
+      - 'ansibletower-playbook/README.md'
+      - '.github/workflows/awx-upgrade-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install Ansible validation tools
+        run: python -m pip install ansible-core==2.21.5 ansible-lint
+      - name: Check playbook syntax
+        run: ansible-playbook -i localhost, --syntax-check ansibletower-playbook/update_awx.yaml
+      - name: Lint the upgrade playbook
+        run: ansible-lint ansibletower-playbook/update_awx.yaml
+      - name: Test upgrade and failure paths
+        run: python ansibletower-playbook/tests/test_update_awx.py

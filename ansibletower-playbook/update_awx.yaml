@@ -1,0 +1,304 @@
+---
+- name: Upgrade an existing AWX installation on K3s
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+
+  vars:
+    # Match initial_awx.yaml. Run on the K3s server, outside the AWX being upgraded.
+    awx_namespace: awx
+    awx_name: awx
+    awx_workdir: /opt/awx
+    awx_nodeport: 30080
+    awx_kubectl: [/usr/local/bin/k3s, kubectl]
+    awx_api_url: "http://{{ ansible_facts['default_ipv4']['address'] | default('127.0.0.1') }}:{{ awx_nodeport }}"
+
+    # Use a published operator release. The operator selects its matching AWX version.
+    awx_operator_version: latest
+    awx_operator_releases_url: https://api.github.com/repos/ansible/awx-operator/releases
+    awx_backup_storage_class: local-path
+    awx_backup_storage_size: 20Gi
+    awx_wait_retries: 120
+    awx_wait_delay: 10
+
+  pre_tasks:
+    - name: Validate the requested operator release
+      ansible.builtin.assert:
+        that:
+          - awx_operator_version == 'latest' or awx_operator_version is match('^[0-9]+\.[0-9]+\.[0-9]+$')
+        fail_msg: Set awx_operator_version to latest or a published version such as 2.19.1.
+
+    - name: Read the existing AWX resource
+      ansible.builtin.command:
+        argv: "{{ awx_kubectl + ['get', 'awx', awx_name, '-n', awx_namespace, '-o', 'json'] }}"
+      register: awx_existing_resource
+      changed_when: false
+      check_mode: false
+      no_log: true
+
+    - name: Read the existing operator deployment
+      ansible.builtin.command:
+        argv: "{{ awx_kubectl + ['get', 'deployment', 'awx-operator-controller-manager', '-n', awx_namespace, '-o', 'json'] }}"
+      register: awx_existing_operator
+      changed_when: false
+      check_mode: false
+      no_log: true
+
+    - name: Read the published operator release
+      ansible.builtin.uri:
+        url: "{{ awx_operator_releases_url }}/{{ 'latest' if awx_operator_version == 'latest' else 'tags/' ~ awx_operator_version }}"
+        headers:
+          Accept: application/vnd.github+json
+        return_content: true
+        status_code: 200
+      register: awx_release
+      check_mode: false
+
+    - name: Resolve installed and target operator versions
+      ansible.builtin.set_fact:
+        awx_current_operator_image: >-
+          {{ (awx_existing_operator.stdout | from_json).spec.template.spec.containers
+             | selectattr('name', 'equalto', 'awx-manager') | map(attribute='image') | first }}
+        awx_target_operator_version: "{{ awx_release.json.tag_name }}"
+
+    - name: Verify a supported upgrade without an AWX image override
+      ansible.builtin.assert:
+        that:
+          - awx_target_operator_version is match('^[0-9]+\.[0-9]+\.[0-9]+$')
+          - not (awx_release.json.prerelease | bool)
+          - not (awx_release.json.draft | bool)
+          - awx_current_operator_image is match('^quay.io/ansible/awx-operator:[0-9]+\.[0-9]+\.[0-9]+$')
+          - awx_target_operator_version is version(awx_current_operator_image.split(':')[-1], '>=')
+          - (awx_existing_resource.stdout | from_json).spec.auto_upgrade | default(true) | bool
+          - ((awx_existing_resource.stdout | from_json).spec.image_version | default('') | length) == 0
+          - (awx_existing_resource.stdout | from_json).spec.image | default('quay.io/ansible/awx') == 'quay.io/ansible/awx'
+        fail_msg: >-
+          This playbook requires a tagged upstream operator, enabled AWX auto_upgrade,
+          the standard AWX image and no image_version override. Downgrades are rejected.
+
+    - name: Read the AWX version bundled with the installed operator
+      ansible.builtin.command:
+        argv: >-
+          {{ awx_kubectl + ['exec', 'deployment/awx-operator-controller-manager', '-n', awx_namespace,
+                           '-c', 'awx-manager', '--', 'printenv', 'DEFAULT_AWX_VERSION'] }}
+      register: awx_installed_bundle
+      changed_when: false
+      check_mode: false
+
+    - name: Check the current AWX API
+      ansible.builtin.uri:
+        url: "{{ awx_api_url }}/api/v2/ping/"
+        status_code: 200
+        return_content: true
+      register: awx_ping_before
+      check_mode: false
+
+    - name: Show the upgrade plan
+      ansible.builtin.debug:
+        msg:
+          - "Operator: {{ awx_current_operator_image.split(':')[-1] }} -> {{ awx_target_operator_version }}"
+          - "Current AWX version: {{ awx_ping_before.json.version }}"
+          - "Namespace: {{ awx_namespace }}; instance: {{ awx_name }}"
+
+    - name: Finish when the requested operator version is already installed
+      ansible.builtin.meta: end_play
+      when:
+        - awx_current_operator_image == 'quay.io/ansible/awx-operator:' ~ awx_target_operator_version
+        - awx_ping_before.json.version == awx_installed_bundle.stdout | trim
+
+    - name: Finish after preflight in check mode
+      ansible.builtin.meta: end_play
+      when: ansible_check_mode
+
+  tasks:
+    - name: Set unique backup and report locations
+      ansible.builtin.set_fact:
+        awx_upgrade_backup_name: "{{ awx_name }}-upgrade-{{ ansible_date_time.epoch }}"
+        awx_upgrade_dir: "{{ awx_workdir }}/upgrades/{{ ansible_date_time.iso8601_basic_short }}"
+
+    - name: Create the private upgrade directory
+      ansible.builtin.file:
+        path: "{{ awx_upgrade_dir }}"
+        state: directory
+        mode: '0700'
+
+    - name: Save the existing Kubernetes configuration
+      ansible.builtin.copy:
+        dest: "{{ awx_upgrade_dir }}/{{ item.name }}.json"
+        content: "{{ item.content }}\n"
+        mode: '0600'
+      loop:
+        - name: awx-before
+          content: "{{ awx_existing_resource.stdout }}"
+        - name: operator-before
+          content: "{{ awx_existing_operator.stdout }}"
+      no_log: true
+      diff: false
+
+    - name: Back up and upgrade AWX
+      block:
+        - name: Create a database and secrets backup using the current operator
+          ansible.builtin.command:
+            argv: "{{ awx_kubectl + ['apply', '-f', '-'] }}"
+            stdin: >-
+              {{ {'apiVersion': 'awx.ansible.com/v1beta1', 'kind': 'AWXBackup',
+                  'metadata': {'name': awx_upgrade_backup_name, 'namespace': awx_namespace},
+                  'spec': {'deployment_name': awx_name,
+                           'backup_storage_class': awx_backup_storage_class,
+                           'backup_storage_requirements': awx_backup_storage_size,
+                           'clean_backup_on_delete': false}} | to_json }}
+          register: awx_backup_apply
+          changed_when: "'created' in awx_backup_apply.stdout or 'configured' in awx_backup_apply.stdout"
+
+        # backupDirectory is published only after the backup role has completed.
+        - name: Wait for a completed backup before changing the operator
+          ansible.builtin.command:
+            argv: "{{ awx_kubectl + ['get', 'awxbackup', awx_upgrade_backup_name, '-n', awx_namespace, '-o', 'json'] }}"
+          register: awx_backup_status
+          changed_when: false
+          retries: "{{ awx_wait_retries }}"
+          delay: "{{ awx_wait_delay }}"
+          until:
+            - awx_backup_status.rc == 0
+            - (((awx_backup_status.stdout | from_json).status | default({})).backupDirectory | default('') | length) > 0
+
+        - name: Save the completed backup reference
+          ansible.builtin.copy:
+            dest: "{{ awx_upgrade_dir }}/backup.json"
+            content: "{{ awx_backup_status.stdout }}\n"
+            mode: '0600'
+
+        - name: Write the target operator kustomization
+          ansible.builtin.copy:
+            dest: "{{ awx_upgrade_dir }}/kustomization.yaml"
+            mode: '0600'
+            content: |
+              ---
+              apiVersion: kustomize.config.k8s.io/v1beta1
+              kind: Kustomization
+              namespace: {{ awx_namespace | to_json }}
+              resources:
+                - github.com/ansible/awx-operator/config/default?ref={{ awx_target_operator_version }}
+              images:
+                - name: quay.io/ansible/awx-operator
+                  newTag: {{ awx_target_operator_version | to_json }}
+                - name: gcr.io/kubebuilder/kube-rbac-proxy
+                  newName: quay.io/brancz/kube-rbac-proxy
+                  newTag: v0.15.0
+
+        - name: Apply the target AWX Operator and CRDs
+          ansible.builtin.command:
+            argv: "{{ awx_kubectl + ['apply', '-k', awx_upgrade_dir] }}"
+          register: awx_operator_apply
+          changed_when: "'created' in awx_operator_apply.stdout or 'configured' in awx_operator_apply.stdout"
+
+        - name: Wait for the updated operator rollout
+          ansible.builtin.command:
+            argv: >-
+              {{ awx_kubectl + ['rollout', 'status', 'deployment/awx-operator-controller-manager',
+                               '-n', awx_namespace, '--timeout=1200s'] }}
+          changed_when: false
+
+        - name: Read the AWX version bundled with the updated operator
+          ansible.builtin.command:
+            argv: >-
+              {{ awx_kubectl + ['exec', 'deployment/awx-operator-controller-manager', '-n', awx_namespace,
+                               '-c', 'awx-manager', '--', 'printenv', 'DEFAULT_AWX_VERSION'] }}
+          register: awx_expected_version
+          changed_when: false
+
+        - name: Verify the operator advertises a specific AWX version
+          ansible.builtin.assert:
+            that:
+              - awx_expected_version.stdout | trim is match('^[0-9]+\.[0-9]+\.[0-9]+$')
+            fail_msg: The operator did not advertise a supported DEFAULT_AWX_VERSION.
+
+        - name: Request reconciliation of the existing AWX resource
+          ansible.builtin.command:
+            argv: >-
+              {{ awx_kubectl + ['annotate', 'awx', awx_name, '-n', awx_namespace, '--overwrite',
+                               'awx.ansible.com/reconcile-at=' ~ ansible_date_time.epoch] }}
+          changed_when: true
+
+        # Old deployments can still be Ready while the operator starts reconciliation.
+        - name: Wait until both AWX deployments use the bundled image
+          ansible.builtin.command:
+            argv: "{{ awx_kubectl + ['get', 'deployment', item, '-n', awx_namespace, '-o', 'json'] }}"
+          loop:
+            - "{{ awx_name }}-web"
+            - "{{ awx_name }}-task"
+          register: awx_deployment_image
+          changed_when: false
+          retries: "{{ awx_wait_retries }}"
+          delay: "{{ awx_wait_delay }}"
+          until:
+            - awx_deployment_image.rc == 0
+            - >-
+              ((awx_deployment_image.stdout | from_json).spec.template.spec.containers
+               | selectattr('name', 'equalto', item) | map(attribute='image') | list)
+              == ['quay.io/ansible/awx:' ~ (awx_expected_version.stdout | trim)]
+
+        - name: Wait for AWX web and task rollouts
+          ansible.builtin.command:
+            argv: "{{ awx_kubectl + ['rollout', 'status', 'deployment/' ~ item, '-n', awx_namespace, '--timeout=1200s'] }}"
+          loop:
+            - "{{ awx_name }}-web"
+            - "{{ awx_name }}-task"
+          changed_when: false
+
+        - name: Wait until the API serves the bundled AWX version
+          ansible.builtin.uri:
+            url: "{{ awx_api_url }}/api/v2/ping/"
+            status_code: 200
+            return_content: true
+          register: awx_ping_after
+          retries: "{{ awx_wait_retries }}"
+          delay: "{{ awx_wait_delay }}"
+          until:
+            - awx_ping_after.status | default(0) == 200
+            - (awx_ping_after.json | default({})).version | default('') == awx_expected_version.stdout | trim
+
+        - name: Save the upgrade report
+          ansible.builtin.copy:
+            dest: "{{ awx_upgrade_dir }}/upgrade-report.txt"
+            mode: '0600'
+            content: |
+              AWX UPGRADE: OK
+              Namespace: {{ awx_namespace }}
+              Instance: {{ awx_name }}
+              Operator: {{ awx_current_operator_image.split(':')[-1] }} -> {{ awx_target_operator_version }}
+              AWX: {{ awx_ping_before.json.version }} -> {{ awx_ping_after.json.version }}
+              URL: {{ awx_api_url }}
+              Backup resource: {{ awx_upgrade_backup_name }}
+              Backup PVC: {{ (awx_backup_status.stdout | from_json).status.backupClaim }}
+              Backup directory: {{ (awx_backup_status.stdout | from_json).status.backupDirectory }}
+
+        - name: Show the upgrade result
+          ansible.builtin.debug:
+            msg:
+              - "AWX {{ awx_ping_after.json.version }} is ready at {{ awx_api_url }}."
+              - "Upgrade report: {{ awx_upgrade_dir }}/upgrade-report.txt"
+              - "Backup reference: {{ awx_upgrade_dir }}/backup.json"
+
+      rescue:
+        - name: Collect Kubernetes resource diagnostics
+          ansible.builtin.command:
+            argv: "{{ awx_kubectl + ['get', 'pods,statefulsets,deployments,svc,pvc,awxbackups', '-n', awx_namespace, '-o', 'wide'] }}"
+          register: awx_upgrade_diagnostics
+          changed_when: false
+          failed_when: false
+
+        - name: Save failure diagnostics
+          ansible.builtin.copy:
+            dest: "{{ awx_upgrade_dir }}/diagnostics.txt"
+            mode: '0600'
+            content: |
+              {{ awx_upgrade_diagnostics.stdout | default('') }}
+              {{ awx_upgrade_diagnostics.stderr | default('') }}
+
+        - name: Stop after an unsuccessful upgrade
+          ansible.builtin.fail:
+            msg: >-
+              AWX upgrade did not complete. Inspect {{ awx_upgrade_dir }}/diagnostics.txt
+              and AWXBackup {{ awx_upgrade_backup_name }} in namespace {{ awx_namespace }}.
