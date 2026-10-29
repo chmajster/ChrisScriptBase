@@ -1,0 +1,33 @@
+# Configuration for awx_inventory_hosts.py.
+# Values in this file override the defaults defined in the script.
+# Omitted settings keep their default values.
+
+# Server address or full API base URL, e.g. https://server/api/controller/v2/.
+AWX_URL = 'http://10.0.0.204:30080'
+
+# AWX API access token.
+AWX_TOKEN = 'XhUJQQAbseBOUzqr0sG24649GSahs6'
+
+# Quoted inventory name or numeric ID, e.g. 7.
+INVENTORY = 'it2_inventory'
+
+# Group variable names whose values are read from AWX.
+CREDENTIAL_VARIABLES = ['os_credential']
+
+# Literal credential values added to every host.
+EXTRA_CREDENTIAL_VARIABLES = ['xd', '123']
+
+# Value separator used in Full_Credential.
+FULL_CREDENTIAL_SEPARATOR = ', '
+
+# JSON output file path.
+OUTPUT_FILE = 'awx_inventory_hosts.json'
+
+# Excel output file path.
+EXCEL_OUTPUT_FILE = 'awx_inventory_hosts.xlsx'
+
+# Timeout for a single request, in seconds.
+TIMEOUT = 30
+
+# Number of records per API page.
+PAGE_SIZE = 200
