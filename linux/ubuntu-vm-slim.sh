@@ -14,16 +14,19 @@ set -Eeuo pipefail
 #
 # Automatycznie:
 #   sudo ./ubuntu-vm-slim.sh --apply --aggressive --yes
+#   sudo ./ubuntu-vm-slim.sh --apply --yes --post-action reboot
+#   sudo ./ubuntu-vm-slim.sh --apply --yes --post-action shutdown
 # ============================================================
 
 SCRIPT_NAME="ubuntu-vm-slim"
-VERSION="1.1.2"
+VERSION="1.2.0"
 
 APPLY=false
 AGGRESSIVE=false
 YES=false
 SHOW_ALL=false
 REMOVE_SNAPD=false
+POST_ACTION="none"
 
 TIMESTAMP="$(date '+%Y%m%d-%H%M%S')"
 BACKUP_DIR="/var/backups/chriscriptbase/vm-slim-${TIMESTAMP}"
@@ -84,8 +87,17 @@ Opcje:
   --remove-snapd    usuń snapd, ale tylko jeśli nie ma zainstalowanych snapów
   --all             pokaż wszystkie zainstalowane pakiety
   --yes             bez pytania o potwierdzenie
+  --post-action AKCJA
+                    akcja po udanym --apply: none (domyślnie), reboot lub shutdown
+                    restart/wyłączenie za 1 minutę po kontroli końcowej
   --help            pomoc
   --uninstall       usuń ten skrypt z /usr/local/sbin
+
+Przykłady:
+  sudo $0 --apply --yes --post-action reboot
+  sudo $0 --apply --yes --post-action shutdown
+
+Zaplanowany restart lub wyłączenie można anulować: sudo shutdown -c
 EOF
 }
 
@@ -114,6 +126,17 @@ while [[ $# -gt 0 ]]; do
         --yes|-y)
             YES=true
             ;;
+        --post-action)
+            if [[ $# -lt 2 ]]; then
+                fail "Opcja --post-action wymaga wartości: none, reboot lub shutdown."
+                exit 1
+            fi
+            POST_ACTION="$2"
+            shift
+            ;;
+        --post-action=*)
+            POST_ACTION="${1#*=}"
+            ;;
         --help|-h)
             usage
             exit 0
@@ -137,6 +160,19 @@ while [[ $# -gt 0 ]]; do
 
     shift
 done
+
+case "$POST_ACTION" in
+    none|reboot|shutdown) ;;
+    *)
+        fail "Nieznana akcja: ${POST_ACTION}. Użyj --post-action none, reboot lub shutdown."
+        exit 1
+        ;;
+esac
+
+if [[ "$POST_ACTION" != "none" && "$APPLY" != true ]]; then
+    fail "Opcja --post-action ${POST_ACTION} wymaga --apply."
+    exit 1
+fi
 
 is_installed() {
     dpkg-query -W -f='${Status}' "$1" 2>/dev/null \
@@ -195,6 +231,11 @@ fi
 
 if [[ "$APPLY" == true && $EUID -ne 0 ]]; then
     fail "Tryb --apply wymaga sudo/root."
+    exit 1
+fi
+
+if [[ "$POST_ACTION" != "none" ]] && ! command -v shutdown >/dev/null 2>&1; then
+    fail "Nie znaleziono shutdown, wymaganego przez --post-action ${POST_ACTION}."
     exit 1
 fi
 
@@ -626,6 +667,11 @@ else
     warn "Pakiety aplikacyjne, bazy danych, nginx, Docker itd. nie są automatycznie usuwane."
     warn "Profil aggressive usuwa GUI i typowe komponenty desktop/peripherals."
 
+    case "$POST_ACTION" in
+        reboot) info "Po udanym czyszczeniu i kontroli końcowej: restart VM za 1 minutę." ;;
+        shutdown) info "Po udanym czyszczeniu i kontroli końcowej: wyłączenie VM za 1 minutę." ;;
+    esac
+
     if ! confirm; then
         warn "Operacja anulowana."
         exit 0
@@ -759,6 +805,20 @@ fi
 
 if [[ "$APPLY" == true ]]; then
     info "Backup: ${BACKUP_DIR}"
+fi
+
+if [[ "$APPLY" == true && "$POST_ACTION" != "none" ]]; then
+    case "$POST_ACTION" in
+        reboot) POST_ACTION_FLAG="-r" ;;
+        shutdown) POST_ACTION_FLAG="-P" ;;
+    esac
+
+    if ! shutdown "$POST_ACTION_FLAG" +1 "${SCRIPT_NAME}: czyszczenie zakończone."; then
+        fail "Nie udało się zaplanować akcji: ${POST_ACTION}."
+        exit 1
+    fi
+
+    info "Zaplanowano ${POST_ACTION} za 1 minutę. Anulowanie: sudo shutdown -c"
 fi
 
 ok "Gotowe."

@@ -1,0 +1,25 @@
+name: Test Ubuntu VM Slim
+
+on:
+  pull_request:
+    paths:
+      - 'linux/ubuntu-vm-slim.sh'
+      - 'linux/tests/test_ubuntu_vm_slim.py'
+      - '.github/workflows/ubuntu-vm-slim-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Bash syntax
+        run: bash -n linux/ubuntu-vm-slim.sh
+      - name: ShellCheck
+        # dpkg-query format strings intentionally contain literal ${...} fields.
+        run: shellcheck -e SC2016 linux/ubuntu-vm-slim.sh
+      - name: Test post-cleanup actions with mocked system commands
+        run: sudo python3 linux/tests/test_ubuntu_vm_slim.py
