@@ -220,7 +220,9 @@ class AWXClient:
             port = parsed.port
         except ValueError:
             raise AWXError("Adres API zawiera niepoprawny numer portu.") from None
-        return (parsed.scheme, (parsed.hostname or "").casefold(), port or (443 if parsed.scheme == "https" else 80))
+        if port is None:
+            port = 443 if parsed.scheme == "https" else 80
+        return (parsed.scheme, (parsed.hostname or "").casefold(), port)
 
     def _resolve_url(self, path, *, relative_to=None):
         """Zachowaj skonfigurowaną bazę API także w linkach kolejnych stron."""
