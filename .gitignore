@@ -7,3 +7,13 @@ tests/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+
+# macOS metadata
+.DS_Store
+
+# Generated AWX exports and Excel lock files
+/Playground/awx_inventory_hosts.json
+/Playground/awx_inventory_hosts.xlsx
+/Playground/output/*.json
+/Playground/output/*.xlsx
+~$*.xlsx
