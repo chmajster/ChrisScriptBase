@@ -714,8 +714,12 @@ def build_output_rows(report):
 
 
 def save_excel(headers, rows, output_file):
-    """Save text results with filtering and frozen headers."""
+    """Save results ordered by OS: Windows, Linux, AIX, then other values."""
     output_file = Path(output_file)
+    if "ostype" in headers:
+        os_column = headers.index("ostype")
+        os_order = {"windows": 0, "linux": 1, "aix": 2}
+        rows = sorted(rows, key=lambda row: os_order.get(str(row[os_column] or "").strip().casefold(), 3))
     LOGGER.debug("Excel export: %d result rows, %d columns, file %s", len(rows), len(headers), output_file)
     workbook = Workbook()
     sheet = workbook.active
