@@ -565,7 +565,7 @@ class InventoryGroupIndex:
         return result
 
 
-def fetch_report(client, selector, hostnames=None):
+def fetch_report(client, selector, hostnames=None, *, allow_empty=False):
     credential_variables = credential_variable_names()
     extra_credentials = extra_credential_values()
     debug_variables("Literal extra credential values from configuration", extra_credentials)
@@ -644,7 +644,7 @@ def fetch_report(client, selector, hostnames=None):
         "hosts": hosts,
     }
     if requested is not None:
-        if not hosts:
+        if not hosts and not allow_empty:
             raise AWXError(
                 f"None of the hosts listed in the file exist in inventory {inventory['name']!r}."
             )
