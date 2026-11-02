@@ -55,6 +55,19 @@ _ACTIVE = ContextVar("awx_launcher_configuration", default=None)
 HOSTNAME_PATTERN = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*\Z")
 
 
+def hostname_key(value):
+    """Compare host identities without changing the name sent to AWX."""
+    return str(value or "").strip().casefold()
+
+
+def unique_hostnames(values):
+    """Deduplicate host identities, preserving the first spelling and order."""
+    hosts = {}
+    for value in values:
+        hosts.setdefault(hostname_key(value), value)
+    return list(hosts.values())
+
+
 def normalize_hostnames(values, *, required=False):
     """Accept literal host names as a list or a comma/space-separated string."""
     if values is None or values == "":
@@ -73,10 +86,10 @@ def normalize_hostnames(values, *, required=False):
         for hostname in parts:
             if not HOSTNAME_PATTERN.fullmatch(hostname):
                 raise AWXError(f"Invalid hostname {hostname!r}; HOSTS accepts literal hostnames without Ansible patterns.")
-            hosts.setdefault(hostname, None)
+            hosts.setdefault(hostname_key(hostname), hostname)
     if required and not hosts:
         raise AWXError("--hosts must contain at least one hostname.")
-    return list(hosts)
+    return list(hosts.values())
 
 
 def is_url_key(name):

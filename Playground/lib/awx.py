@@ -330,6 +330,8 @@ CONFIGURATION_HELP = """Ustawienia:
   Dotyczy AWX_URL, JOB_URL i url w OS_JOBS; teksty w variables zachowują nowe linie.
   W OS_JOBS['linux']['variables'] można wkleić YAML między klamry, bez przecinków.
   Zachowaj wcięcia YAML. Dotychczasowe słowniki Pythona również działają.
+  Nazwy hostów są dopasowywane bez rozróżniania wielkich i małych liter.
+  Job używa pisowni hosta z inventory AWX; niejednoznaczne nazwy powodują błąd.
   Zamknij aktualizowany plik w Excelu przed zapisem.
   Poza venv skrypt tworzy/używa .venv obok launcherów i restartuje się w nim.
   Brakujące openpyxl instaluje się automatycznie w venv używanego Pythona.
@@ -399,7 +401,7 @@ def read_host_limits(input_file):
                     continue
                 for hostname in re.split('[,;\\s]+', str(value).strip()):
                     if hostname:
-                        hostnames.setdefault(hostname, None)
+                        hostnames.setdefault(common.hostname_key(hostname), hostname)
     except (OSError, InvalidFileException, BadZipFile, ParseError) as exc:
         raise AWXError(f"Cannot read Excel file {input_file}: {exc}") from None
     finally:
@@ -410,8 +412,8 @@ def read_host_limits(input_file):
     if not hostnames:
         raise AWXError(f"The host_limit column in {input_file} contains no hostnames.")
     LOGGER.debug('Excel input: read %d unique hostnames', len(hostnames))
-    debug_variables(f"Hostnames from {input_file}", list(hostnames))
-    return list(hostnames)
+    debug_variables(f"Hostnames from {input_file}", list(hostnames.values()))
+    return list(hostnames.values())
 
 class NoRedirect(HTTPRedirectHandler):
     """Do not forward the token header across HTTP redirects."""
@@ -639,7 +641,7 @@ class InventoryGroupIndex:
             self.variables[name] = group_data.get('vars', {})
             debug_variables(f"Variables for group {name!r} (ID {self.groups[name]['id']})", self.variables[name])
             for hostname in group_data.get('hosts', []):
-                self.direct_by_host.setdefault(hostname, set()).add(name)
+                self.direct_by_host.setdefault(common.hostname_key(hostname), set()).add(name)
             for child_name in group_data.get('children', []):
                 if child_name not in self.parents:
                     raise AWXError(f"Group {child_name!r} is missing from the group list. The inventory may have changed during retrieval; run the script again.")
@@ -660,7 +662,7 @@ class InventoryGroupIndex:
         return self.all_groups_cache[name]
 
     def for_host(self, hostname):
-        direct_names = self.direct_by_host.get(hostname, set())
+        direct_names = self.direct_by_host.get(common.hostname_key(hostname), set())
         all_names = set()
         for name in direct_names:
             all_names.update(self.all_group_names(name))
@@ -679,6 +681,28 @@ class InventoryGroupIndex:
         debug_variables(f"Host {hostname!r}", result)
         return result
 
+def host_index(hosts):
+    """Reject ambiguous inventory identities instead of selecting a random host."""
+    result = {}
+    for host in hosts:
+        key = common.hostname_key(host['name'])
+        if key in result and result[key] != host:
+            raise AWXError(f"Ambiguous hostname: {result[key]['name']!r} and {host['name']!r} "
+                           "match without case sensitivity. Rename the duplicate hosts in AWX.")
+        result[key] = host
+    return result
+
+
+def host_name_filters(hostnames):
+    """Use anchored, escaped, case-insensitive AWX filtering for literal names."""
+    filters = {'order_by': 'id'}
+    if hostnames:
+        pattern = '^(' + '|'.join(re.escape(name) for name in hostnames) + ')$'
+        if len(urlencode({**filters, 'page_size': PAGE_SIZE, 'name__iregex': pattern})) <= 6000:
+            filters['name__iregex'] = pattern
+    return filters
+
+
 def fetch_report(client, selector, hostnames=None, *, allow_empty=False):
     credential_variables = credential_variable_names()
     extra_credentials = extra_credential_values()
@@ -686,18 +710,9 @@ def fetch_report(client, selector, hostnames=None, *, allow_empty=False):
     inventory = find_inventory(client, selector)
     LOGGER.debug('Selected inventory: ID=%s; name=%r; type=%s', inventory['id'], inventory['name'], inventory.get('kind') or 'standard')
     debug_variables('Credential variables to look up', credential_variables)
-    requested = list(dict.fromkeys(hostnames)) if hostnames is not None else None
-    requested_names = set(requested) if requested is not None else None
-    host_filters = {'order_by': 'id'}
-    if requested:
-        candidate = {**host_filters, 'page_size': PAGE_SIZE, 'name__in': ','.join(requested)}
-        if len(urlencode(candidate)) <= 6000:
-            host_filters['name__in'] = candidate['name__in']
-            LOGGER.debug('Host search: sending %d names to AWX using the name__in filter', len(requested))
-        else:
-            LOGGER.debug('Host search: matching %d names locally after a bulk fetch', len(requested))
-    else:
-        LOGGER.debug('Host search: fetching all hosts from inventory ID %s (name: %r)', inventory['id'], inventory['name'])
+    requested = common.unique_hostnames(hostnames) if hostnames is not None else None
+    requested_names = {common.hostname_key(name) for name in requested} if requested is not None else None
+    host_filters = host_name_filters(requested)
     debug_variables('AWX host filters', host_filters)
     hosts = []
     group_indexes = {}
@@ -706,9 +721,10 @@ def fetch_report(client, selector, hostnames=None, *, allow_empty=False):
     host_purpose = f"Fetch hosts from inventory ID {inventory['id']} (name: {inventory['name']!r})"
     if requested is not None:
         host_purpose += f" for {len(requested)} names from the input file"
-    for host in client.items(f"inventories/{inventory['id']}/hosts/", purpose=host_purpose, **host_filters):
-        if requested_names is not None and host['name'] not in requested_names:
-            continue
+    candidates = [host for host in client.items(f"inventories/{inventory['id']}/hosts/", purpose=host_purpose, **host_filters)
+                  if requested_names is None or common.hostname_key(host['name']) in requested_names]
+    host_index(candidates)
+    for host in candidates:
         source_id = host.get('inventory') or inventory['id']
         if source_id not in inventory_names:
             summary = (host.get('summary_fields') or {}).get('inventory') or {}
@@ -717,20 +733,21 @@ def fetch_report(client, selector, hostnames=None, *, allow_empty=False):
             LOGGER.debug('Loading the group index for source inventory ID %s', source_id)
             groups = list(client.items(f"inventories/{source_id}/groups/", order_by='name', purpose=f"Fetch group names and IDs from source inventory ID {source_id}"))
             exported = client.get(f"inventories/{source_id}/script/?all=1&hostvars=1", purpose=f"Fetch host variables, memberships, group hierarchy, and group variables from source inventory ID {source_id}; include disabled hosts")
-            host_variables[source_id] = exported.get('_meta', {}).get('hostvars', {})
+            host_variables[source_id] = {common.hostname_key(name): values
+                                         for name, values in exported.get('_meta', {}).get('hostvars', {}).items()}
             group_indexes[source_id] = InventoryGroupIndex(groups, exported, credential_variables)
             LOGGER.debug('Group index for source inventory ID %s is ready: %d groups and %d hosts with group memberships; credential lookup runs locally', source_id, len(groups), len(group_indexes[source_id].direct_by_host))
         else:
             LOGGER.debug('Host %s: reusing the cached group index for source inventory ID %s', host['name'], source_id)
-        hosts.append({'id': host['id'], 'name': host['name'], 'INVENTORY': inventory_names[source_id], 'ostype': host_variables[source_id].get(host['name'], {}).get('ostype'), 'enabled': host.get('enabled', True), **group_indexes[source_id].for_host(host['name'])})
+        hosts.append({'id': host['id'], 'name': host['name'], 'INVENTORY': inventory_names[source_id], 'ostype': host_variables[source_id].get(common.hostname_key(host['name']), {}).get('ostype'), 'enabled': host.get('enabled', True), **group_indexes[source_id].for_host(host['name'])})
     report = {'inventory': {'id': inventory['id'], 'name': inventory['name']}, 'host_count': len(hosts), 'hosts': hosts}
     if requested is not None:
         if not hosts and (not allow_empty):
             raise AWXError(f"None of the hosts listed in the file exist in inventory {inventory['name']!r}.")
-        order = {name: index for index, name in enumerate(requested)}
-        hosts.sort(key=lambda host: order[host['name']])
-        found_names = {host['name'] for host in hosts}
-        report['missing_hosts'] = [name for name in requested if name not in found_names]
+        order = {common.hostname_key(name): index for index, name in enumerate(requested)}
+        hosts.sort(key=lambda host: order[common.hostname_key(host['name'])])
+        found_names = {common.hostname_key(host['name']) for host in hosts}
+        report['missing_hosts'] = [name for name in requested if common.hostname_key(name) not in found_names]
     debug_variables('Host summary', {'host_count': len(hosts), 'source_inventory_count': len(group_indexes), 'source_inventory_ids': list(group_indexes), 'missing_hosts': report.get('missing_hosts', [])})
     return report
 
@@ -1099,7 +1116,7 @@ def build_execution_plan(sheet, client, settings, job_type_override=None, hostna
             raise AWXError(f"Missing {name} column. Generate a new Excel export with awx_inventory_hosts.py.")
     execution_column = columns.get(settings['EXECUTION_COLUMN'].casefold(), sheet.max_column + 1)
     hosts = {}
-    selected = set(hostnames) if hostnames is not None else None
+    selected = {common.hostname_key(name) for name in hostnames} if hostnames is not None else None
     skipped_without_job = 0
     selected_job_url = common.job_template_url(settings, override=job_url_override)
     for row_number in range(2, sheet.max_row + 1):
@@ -1107,7 +1124,8 @@ def build_execution_plan(sheet, client, settings, job_type_override=None, hostna
         if host_value is None or not str(host_value).strip():
             continue
         hostname = str(host_value).strip()
-        if selected is not None and hostname not in selected:
+        host_key = common.hostname_key(hostname)
+        if selected is not None and host_key not in selected:
             continue
         if not HOSTNAME_PATTERN.fullmatch(hostname):
             raise AWXError(f"Row {row_number}: hostname must be a single literal hostname, without Ansible patterns.")
@@ -1147,9 +1165,9 @@ def build_execution_plan(sheet, client, settings, job_type_override=None, hostna
         preserve_defaults = bool(jump_refs and not base_refs)
         key = (template_id, json.dumps(variables, sort_keys=True, ensure_ascii=False), credential_refs, preserve_defaults)
         execution = str(sheet.cell(row_number, execution_column).value or '').strip()
-        if hostname not in hosts:
-            hosts[hostname] = {'key': key, 'template_id': template_id, 'link': link, 'variables': variables, 'credential_refs': credential_refs, 'preserve_template_credentials': preserve_defaults, 'job_type': job_type, 'hostname': hostname, 'rows': [], 'execution': ''}
-        host = hosts[hostname]
+        if host_key not in hosts:
+            hosts[host_key] = {'key': key, 'template_id': template_id, 'link': link, 'variables': variables, 'credential_refs': credential_refs, 'preserve_template_credentials': preserve_defaults, 'job_type': job_type, 'hostname': hostname, 'rows': [], 'execution': ''}
+        host = hosts[host_key]
         if host['key'] != key:
             raise AWXError(f"Row {row_number}: duplicate host {hostname!r} has different job or variables or credentials.")
         if execution:
@@ -1341,6 +1359,36 @@ def show_template_surveys(client, links):
         spec = client.get(f"job_templates/{template_id}/survey_spec/", purpose=f"Read survey questions for template {template_id}")
         survey.display_questions(template_id, details.get('survey_enabled', False), survey.read_questions(spec or {'spec': []}, template_id))
 
+def resolve_execution_hostnames(client, batches, template_cache):
+    """Use actual template inventory names for Ansible's case-sensitive limits."""
+    inventories = {}
+    for batch in batches:
+        details, _, _ = template_survey(client, batch['template_id'], template_cache)
+        defaults = details.get('defaults', {})
+        if 'inventory' not in defaults:
+            continue  # Retain compatibility with launch APIs without inventory metadata.
+        inventory = defaults['inventory']
+        inventory_id = inventory.get('id') if isinstance(inventory, dict) else inventory
+        if type(inventory_id) is not int or inventory_id < 1:
+            raise AWXError(f"Template {batch['template_id']}: configure its required inventory in AWX.")
+        inventories.setdefault(inventory_id, []).append(batch)
+    for inventory_id, inventory_batches in inventories.items():
+        names = common.unique_hostnames(entry['hostname'] for batch in inventory_batches for entry in batch['entries'])
+        wanted = {common.hostname_key(name) for name in names}
+        candidates = [host for host in client.items(f"inventories/{inventory_id}/hosts/",
+                                                   purpose=f"Resolve host spelling in template inventory {inventory_id}",
+                                                   **host_name_filters(names))
+                      if common.hostname_key(host['name']) in wanted]
+        index = host_index(candidates)
+        missing = [name for name in names if common.hostname_key(name) not in index]
+        if missing:
+            raise AWXError(f"Hosts not found in template inventory {inventory_id}: {', '.join(missing)}")
+        for batch in inventory_batches:
+            for entry in batch['entries']:
+                entry['hostname'] = index[common.hostname_key(entry['hostname'])]['name']
+            batch['limit'] = ','.join(entry['hostname'] for entry in batch['entries'])
+
+
 def job_url(template_link, client, job_id):
     parsed = urlsplit(template_link)
     route = f"/jobs/playbook/{job_id}/output"
@@ -1380,6 +1428,9 @@ def execute_plan(workbook, sheet, path, client, settings, batches, existing, exe
     for batch in batches:
         for entry in batch['entries']:
             for row_number in entry['rows']:
+                host_cell = sheet.cell(row_number, columns['hostname'])
+                host_cell.value = entry['hostname']
+                host_cell.data_type = 's'
                 synchronise_full_credential(sheet, row_number, client=client)
     excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=output_column)
     for index, batch in enumerate(batches, start=1):
@@ -1429,9 +1480,9 @@ def execute_plan(workbook, sheet, path, client, settings, batches, existing, exe
 def add_selected_hosts(sheet, hostnames, client, connection, settings, *, job_url_override=None, template_cache=None):
     """Populate only selected hosts missing from Excel, using the existing AWX lookup."""
     columns = excel.read_columns(sheet)
-    existing = {str(sheet.cell(row, columns['hostname']).value or '').strip()
+    existing = {common.hostname_key(sheet.cell(row, columns['hostname']).value)
                 for row in range(2, sheet.max_row + 1)}
-    missing = [hostname for hostname in hostnames if hostname not in existing]
+    missing = [hostname for hostname in common.unique_hostnames(hostnames) if common.hostname_key(hostname) not in existing]
     if not missing:
         return
     console.print_message(f"Fetching AWX metadata for {len(missing)} selected hosts missing from Excel.", flush=True, level="info")
@@ -1567,6 +1618,7 @@ def execute_main(argv=None):
             job_url_override=selected_job_url or None, survey_overrides=survey_overrides, survey_cache=cache)
         resolve_credentials(client, batches)
         validate_templates(client, batches, interactive=interactive_survey, cache=cache)
+        resolve_execution_hostnames(client, batches, cache)
         if settings['WAIT_FOR_COMPLETION']:
             recorded_jobs = {}
             previous = [(entry, True) for entry in existing] + [(entry, False) for entry in rerun_entries]
@@ -1837,7 +1889,7 @@ def metadata_by_host(report, settings, *, client=None, template_cache=None):
     for row in rows:
         record = dict(zip(headers, row))
         hostname = record['hostname']
-        metadata[hostname] = {name: record[name] for name in excel.METADATA_COLUMNS if name != 'hostname'}
+        metadata[common.hostname_key(hostname)] = {name: record[name] for name in excel.METADATA_COLUMNS}
     return (metadata, list(excel.METADATA_COLUMNS[1:]))
 
 def refresh_sheet(sheet, host_rows, columns, source_column, metadata, headers, execution_column='exceiute_job', preserve_unidentified_rows=False, output_column='output'):
@@ -1852,7 +1904,7 @@ def refresh_sheet(sheet, host_rows, columns, source_column, metadata, headers, e
         previous_context = tuple(sheet.cell(row_number, columns[name]).value for name in ('applicationid', 'hops_count'))
         if row_number in host_rows:
             hostname = host_rows[row_number]
-            values = {'hostname': hostname, **metadata.get(hostname, missing_values)}
+            values = {'hostname': hostname, **metadata.get(common.hostname_key(hostname), missing_values)}
         elif preserve_unidentified_rows:
             continue
         elif any((cell.value is not None and str(cell.value).strip() for cell in sheet[row_number])):
@@ -1862,7 +1914,7 @@ def refresh_sheet(sheet, host_rows, columns, source_column, metadata, headers, e
             continue
         for name, value in values.items():
             cell = sheet.cell(row_number, columns[name.casefold()])
-            if (name == 'jumphost_for_hops' and row_number in host_rows and host_rows[row_number] in metadata
+            if (name == 'jumphost_for_hops' and row_number in host_rows and common.hostname_key(host_rows[row_number]) in metadata
                     and previous_context == (values.get('ApplicationID'), values.get('HOPS_COUNT'))
                     and cell.value is not None and str(cell.value).strip()):
                 continue
@@ -1891,7 +1943,7 @@ def refresh_main(argv=None):
         sheet_name = sheet.title
         had_host_column = any((str(cell.value or '').strip().casefold() in HOST_COLUMNS for cell in sheet[1])) or args.host_column is not None
         host_rows, columns, source_column = read_host_rows(sheet, args.host_column)
-        hostnames = list(dict.fromkeys(host_rows.values()))
+        hostnames = common.unique_hostnames(host_rows.values())
         console.print_message(f"Input: {path}; worksheet: {sheet_name}; unique hosts: {len(hostnames)}", flush=True, level="info")
         client = None
         template_cache = {}
