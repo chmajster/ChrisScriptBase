@@ -188,7 +188,7 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(), before)
 
     def test_invalid_input_stops_before_api_requests(self):
-        for headers, rows in ((["wrong-column"], [["linux-1"]]), (["hostname"], [["all:*"]]),
+        for headers, rows in ((["hostname"], [["all:*"]]),
                               (["hostname", "HOSTNAME"], [["linux-1", "aix-1"]])):
             with self.subTest(headers=headers, rows=rows):
                 self.save_rows(headers, rows)
@@ -198,6 +198,86 @@ class RefreshTests(unittest.TestCase):
                 self.assertEqual(self.path.read_bytes(), before)
                 self.assertEqual(self.client.calls, [])
 
+    def test_missing_schema_columns_are_recreated_including_job_history_columns(self):
+        self.save_rows(["hostname"], [["windows-1"]])
+        self.assertEqual(self.run_main(), 0)
+        record = self.read_records()[0]
+        expected = {"hostname", "INVENTORY", "ostype", "Job_Link", "Job_Variables", "Extra_Credentials",
+                    "Credential", "Full_Credential", "Job_Type", "AWX_Status", "exceiute_job", "output"}
+        self.assertEqual(set(record), expected)
+        self.assertIsNone(record["exceiute_job"])
+        self.assertIsNone(record["output"])
+        self.assertEqual(record["INVENTORY"], "test_inventory")
+        self.assertIn("Added missing columns", self.output.getvalue())
+
+    def test_deleted_columns_are_restored_on_next_refresh_without_losing_history(self):
+        self.save_rows(["hostname", "exceiute_job", "output"], [
+            ["windows-1", "http://awx.test/#/jobs/playbook/99/output", "saved log"],
+        ])
+        self.assertEqual(self.run_main(), 0)
+        workbook = refresh.inventory.load_workbook(self.path)
+        sheet = workbook["Results"]
+        to_delete = {"INVENTORY", "Job_Link", "Full_Credential", "Credential", "Job_Type"}
+        for column in sorted((cell.column for cell in sheet[1] if cell.value in to_delete), reverse=True):
+            sheet.delete_cols(column)
+        workbook.save(self.path)
+        workbook.close()
+        self.assertEqual(self.run_main(), 0)
+        record = self.read_records()[0]
+        self.assertEqual(record["INVENTORY"], "test_inventory")
+        self.assertEqual(record["Full_Credential"], "shared-vault, windows-key")
+        self.assertEqual(record["Job_Type"], "install")
+        self.assertEqual(record["exceiute_job"], "http://awx.test/#/jobs/playbook/99/output")
+        self.assertEqual(record["output"], "saved log")
+
+    def test_repeated_refresh_does_not_duplicate_columns(self):
+        self.save_rows(["hostname"], [["linux-1"]])
+        self.assertEqual(self.run_main(), 0)
+        first_headers = list(self.read_records()[0])
+        self.assertEqual(self.run_main(), 0)
+        workbook = refresh.inventory.load_workbook(self.path)
+        headers = [cell.value for cell in workbook["Results"][1]]
+        workbook.close()
+        self.assertEqual(headers, first_headers)
+        self.assertEqual(len(headers), len(set(name.casefold() for name in headers)))
+
+    def test_missing_host_column_is_added_without_touching_existing_rows(self):
+        self.save_rows(["notes", "INVENTORY", "exceiute_job", "output"], [
+            ["existing data", "original-inventory", "http://awx.test/#/jobs/playbook/99/output", "saved log"],
+        ])
+        self.assertEqual(self.run_main(), 0)
+        record = self.read_records()[0]
+        self.assertIn("hostname", record)
+        self.assertIsNone(record["hostname"])
+        self.assertEqual(record["notes"], "existing data")
+        self.assertEqual(record["INVENTORY"], "original-inventory")
+        self.assertEqual(record["output"], "saved log")
+        self.assertEqual(record["exceiute_job"], "http://awx.test/#/jobs/playbook/99/output")
+        self.assertEqual(self.client.calls, [])
+        self.assertIn("Fill it with hostnames", self.output.getvalue())
+
+    def test_explicit_missing_host_column_reports_typo(self):
+        self.save_rows(["hostname"], [["windows-1"]])
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(refresh.AWXError, "Cannot find host column"):
+            self.run_main("--host-column", "typo")
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(self.client.calls, [])
+
+    def test_configured_execution_column_is_recreated_and_preserved(self):
+        self.settings["EXECUTION_COLUMN"] = "launched_job"
+        self.save_rows(["hostname"], [["windows-1"]])
+        self.assertEqual(self.run_main(), 0)
+        self.assertIn("launched_job", self.read_records()[0])
+        workbook = refresh.inventory.load_workbook(self.path)
+        sheet = workbook["Results"]
+        column = next(cell.column for cell in sheet[1] if cell.value == "launched_job")
+        sheet.cell(2, column).value = "http://awx.test/#/jobs/playbook/99/output"
+        workbook.save(self.path)
+        workbook.close()
+        self.assertEqual(self.run_main(), 0)
+        self.assertEqual(self.read_records()[0]["launched_job"], "http://awx.test/#/jobs/playbook/99/output")
+
     def test_header_only_workbook_gets_inventory_column_without_awx_requests(self):
         self.save_rows(["hostname"], [])
         self.assertEqual(self.run_main(), 0)
@@ -205,6 +285,8 @@ class RefreshTests(unittest.TestCase):
         headers = [cell.value for cell in workbook["Results"][1]]
         self.assertIn("INVENTORY", headers)
         self.assertIn("AWX_Status", headers)
+        self.assertIn("exceiute_job", headers)
+        self.assertIn("output", headers)
         self.assertEqual(workbook["Results"].max_row, 1)
         workbook.close()
         self.assertEqual(self.client.calls, [])

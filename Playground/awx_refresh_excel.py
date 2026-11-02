@@ -8,6 +8,9 @@ Custom host column / sheet: python awx_refresh_excel.py -file hosts.xlsx --host-
 Only the host column supplies lookup data. Existing INVENTORY, OS, credentials, job template,
 variables and job action are overwritten using the current configuration and AWX.
 Execution links, output, other columns and other worksheets are preserved.
+Missing metadata and execution/output columns are recreated automatically.
+If the host column is missing, an empty hostname column is added for input;
+existing row values are preserved until hostnames are supplied.
 Rows are sorted Windows, Linux, AIX, then unknown/missing hosts and empty rows.
 
 Uses awx_invenotry_hosts_variables for AWX and inventory settings, and
@@ -55,18 +58,18 @@ def read_host_rows(sheet, host_column=None):
         if name in columns:
             raise AWXError(f"Duplicate column {cell.value!r} in worksheet {sheet.title!r}.")
         columns[name] = cell.column
-    if not columns and host_column is None and not any(
-        cell.value is not None and str(cell.value).strip() for row in sheet for cell in row
-    ):
-        sheet.cell(1, 1).value = "hostname"
-        columns["hostname"] = 1
     selected = host_column.strip().casefold() if host_column is not None else next(
         (name for name in HOST_COLUMNS if name in columns), None
     )
-    if selected not in columns:
-        raise AWXError("Cannot find the host column. Use hostname or host_limit, or specify --host-column HEADER.")
     if any(merged.max_row > 1 for merged in sheet.merged_cells.ranges):
         raise AWXError("Host data rows must not contain merged cells. Use a table with one host per row.")
+    if selected not in columns:
+        if host_column is not None:
+            raise AWXError(f"Cannot find host column {host_column!r}. Check --host-column HEADER.")
+        source_column = next(iter(columns.values()), 1)
+        ensure_columns(sheet, columns, ["hostname"], source_column)
+        print("Added missing hostname column. Fill it with hostnames or use --host-column HEADER for an existing column.", flush=True)
+        return {}, columns, columns["hostname"]
     rows = {}
     for row_number in range(2, sheet.max_row + 1):
         cell = sheet.cell(row_number, columns[selected])
@@ -135,25 +138,39 @@ def sort_host_rows(sheet, hostname_column, os_column):
             target.comment = copy(source.comment)
 
 
-def refresh_sheet(sheet, host_rows, columns, source_column, metadata, headers):
-    missing_values = {name: "none" for name in headers}
-    missing_values.update(Job_Variables="{}", Job_Type="", AWX_Status="not_found")
-    for name in ["hostname", *headers]:
+def ensure_columns(sheet, columns, headers, source_column):
+    """Recreate missing schema columns without touching existing cell values."""
+    added = []
+    for name in headers:
         if name.casefold() not in columns:
-            column = sheet.max_column + 1
+            empty_sheet = sheet.max_row == 1 and sheet.max_column == 1 and sheet.cell(1, 1).value is None
+            column = 1 if empty_sheet else sheet.max_column + 1
             columns[name.casefold()] = column
             header = sheet.cell(1, column)
             header.value = name
             header._style = copy(sheet.cell(1, source_column)._style)
             sheet.column_dimensions[inventory.get_column_letter(column)].width = (
-                65 if name in ("Job_Link", "Job_Variables", "Full_Credential") else 22
+                65 if name in ("Job_Link", "Job_Variables", "Full_Credential", "exceiute_job", "output") else 22
             )
+            added.append(name)
         if name == "INVENTORY":
             sheet.cell(1, columns[name.casefold()]).value = name
+    return added
+
+
+def refresh_sheet(sheet, host_rows, columns, source_column, metadata, headers, execution_column="exceiute_job",
+                  preserve_unidentified_rows=False):
+    missing_values = {name: "none" for name in headers}
+    missing_values.update(Job_Variables="{}", Job_Type="", AWX_Status="not_found")
+    added = ensure_columns(sheet, columns, ["hostname", *headers, execution_column, "output"], source_column)
+    if added:
+        print(f"Added missing columns: {', '.join(added)}", flush=True)
     for row_number in range(2, sheet.max_row + 1):
         if row_number in host_rows:
             hostname = host_rows[row_number]
             values = {"hostname": hostname, **metadata.get(hostname, missing_values)}
+        elif preserve_unidentified_rows:
+            continue
         elif any(cell.value is not None and str(cell.value).strip() for cell in sheet[row_number]):
             values = {name: "" for name in ["hostname", *headers]}
             values["AWX_Status"] = "no_hostname"
@@ -168,7 +185,8 @@ def refresh_sheet(sheet, host_rows, columns, source_column, metadata, headers):
             cell.font = inventory.Font(name="Arial", size=10, color="0563C1" if cell.hyperlink else "1F2937",
                                        underline="single" if cell.hyperlink else None)
             cell.alignment = inventory.Alignment(vertical="center", wrap_text=True)
-    sort_host_rows(sheet, columns["hostname"], columns["ostype"])
+    if not preserve_unidentified_rows:
+        sort_host_rows(sheet, columns["hostname"], columns["ostype"])
     sheet.auto_filter.ref = sheet.dimensions
     if not sheet.freeze_panes:
         sheet.freeze_panes = "B2"
@@ -192,6 +210,9 @@ def main(argv=None):
         if sheet_name not in workbook.sheetnames:
             raise AWXError(f"Worksheet {sheet_name!r} does not exist in {path}.")
         sheet = workbook[sheet_name]
+        had_host_column = any(
+            str(cell.value or "").strip().casefold() in HOST_COLUMNS for cell in sheet[1]
+        ) or args.host_column is not None
         host_rows, columns, source_column = read_host_rows(sheet, args.host_column)
         hostnames = list(dict.fromkeys(host_rows.values()))
         print(f"Input: {path}; worksheet: {sheet_name}; unique hosts: {len(hostnames)}", flush=True)
@@ -206,7 +227,8 @@ def main(argv=None):
         managed = {name.casefold() for name in ["hostname", *headers]}
         if protected & managed or columns.get(settings["EXECUTION_COLUMN"].casefold()) == source_column or columns.get("output") == source_column:
             raise AWXError("The host or metadata column conflicts with a job history column.")
-        refresh_sheet(sheet, host_rows, columns, source_column, metadata, headers)
+        refresh_sheet(sheet, host_rows, columns, source_column, metadata, headers,
+                      execution_column=settings["EXECUTION_COLUMN"], preserve_unidentified_rows=not had_host_column)
         runner.save_workbook(workbook, path)
         missing = report.get("missing_hosts", [])
         if missing:
