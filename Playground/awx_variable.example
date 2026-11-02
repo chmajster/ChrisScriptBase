@@ -13,3 +13,15 @@ SURVEY_ANSWERS = {
 # [] pobiera credentiale przypisane do szablonu joba.
 # Niepusta lista wybiera credentiale z konfiguracji, np. ['shared-vault'].
 EXTRA_CREDENTIAL_VARIABLES = []
+
+# W awx_variable sekcja OS_JOBS[system]['variables'] przyjmuje YAML bez przecinkow:
+# 'linux': {'url': 'https://awx.example/#/templates/job_template/7/details', 'variables': {
+#     action: install
+#     count: 123
+#     enabled: true
+#     packages:
+#       - curl
+#       - git
+# }}
+# Pozostaw klamry sekcji variables. Zachowaj wciecia we wklejonym YAML.
+# Dotychczasowy slownik Pythona {'action': 'install', 'count': 123} tez dziala.

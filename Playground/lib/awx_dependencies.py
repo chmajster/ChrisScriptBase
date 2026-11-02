@@ -69,30 +69,41 @@ def ensure_virtual_environment():
 
 def ensure_openpyxl():
     """Import openpyxl, installing it with this interpreter if it is missing in a venv."""
+    return ensure_package("openpyxl", "openpyxl")
+
+
+def ensure_yaml():
+    """Load YAML support only when configuration contains YAML variables."""
+    return ensure_package("yaml", "PyYAML")
+
+
+def ensure_package(module, package):
+    """Import a dependency, installing missing packages only inside a venv."""
+    hint = f"python -m pip install {package}"
     try:
-        return importlib.import_module("openpyxl")
+        return importlib.import_module(module)
     except ModuleNotFoundError as exc:
-        if exc.name != "openpyxl":
-            raise SystemExit(f"Cannot import openpyxl: {exc}. Repair the installation with: {INSTALL_HINT}") from None
+        if exc.name != module:
+            raise SystemExit(f"Cannot import {package}: {exc}. Repair the installation with: {hint}") from None
     except ImportError as exc:
-        raise SystemExit(f"Cannot import openpyxl: {exc}. Repair the installation with: {INSTALL_HINT}") from None
+        raise SystemExit(f"Cannot import {package}: {exc}. Repair the installation with: {hint}") from None
 
     if not is_virtual_environment():
-        raise SystemExit(f"The openpyxl package is missing. Install it with: {INSTALL_HINT}") from None
+        raise SystemExit(f"The {package} package is missing. Install it with: {hint}") from None
 
-    print_message("The openpyxl package is missing; installing it in the current virtual environment...",
+    print_message(f"The {package} package is missing; installing it in the current virtual environment...",
                   level="warning", file=sys.stderr, flush=True)
     try:
         if importlib.util.find_spec("pip") is None:
             subprocess.run([sys.executable, "-m", "ensurepip", "--upgrade"], check=True)
-        subprocess.run([sys.executable, "-m", "pip", "install", "openpyxl"], check=True)
+        subprocess.run([sys.executable, "-m", "pip", "install", package], check=True)
     except (OSError, subprocess.CalledProcessError) as exc:
-        raise SystemExit(f"Cannot install openpyxl in the current virtual environment: {exc}. "
-                         f"Activate it and run: {INSTALL_HINT}") from None
+        raise SystemExit(f"Cannot install {package} in the current virtual environment: {exc}. "
+                         f"Activate it and run: {hint}") from None
 
     importlib.invalidate_caches()
     try:
-        return importlib.import_module("openpyxl")
+        return importlib.import_module(module)
     except ImportError as exc:
-        raise SystemExit(f"openpyxl is still unavailable after installation: {exc}. "
-                         f"Repair the virtual environment with: {INSTALL_HINT}") from None
+        raise SystemExit(f"{package} is still unavailable after installation: {exc}. "
+                         f"Repair the virtual environment with: {hint}") from None

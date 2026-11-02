@@ -328,9 +328,12 @@ CONFIGURATION_HELP = """Ustawienia:
   --color nadpisuje COLOR; --no-color wyłącza kolory. NO_COLOR wyłącza tryb auto.
   URL-e w awx_variable mogą zawierać nowe linie; parser łączy je w jeden adres.
   Dotyczy AWX_URL, JOB_URL i url w OS_JOBS; teksty w variables zachowują nowe linie.
+  W OS_JOBS['linux']['variables'] można wkleić YAML między klamry, bez przecinków.
+  Zachowaj wcięcia YAML. Dotychczasowe słowniki Pythona również działają.
   Zamknij aktualizowany plik w Excelu przed zapisem.
   Poza venv skrypt tworzy/używa .venv obok launcherów i restartuje się w nim.
   Brakujące openpyxl instaluje się automatycznie w venv używanego Pythona.
+  Obsługa YAML doinstalowuje PyYAML w venv przy pierwszym użyciu.
   Wspólna implementacja wszystkich launcherów: katalog lib/."""
 
 

@@ -1,12 +1,16 @@
 """One source of AWX variables and isolated per-launcher overrides.
 
 Priority: command-line arguments > launcher VARIABLES > per-operation overrides
-in awx_variable > shared values in awx_variable. Config files contain literals.
+in awx_variable > shared values in awx_variable. Variables also accept YAML.
 """
 
 import ast
+import io
+import json
 import math
 import re
+import textwrap
+import tokenize
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
@@ -171,8 +175,111 @@ def normalize_url_values(value, name=None):
     return value
 
 
+def mapping_end(content, start):
+    """Find a Python/flow mapping's closing brace, ignoring quoted text."""
+    lines = content[start:].splitlines(keepends=True)
+    offsets = [0]
+    for line in lines:
+        offsets.append(offsets[-1] + len(line))
+    depth = 0
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(content[start:]).readline):
+            if token.type == tokenize.OP:
+                if token.string == "{":
+                    depth += 1
+                elif token.string == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return start + offsets[token.start[0] - 1] + token.start[1] + 1
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        pass
+    return None
+
+
+def prepare_yaml_variable_blocks(content, path):
+    """Translate YAML pasted inside variables = {...} to safe Python literals.
+
+    The surrounding assignments and dictionaries keep their existing syntax.
+    Only nonliteral 'variables' mappings are interpreted as YAML. Source line
+    counts and the file on disk are preserved, including YAML block strings.
+    """
+    while True:
+        offsets = [0]
+        for line in content.splitlines(keepends=True):
+            offsets.append(offsets[-1] + len(line))
+        previous = []
+        replacement = None
+        try:
+            tokens = tokenize.generate_tokens(io.StringIO(content).readline)
+            for token in tokens:
+                if token.type in (tokenize.COMMENT, tokenize.NL, tokenize.NEWLINE,
+                                  tokenize.INDENT, tokenize.DEDENT):
+                    continue
+                if token.string == "{" and len(previous) == 2 and previous[-1].string == ":":
+                    key = previous[0]
+                    try:
+                        is_variables = key.type == tokenize.STRING and ast.literal_eval(key.string) == "variables"
+                    except (ValueError, SyntaxError):
+                        is_variables = False
+                    if is_variables:
+                        start = offsets[token.start[0] - 1] + token.start[1]
+                        end = mapping_end(content, start)
+                        if end is not None:
+                            try:
+                                ast.literal_eval(content[start:end])
+                            except (ValueError, SyntaxError):
+                                pass
+                            else:
+                                previous = [previous[-1], token]
+                                continue
+                        # A block mapping closes on a line outside its YAML
+                        # indentation. Braces inside block strings are data.
+                        for match in re.finditer(r"(?m)^([ \t]*)\}", content[start + 1:]):
+                            candidate = start + 1 + match.start()
+                            inner = content[start + 1:candidate]
+                            meaningful = [line for line in inner.splitlines()
+                                          if line.strip() and not line.lstrip().startswith("#")]
+                            if meaningful and len(match[1]) <= min(len(line) - len(line.lstrip()) for line in meaningful):
+                                end = candidate + len(match[1]) + 1
+                                break
+                        if end is None:
+                            continue  # The normal parser reports an unfinished mapping.
+                        original = content[start:end]
+                        inner = original[1:-1]
+                        # Preserve errors for broken Python quoted multiline
+                        # strings; YAML block strings use | or > instead.
+                        if not re.search(r"(?m)^\s*[\w.-]+\s*:", inner):
+                            try:
+                                ast.parse(original)
+                            except SyntaxError as exc:
+                                if "unterminated" in exc.msg:
+                                    continue
+                        from .awx_dependencies import ensure_yaml
+
+                        yaml = ensure_yaml()
+                        try:
+                            value = yaml.safe_load(textwrap.dedent(inner) if inner.startswith("\n") else original)
+                            if not isinstance(value, dict):
+                                raise ValueError("expected a mapping")
+                            json.dumps(value, allow_nan=False)
+                            literal = repr(value)
+                            ast.literal_eval(literal)
+                        except (yaml.YAMLError, ValueError, TypeError, RecursionError):
+                            raise AWXError(f"Invalid YAML variables in {path}, line {token.start[0]}. "
+                                           "Use an indented YAML mapping with JSON-compatible values.") from None
+                        replacement = (start, end, literal + "\n" * original.count("\n"))
+                        break
+                previous = (previous + [token])[-2:]
+        except (tokenize.TokenError, IndentationError, SyntaxError):
+            pass  # Report syntax errors through ast.parse with original line numbers.
+        if replacement is None:
+            return content
+        start, end, literal = replacement
+        content = content[:start] + literal + content[end:]
+
+
 def read_literal_settings(path, defaults, *, required=False):
-    """Read literal NAME = value assignments; never execute configuration files."""
+    """Read literal assignments and YAML job variables without executing them."""
     settings = deepcopy(defaults)
     try:
         content = Path(path).read_text(encoding="utf-8-sig")
@@ -183,7 +290,8 @@ def read_literal_settings(path, defaults, *, required=False):
     except (OSError, UnicodeError) as exc:
         raise AWXError(f"Cannot read {path}: {exc}") from None
     try:
-        tree = ast.parse(prepare_multiline_url_literals(content), filename=str(path))
+        prepared = prepare_multiline_url_literals(content)
+        tree = ast.parse(prepare_yaml_variable_blocks(prepared, path), filename=str(path))
     except SyntaxError as exc:
         raise AWXError(f"Syntax error in {path}, line {exc.lineno}.") from None
     seen = set()

@@ -1,0 +1,9 @@
+# Test directories
+test/
+tests/
+
+# Python bytecode and test cache
+/Playground/tests/__pycache__/
+__pycache__/
+*.py[cod]
+.pytest_cache/
