@@ -18,6 +18,8 @@ pierwszeństwo. Puste VARIABLES = {} zachowuje ustawienia z pliku.
 Logika, konfiguracja i zapis Excela są wspólne i znajdują się w lib/.
 ApplicationID po INVENTORY to pierwszy człon nazwy inventory przed znakiem _.
 Job_Credentials po Job_Link pokazuje credentiale przypisane do szablonu w AWX.
+Credentiale Machine już przypisane do szablonu nie są kopiowane do Full_Credential.
+Pozostałe typy, np. Vault, są dodawane zgodnie z dotychczasowymi ustawieniami.
 HOPS przed Extra_Credentials zawiera grupy hosta (także nadrzędne) z nazwami
 <liczba>_hop lub <liczba>hop oraz wyciągnięte liczby. Brak dopasowania: none.
 HOPS_COUNT po HOPS to sama liczba całkowita; brak jednoznacznej liczby: puste.

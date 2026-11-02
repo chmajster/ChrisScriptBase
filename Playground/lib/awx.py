@@ -332,6 +332,8 @@ CONFIGURATION_HELP = """Ustawienia:
   Zachowaj wcięcia YAML. Dotychczasowe słowniki Pythona również działają.
   Nazwy hostów są dopasowywane bez rozróżniania wielkich i małych liter.
   Job używa pisowni hosta z inventory AWX; niejednoznaczne nazwy powodują błąd.
+  Full_Credential pomija credentiale Machine już przypisane do szablonu.
+  Pozostają w Job_Credentials i są zachowywane przy starcie, jeśli nie wybrano zamiennika Machine.
   Zamknij aktualizowany plik w Excelu przed zapisem.
   Poza venv skrypt tworzy/używa .venv obok launcherów i restartuje się w nim.
   Brakujące openpyxl instaluje się automatycznie w venv używanego Pythona.
@@ -784,6 +786,35 @@ def template_credential_values(client, link, cache):
     return [reference for reference, _ in template_credential_entries(client, link, cache)]
 
 
+def credential_kind(credential):
+    return credential.get('kind') or (credential.get('summary_fields') or {}).get('credential_type', {}).get('kind')
+
+
+def template_machine_entries(client, entries):
+    """Identify Machine credentials by AWX kind, never by a fixed type ID/name."""
+    result = []
+    for reference, credential in entries:
+        if not credential_kind(credential) and client is not None:
+            credential = lookup_credential(client, str(credential['id']))
+        if credential_kind(credential) == 'ssh':
+            result.append((reference, credential))
+    return result
+
+
+def without_template_machines(references, machines, client):
+    """Keep template Machine credentials out of the generated Full_Credential."""
+    ids = {credential['id'] for _, credential in machines}
+    names = {reference for reference, _ in machines}
+    result = []
+    for reference in references:
+        credential = client.credential_cache.get(reference) if client is not None else None
+        credential_id = credential['id'] if credential is not None else (
+            int(reference) if reference.isascii() and reference.isdigit() else None)
+        if reference not in names and credential_id not in ids:
+            result.append(reference)
+    return result
+
+
 def unique_credential_references(references, client=None, *, resolve_aliases=False):
     """Keep the first reference, trimming spaces and comparing known AWX IDs.
 
@@ -838,7 +869,7 @@ def merge_full_credentials(client, extras, host_values, inherited):
                 LOGGER.debug('Cannot compare host credential %r with template defaults: %s', reference, exc)
                 continue
             host_ids.add(credential['id'])
-            kind = credential.get('kind') or (credential.get('summary_fields') or {}).get('credential_type', {}).get('kind')
+            kind = credential_kind(credential)
             if kind and kind != 'vault' and type(credential.get('credential_type')) is int:
                 replaced_types.add(credential['credential_type'])
         extras = [reference for reference, credential in inherited
@@ -882,6 +913,7 @@ def build_inventory_rows(report, settings=None, output_column=None, *, client=No
         job_link = common.job_template_url(settings, job.get('url', ''), override=job_url_override)
         try:
             template_credentials = template_credential_entries(client, job_link, template_cache)
+            template_machines = template_machine_entries(client, template_credentials)
         except AWXError as exc:
             if common.job_template_url(settings, override=job_url_override):
                 source = 'JOB_URL / --job-url'
@@ -910,6 +942,7 @@ def build_inventory_rows(report, settings=None, output_column=None, *, client=No
                     full_values.append(credential)
         host_values = [value for variable in primary_variables for value in full_values_by_variable.get(variable, [])]
         full_parts = merge_full_credentials(client, extra_credentials, host_values, inherited)
+        full_parts = without_template_machines(full_parts, template_machines, client)
         host['Extra_Credentials'] = list(extra_credentials)
         LOGGER.debug('Host %s: using %d extra credentials from %s', host['name'], len(extra_credentials),
                      'EXTRA_CREDENTIAL_VARIABLES' if configured_extras else 'job template')
@@ -1222,24 +1255,21 @@ def lookup_credential(client, reference):
 
 
 def credential_identity(credential):
-    kind = credential.get('kind') or (credential.get('summary_fields') or {}).get('credential_type', {}).get('kind')
+    kind = credential_kind(credential)
     return (credential.get('credential_type'),
             (credential.get('inputs') or {}).get('vault_id') if kind == 'vault' else None)
 
 
-def resolve_credentials(client, batches):
+def resolve_credentials(client, batches, *, template_cache=None):
     """Resolve job credential references into IDs required by the launch API.
 
     AWX_TOKEN authenticates these requests. Full_Credential selects the stored
     credentials used by the job/playbook; it never authenticates the API client.
     """
-    template_cache = {}
+    template_cache = {} if template_cache is None else template_cache
     for batch in batches:
         selected = {}
         inherited = {}
-        if batch.get('preserve_template_credentials'):
-            for _, credential in template_credential_entries(client, batch['link'], template_cache):
-                inherited[credential['id']] = lookup_credential(client, str(credential['id']))
         for reference in batch['credential_refs']:
             try:
                 credential = lookup_credential(client, reference)
@@ -1254,6 +1284,19 @@ def resolve_credentials(client, batches):
                 ) from None
             selected[credential['id']] = credential
         explicit_identities = {credential_identity(credential) for credential in selected.values()}
+        if batch.get('link') and (selected or batch.get('preserve_template_credentials')):
+            defaults = template_credential_entries(client, batch['link'], template_cache)
+            if batch.get('preserve_template_credentials'):
+                inherited = {credential['id']: lookup_credential(client, str(credential['id']))
+                             for _, credential in defaults}
+            else:
+                # Full_Credential omits template Machine credentials. Preserve
+                # them in the API payload unless an explicit Machine replaces them.
+                explicit_types = {credential.get('credential_type') for credential in selected.values()}
+                candidates = [(reference, credential) for reference, credential in defaults
+                              if credential.get('credential_type') not in explicit_types]
+                inherited = {credential['id']: lookup_credential(client, str(credential['id']))
+                             for _, credential in template_machine_entries(client, candidates)}
         for credential in inherited.values():
             if credential_identity(credential) not in explicit_identities:
                 selected[credential['id']] = credential
@@ -1616,7 +1659,7 @@ def execute_main(argv=None):
         batches, existing, column, skipped = build_execution_plan(
             sheet, client, settings, job_type_override=args.job_type, hostnames=selected_hosts or None,
             job_url_override=selected_job_url or None, survey_overrides=survey_overrides, survey_cache=cache)
-        resolve_credentials(client, batches)
+        resolve_credentials(client, batches, template_cache=cache)
         validate_templates(client, batches, interactive=interactive_survey, cache=cache)
         resolve_execution_hostnames(client, batches, cache)
         if settings['WAIT_FOR_COMPLETION']:

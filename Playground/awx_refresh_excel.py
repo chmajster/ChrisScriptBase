@@ -23,6 +23,7 @@ Full_Credential jest synchronizowane z wybranymi jumphostami bez powtórzeń.
 Odtwarza brakujące kolumny i porządkuje układ tak
 jak generator. Istniejące linki wykonania, output oraz inne arkusze zostają.
 Job_Credentials po Job_Link odświeża listę credentiali przypisanych do szablonu w AWX.
+Full_Credential pomija credentiale Machine już przypisane do szablonu joba.
 AWX_Status: found = znaleziony, not_found = brak w AWX, no_hostname = pusty host.
 Przy pustej liście przygotowuje nagłówki bez pobierania hostów z AWX.
 
