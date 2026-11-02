@@ -449,6 +449,20 @@ class RefreshTests(unittest.TestCase):
         for record in self.read_records():
             self.assertEqual(record['Extra_Credentials'], record['ostype'] + '-vault')
 
+    def test_foreign_os_template_reports_host_and_configuration_key(self):
+        foreign = 'https://other.example/#/templates/job_template/15/details'
+        self.connection['OS_JOBS']['windows']['url'] = foreign
+        self.save_rows(['hostname'], [['windows-1']])
+        before = self.path.read_bytes()
+        with self.assertRaises(refresh.AWXError) as result:
+            self.run_main()
+        message = str(result.exception)
+        self.assertIn("Host 'windows-1', ostype='windows'", message)
+        self.assertIn("source: OS_JOBS['windows']['url']", message)
+        self.assertIn(foreign, message)
+        self.assertIn("AWX_URL: 'http://awx.test'", message)
+        self.assertEqual(self.path.read_bytes(), before)
+
     def test_template_credentials_without_a_name_or_with_ambiguous_names_use_ids(self):
         self.client.template_credentials[7] = [{'id': 41}, {'id': 42, 'name': '123'},
                                                {'id': 43, 'name': 'same'}, {'id': 44, 'name': 'same'}]

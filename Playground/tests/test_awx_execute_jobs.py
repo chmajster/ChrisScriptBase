@@ -173,6 +173,39 @@ class RunnerTests(unittest.TestCase):
             self.run_main()
         self.assertEqual(self.server.calls, [])
 
+    def test_foreign_template_reports_sheet_row_host_and_effective_link_source(self):
+        foreign = 'https://other.example/#/templates/job_template/7/details'
+        for hyperlink in (False, True):
+            workbook = self.workbook([['host-1', self.link() if hyperlink else foreign, '{}', None]])
+            self.addCleanup(workbook.close)
+            sheet = workbook.active
+            if hyperlink:
+                sheet['B2'].hyperlink = foreign
+            for action in (
+                lambda: runner.build_execution_plan(sheet, self.client, self.settings),
+                lambda: runner.update_survey_columns(self.client, sheet, self.settings),
+            ):
+                with self.subTest(hyperlink=hyperlink), self.assertRaises(runner.AWXError) as result:
+                    action()
+                message = str(result.exception)
+                self.assertIn("Worksheet 'Results', row 2, host 'host-1'", message)
+                self.assertIn(f'Job_Link URL: {foreign!r}', message)
+                self.assertIn(f'AWX_URL: {self.base!r}', message)
+                self.assertIn('hyperlink target (B2)' if hyperlink else 'cell value (B2)', message)
+                self.assertIn(f'Job_Link cell text (B2): {sheet["B2"].value!r}', message)
+        self.assertEqual(self.server.calls, [])
+
+    def test_foreign_job_url_override_reports_configuration_source_before_requests(self):
+        self.settings['JOB_URL'] = 'https://other.example/#/templates/job_template/14/details'
+        self.save_rows([['host-1', self.link(), '{}', None]])
+        with self.assertRaises(runner.AWXError) as result:
+            self.run_main()
+        message = str(result.exception)
+        self.assertIn('JOB_URL / --job-url:', message)
+        self.assertIn(self.settings['JOB_URL'], message)
+        self.assertIn(f'AWX_URL: {self.base!r}', message)
+        self.assertEqual(self.server.calls, [])
+
     def test_preflight_rejects_ignored_limits_and_variables(self):
         self.save_rows([['host-1', self.link(), '{"action":"check"}', None]])
         for details, message in (({'ask_limit_on_launch': False}, 'Limit'), ({'ask_limit_on_launch': True, 'ask_variables_on_launch': False}, 'Variables'), ({'ask_limit_on_launch': True, 'passwords_needed_to_start': ['ssh_password']}, 'password'), ({'ask_limit_on_launch': True, 'defaults': {'job_slice_count': 2}}, 'Slicing')):

@@ -419,6 +419,7 @@ class NoRedirect(HTTPRedirectHandler):
 class AWXClient:
 
     def __init__(self, base_url, token):
+        self.configured_url = base_url.strip()
         parsed = urlsplit(base_url.strip())
         if parsed.scheme not in ('http', 'https') or not parsed.netloc:
             raise AWXError('AWX_URL must include http:// or https:// and a server address.')
@@ -456,7 +457,7 @@ class AWXClient:
         url = urljoin(relative_to or self.base_url, path)
         parsed = urlsplit(url)
         if self._origin(parsed) != self.origin:
-            raise AWXError('The API returned a link to a different server than AWX_URL.')
+            raise AWXError(self.server_mismatch_message(url, 'API link'))
         if not parsed.path.startswith(self.api_path):
             for prefix in ('/api/controller/v2/', '/controller/v2/', '/api/v2/'):
                 if parsed.path.casefold().startswith(prefix):
@@ -464,6 +465,23 @@ class AWXClient:
                     LOGGER.debug('API path mapping: %s -> %s', parsed.path, new_path)
                     return urlunsplit((parsed.scheme, parsed.netloc, new_path, parsed.query, ''))
         return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ''))
+
+    def server_mismatch_message(self, url, label):
+        """Show the effective URL and both origins, including protocol and port."""
+        actual = self._origin(urlsplit(url))
+        names = ('scheme', 'host', 'port')
+        expected_text = ', '.join(f'{name}={value!r}' for name, value in zip(names, self.origin))
+        actual_text = ', '.join(f'{name}={value!r}' for name, value in zip(names, actual))
+        differences = ', '.join(name for name, expected, found in zip(names, self.origin, actual) if expected != found)
+        return self.redact(
+            f'{label} points to a different server than AWX_URL.\n'
+            f'  {label} URL: {url!r}\n'
+            f'  AWX_URL: {self.configured_url!r}\n'
+            f'  Expected server: {expected_text}\n'
+            f'  Actual server: {actual_text}\n'
+            f'  Different: {differences}.\n'
+            '  Check AWX_URL, OS_JOBS / JOB_URL and the Excel hyperlink target.'
+        )
 
     def add_sensitive_values(self, values):
         self.sensitive_values.update(value for value in values if isinstance(value, str) and value and value != '$encrypted$')
@@ -842,7 +860,16 @@ def build_inventory_rows(report, settings=None, output_column=None, *, client=No
         ostype_text = 'none' if ostype is None else ostype if isinstance(ostype, str) else json.dumps(ostype, ensure_ascii=False)
         job = OS_JOBS.get(ostype.strip().casefold(), {}) if isinstance(ostype, str) else {}
         job_link = common.job_template_url(settings, job.get('url', ''), override=job_url_override)
-        template_credentials = template_credential_entries(client, job_link, template_cache)
+        try:
+            template_credentials = template_credential_entries(client, job_link, template_cache)
+        except AWXError as exc:
+            if common.job_template_url(settings, override=job_url_override):
+                source = 'JOB_URL / --job-url'
+            elif isinstance(ostype, str):
+                source = f"OS_JOBS[{ostype.strip().casefold()!r}]['url']"
+            else:
+                source = 'OS_JOBS'
+            raise AWXError(client.redact(f'Host {host["name"]!r}, ostype={ostype!r}, source: {source}: {exc}')) from None
         inherited = template_credentials if not configured_extras else []
         host['Job_Credentials'] = [reference for reference, _ in template_credentials]
         extra_credentials = configured_extras or [reference for reference, _ in inherited]
@@ -975,7 +1002,7 @@ def resource_id_from_link(link, client, pattern, label):
     if parsed.scheme not in ('http', 'https') or not parsed.netloc or parsed.username or parsed.password:
         raise AWXError(f"{label} must be an HTTP(S) link.")
     if client._origin(parsed) != client.origin:
-        raise AWXError(f"{label} points to a different server than AWX_URL.")
+        raise AWXError(client.server_mismatch_message(link, label))
     match = pattern.search(parsed.fragment or parsed.path)
     if not match:
         raise AWXError(f"Cannot read a resource ID from {label}: {link}")
@@ -984,6 +1011,27 @@ def resource_id_from_link(link, client, pattern, label):
 
 def template_id_from_link(link, client):
     return resource_id_from_link(link, client, TEMPLATE_PATTERN, "Job_Link")
+
+
+def template_id_from_row(link, client, sheet, row_number, *, override=False):
+    """Attach worksheet, host and the source of the effective template link."""
+    try:
+        return template_id_from_link(link, client)
+    except AWXError as exc:
+        columns = excel.read_columns(sheet)
+        hostname = sheet.cell(row_number, columns['hostname']).value
+        cell = sheet.cell(row_number, columns['job_link']) if 'job_link' in columns else None
+        if override:
+            source = 'JOB_URL / --job-url override'
+        elif cell is not None and cell.hyperlink and cell.hyperlink.target:
+            source = f'Job_Link hyperlink target ({cell.coordinate})'
+        else:
+            source = f'Job_Link cell value ({cell.coordinate})' if cell is not None else 'Job_Link'
+        message = (f'Worksheet {sheet.title!r}, row {row_number}, host {hostname!r}: {exc}\n'
+                   f'  Link source: {source}.')
+        if cell is not None:
+            message += f'\n  Job_Link cell text ({cell.coordinate}): {cell.value!r}'
+        raise AWXError(client.redact(message)) from None
 
 def parse_variables(value, row_number):
     if value is None or (isinstance(value, str) and value.strip().casefold() in ('', 'none')):
@@ -1069,7 +1117,7 @@ def build_execution_plan(sheet, client, settings, job_type_override=None, hostna
             raise AWXError(f"Row {row_number}: Job_Link must contain a URL rather than an Excel formula.")
         if not selected_job_url and link_cell.hyperlink and link_cell.hyperlink.target:
             link = link_cell.hyperlink.target
-        template_id = template_id_from_link(link, client)
+        template_id = template_id_from_row(link, client, sheet, row_number, override=bool(selected_job_url))
         variables = deepcopy(settings.get('SURVEY_ANSWERS', {}))
         variables.update(parse_variables(sheet.cell(row_number, columns['job_variables']).value, row_number))
         job_type_cell = sheet.cell(row_number, columns['job_type']) if 'job_type' in columns else None
@@ -1229,7 +1277,7 @@ def update_survey_columns(client, sheet, settings, *, job_url_override=None, cac
             link = cell.hyperlink.target
         if link.casefold() in ('', 'none'):
             continue
-        template_id = template_id_from_link(link, client)
+        template_id = template_id_from_row(link, client, sheet, row_number, override=bool(override))
         template_survey(client, template_id, cache)
         template_rows.setdefault(template_id, []).append(row_number)
     added = survey_excel.populate_columns(sheet, template_rows, cache, settings, overwrite_configured=overwrite_configured)
@@ -1451,7 +1499,10 @@ def execute_main(argv=None):
     client = AWXClient(connection['AWX_URL'], connection['AWX_TOKEN'].strip())
     template_cache = {}
     if selected_job_url:
-        template_id = template_id_from_link(selected_job_url, client)
+        try:
+            template_id = template_id_from_link(selected_job_url, client)
+        except AWXError as exc:
+            raise AWXError(f'JOB_URL / --job-url: {exc}') from None
         if args.show_survey:
             show_template_surveys(client, {template_id: selected_job_url})
             return 0

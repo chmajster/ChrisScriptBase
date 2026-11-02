@@ -87,9 +87,34 @@ class LibraryTests(unittest.TestCase):
     def test_shared_client_blocks_requests_to_other_servers(self):
         client = awx.AWXClient("http://awx.test", "test-token")
         with patch.object(client.opener, "open") as open_request:
-            with self.assertRaises(awx.AWXError):
+            with self.assertRaises(awx.AWXError) as result:
                 client.get("http://other.example/api/v2/jobs/1/")
+            message = str(result.exception)
+            self.assertIn('http://other.example/api/v2/jobs/1/', message)
+            self.assertIn("AWX_URL: 'http://awx.test'", message)
+            self.assertIn("Expected server: scheme='http', host='awx.test', port=80", message)
+            self.assertIn("Actual server: scheme='http', host='other.example', port=80", message)
+            self.assertIn('Different: host.', message)
             open_request.assert_not_called()
+
+    def test_template_mismatch_reports_protocol_host_and_port_without_exposing_token(self):
+        client = awx.AWXClient('https://awx.test/api/controller/v2/', 'test-token')
+        for url, difference in (
+            ('http://awx.test/#/templates/job_template/7/details', 'scheme, port'),
+            ('https://other.test/#/templates/job_template/7/details', 'host'),
+            ('https://awx.test:8443/#/templates/job_template/7/details', 'port'),
+        ):
+            with self.subTest(url=url), self.assertRaises(awx.AWXError) as result:
+                awx.template_id_from_link(url, client)
+            message = str(result.exception)
+            self.assertIn(f'Job_Link URL: {url!r}', message)
+            self.assertIn("AWX_URL: 'https://awx.test/api/controller/v2/'", message)
+            self.assertIn(f'Different: {difference}.', message)
+        with self.assertRaises(awx.AWXError) as result:
+            awx.template_id_from_link('https://other.test/?token=test-token#/templates/job_template/7/details', client)
+        self.assertNotIn('test-token', str(result.exception))
+        self.assertIn('***', str(result.exception))
+        self.assertEqual(awx.template_id_from_link('https://AWX.TEST:443/#/templates/job_template/7/details', client), 7)
 
     def test_json_escaped_survey_password_is_redacted_from_launch_errors(self):
         secret = 'private-\u00e4-value"\\end'
