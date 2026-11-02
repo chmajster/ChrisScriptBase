@@ -8,7 +8,10 @@ Runner settings: awx_execute_jobs_variables next to this script (NAME = value).
 AWX_URL, AWX_TOKEN, TIMEOUT and default input come from awx_invenotry_hosts_variables.
 Requires awx_inventory_hosts.py and openpyxl. Close the input workbook in Excel.
 
-Each launch sends hostname batches as limit and Job_Variables as extra_vars.
+Each launch sends hostname batches as limit, Job_Variables as extra_vars, and
+credentials resolved from the Full_Credential column (names or numeric AWX IDs).
+Job_Type / JOB_TYPE / --job-type select an action such as install/reinstall/update;
+the action is sent as extra_vars[JOB_TYPE_VARIABLE], not AWX's run/check job_type.
 Rows with an existing execution entry are skipped, including duplicate host rows.
 An in-progress marker is saved BEFORE POST; uncertain requests are never retried.
 """
@@ -40,6 +43,8 @@ DEFAULT_SETTINGS = {
     "SHEET_NAME": "Results",
     "BATCH_SIZE": 10,
     "EXECUTION_COLUMN": "exceiute_job",
+    "JOB_TYPE": "",  # Empty preserves the action already present in Job_Variables.
+    "JOB_TYPE_VARIABLE": "action",  # Playbook variable carrying install/reinstall/update.
     "WAIT_FOR_COMPLETION": True,
     "POLL_INTERVAL": 5,
     "JOB_WAIT_TIMEOUT": 3600,
@@ -82,10 +87,16 @@ def read_settings(settings_file=SETTINGS_FILE):
         raise AWXError("BATCH_SIZE must be a positive integer.")
     column = settings["EXECUTION_COLUMN"]
     if not isinstance(column, str) or not column.strip() or column.strip().casefold() in (
-        "hostname", "job_link", "job_variables"
+        "hostname", "job_link", "job_variables", "full_credential", "job_type", "ostype", "output"
     ):
         raise AWXError("EXECUTION_COLUMN must name a separate output column.")
     settings["EXECUTION_COLUMN"] = column.strip()
+    if not isinstance(settings["JOB_TYPE"], str):
+        raise AWXError("JOB_TYPE must be a string, e.g. install, reinstall, or update.")
+    settings["JOB_TYPE"] = settings["JOB_TYPE"].strip()
+    variable = settings["JOB_TYPE_VARIABLE"]
+    if not isinstance(variable, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", variable):
+        raise AWXError("JOB_TYPE_VARIABLE must be a valid playbook variable name, e.g. action.")
     if type(settings["WAIT_FOR_COMPLETION"]) is not bool:
         raise AWXError("WAIT_FOR_COMPLETION must be True or False.")
     for name in ("POLL_INTERVAL", "JOB_WAIT_TIMEOUT"):
@@ -99,6 +110,7 @@ def parse_arguments(argv=None):
     parser = argparse.ArgumentParser(description="Launch AWX jobs for batches of Excel hosts and save job links.")
     parser.add_argument("-file", "--file", dest="input_file", type=Path, help="Input Excel file; updated in place.")
     parser.add_argument("--batch-size", type=int, help="Maximum unique hosts in one job (default: BATCH_SIZE).")
+    parser.add_argument("--job-type", help="Override the action for all new jobs, e.g. install, reinstall, update.")
     parser.add_argument("--dry-run", action="store_true", help="Show batches without API requests or file changes.")
     parser.add_argument("-d", "--debug", action="store_true", help="Show API request details.")
     return parser.parse_args(argv)
@@ -130,7 +142,36 @@ def parse_variables(value, row_number):
     return variables
 
 
-def build_plan(sheet, client, settings):
+def parse_credentials(value, row_number):
+    """Read credential references using the separator used by the inventory export."""
+    if value is None or str(value).strip().casefold() in ("", "none"):
+        return ()
+    separator = inventory.FULL_CREDENTIAL_SEPARATOR
+    if not separator:
+        raise AWXError("FULL_CREDENTIAL_SEPARATOR cannot be empty when reading Full_Credential.")
+    # A comma separator also accepts manually edited cells without a space after ','.
+    references = [part.strip() for part in str(value).split(separator.strip() or separator)]
+    if any(not reference or reference.casefold() == "none" for reference in references):
+        raise AWXError(f"Row {row_number}: Full_Credential contains an empty or invalid credential reference.")
+    return tuple(sorted(set(references)))
+
+
+def apply_job_type(variables, cell_value, settings, override=None):
+    variable = settings["JOB_TYPE_VARIABLE"]
+    selected = override if override is not None else (
+        cell_value if cell_value is not None and str(cell_value).strip() else settings["JOB_TYPE"]
+    )
+    if not selected:
+        selected = variables.get(variable, "")
+    if not isinstance(selected, str):
+        raise AWXError(f"Job_Type and Job_Variables[{variable!r}] must be strings.")
+    selected = selected.strip()
+    if selected:
+        variables[variable] = selected
+    return selected
+
+
+def build_plan(sheet, client, settings, job_type_override=None):
     """Validate the whole sheet, deduplicate hosts, and batch equal launch payloads."""
     columns = {}
     for cell in sheet[1]:
@@ -140,7 +181,7 @@ def build_plan(sheet, client, settings):
         if name in columns:
             raise AWXError(f"Duplicate column {cell.value!r} in worksheet {sheet.title!r}.")
         columns[name] = cell.column
-    for name in ("hostname", "job_link", "job_variables"):
+    for name in ("hostname", "job_link", "job_variables", "full_credential"):
         if name not in columns:
             raise AWXError(f"Missing {name} column. Generate a new Excel export with awx_inventory_hosts.py.")
     execution_column = columns.get(settings["EXECUTION_COLUMN"].casefold(), sheet.max_column + 1)
@@ -164,16 +205,23 @@ def build_plan(sheet, client, settings):
             link = link_cell.hyperlink.target
         template_id = template_id_from_link(link, client)
         variables = parse_variables(sheet.cell(row_number, columns["job_variables"]).value, row_number)
-        key = (template_id, json.dumps(variables, sort_keys=True, ensure_ascii=False))
+        job_type_cell = sheet.cell(row_number, columns["job_type"]) if "job_type" in columns else None
+        credential_cell = sheet.cell(row_number, columns["full_credential"])
+        if credential_cell.data_type == "f" or job_type_cell is not None and job_type_cell.data_type == "f":
+            raise AWXError(f"Row {row_number}: Full_Credential and Job_Type must contain literal values.")
+        job_type = apply_job_type(variables, job_type_cell.value if job_type_cell else None, settings, job_type_override)
+        credential_refs = parse_credentials(credential_cell.value, row_number)
+        key = (template_id, json.dumps(variables, sort_keys=True, ensure_ascii=False), credential_refs)
         execution = str(sheet.cell(row_number, execution_column).value or "").strip()
         if hostname not in hosts:
             hosts[hostname] = {
                 "key": key, "template_id": template_id, "link": link, "variables": variables,
+                "credential_refs": credential_refs, "job_type": job_type,
                 "hostname": hostname, "rows": [], "execution": "",
             }
         host = hosts[hostname]
         if host["key"] != key:
-            raise AWXError(f"Row {row_number}: duplicate host {hostname!r} has different job or variables.")
+            raise AWXError(f"Row {row_number}: duplicate host {hostname!r} has different job or variables or credentials.")
         if execution:
             if host["execution"] and host["execution"] != execution:
                 raise AWXError(f"Host {hostname!r} has conflicting execution links/markers; check its rows.")
@@ -194,6 +242,7 @@ def build_plan(sheet, client, settings):
             batches.append({
                 "template_id": entries[0]["template_id"], "link": entries[0]["link"],
                 "variables": entries[0]["variables"], "entries": entries,
+                "credential_refs": entries[0]["credential_refs"], "job_type": entries[0]["job_type"],
                 "limit": ",".join(host["hostname"] for host in entries),
             })
     return batches, existing, execution_column, skipped_without_job
@@ -250,6 +299,46 @@ class LaunchClient(inventory.AWXClient):
         return result
 
 
+def resolve_credentials(client, batches):
+    """Resolve credential names/IDs once and validate each selected credential set."""
+    cache = {}
+    for batch in batches:
+        selected = {}
+        for reference in batch["credential_refs"]:
+            if reference not in cache:
+                if re.fullmatch(r"[0-9]+", reference):
+                    credential = client.get(f"credentials/{int(reference)}/", purpose=f"Resolve credential ID {reference}")
+                else:
+                    matches = list(client.items("credentials/", name=reference, order_by="id",
+                                                purpose=f"Resolve credential named {reference!r}"))
+                    if not matches:
+                        raise AWXError(f"Credential {reference!r} from Full_Credential was not found or is not accessible.")
+                    if len(matches) != 1:
+                        ids = ", ".join(str(match["id"]) for match in matches)
+                        raise AWXError(f"Credential name {reference!r} is ambiguous (IDs: {ids}); use its numeric ID in Full_Credential.")
+                    credential = matches[0]
+                if type(credential.get("id")) is not int or credential["id"] < 1:
+                    raise AWXError(f"Invalid AWX credential response for {reference!r}.")
+                cache[reference] = credential
+                cache[str(credential["id"])] = credential
+            credential = cache[reference]
+            selected[credential["id"]] = credential
+        identities = {}
+        for credential in selected.values():
+            inputs = credential.get("inputs") or {}
+            if any(inputs.get(name) == "ASK" for name in ("password", "become_password", "ssh_key_unlock", "vault_password")):
+                raise AWXError(f"Credential {credential['id']} requires an interactive password; configure it in AWX.")
+            credential_type = credential.get("credential_type")
+            kind = credential.get("kind") or (credential.get("summary_fields") or {}).get("credential_type", {}).get("kind")
+            identity = (credential_type, inputs.get("vault_id") if kind == "vault" else None)
+            if credential_type is not None and identity in identities:
+                raise AWXError(f"Full_Credential contains conflicting credentials {identities[identity]} and {credential['id']} "
+                               "of the same credential type. Select one credential per type (Vault IDs may differ).")
+            identities[identity] = credential["id"]
+        batch["credentials"] = sorted(selected)
+        batch["credential_types"] = {credential.get("credential_type") for credential in selected.values()}
+
+
 def validate_templates(client, batches):
     """Check prompting and required inputs before launching the first batch."""
     cache = {}
@@ -261,12 +350,19 @@ def validate_templates(client, batches):
                 raise AWXError(f"Template {template_id}: enable Prompt on launch for Limit to restrict each job to its batch.")
             if (details.get("defaults", {}).get("job_slice_count") or 1) > 1:
                 raise AWXError(f"Template {template_id}: set Job Slicing to 1; this script creates its own host batches.")
-            if details.get("inventory_needed_to_start") or details.get("credential_needed_to_start"):
-                raise AWXError(f"Template {template_id}: configure its required inventory and credentials in AWX.")
-            if details.get("passwords_needed_to_start"):
-                raise AWXError(f"Template {template_id}: credentials require interactive passwords; configure them in AWX.")
+            if details.get("inventory_needed_to_start"):
+                raise AWXError(f"Template {template_id}: configure its required inventory in AWX.")
             cache[template_id] = (details, None)
         details, survey_variables = cache[template_id]
+        if batch["credentials"]:
+            if not details.get("ask_credential_on_launch"):
+                raise AWXError(f"Template {template_id}: enable Prompt on launch for Credentials to accept Full_Credential.")
+            for default in details.get("defaults", {}).get("credentials", []):
+                if default["id"] not in batch["credentials"] and default.get("credential_type") not in batch["credential_types"]:
+                    raise AWXError(f"Template {template_id}: Full_Credential must include default credential {default['id']} "
+                                   "or a replacement of the same credential type.")
+        elif details.get("passwords_needed_to_start") or details.get("credential_needed_to_start"):
+            raise AWXError(f"Template {template_id}: credentials require interactive passwords or are missing; fill Full_Credential.")
         variables = batch["variables"]
         if variables and not details.get("ask_variables_on_launch"):
             if not details.get("survey_enabled"):
@@ -318,6 +414,12 @@ def execute_plan(workbook, sheet, path, client, settings, batches, existing, exe
     header.value = settings["EXECUTION_COLUMN"]
     header._style = copy(sheet.cell(1, 1)._style)
     sheet.column_dimensions[inventory.get_column_letter(execution_column)].width = 65
+    job_type_column = next((cell.column for cell in sheet[1] if str(cell.value or "").strip().casefold() == "job_type"),
+                           sheet.max_column + 1)
+    type_header = sheet.cell(1, job_type_column)
+    type_header.value = "Job_Type"
+    type_header._style = copy(sheet.cell(1, 1)._style)
+    sheet.column_dimensions[inventory.get_column_letter(job_type_column)].width = 20
     if sheet.auto_filter.ref:
         sheet.auto_filter.ref = sheet.dimensions
     for entry in existing:
@@ -326,14 +428,24 @@ def execute_plan(workbook, sheet, path, client, settings, batches, existing, exe
     save_workbook(workbook, path)
     for index, batch in enumerate(batches, start=1):
         template_id = batch["template_id"]
-        print(f"Batch {index}/{len(batches)}: template={template_id}; hosts={batch['limit']}", flush=True)
+        print(f"Batch {index}/{len(batches)}: template={template_id}; job_type={batch['job_type'] or 'none'}; "
+              f"credentials={batch['credentials']}; hosts={batch['limit']}", flush=True)
+        for entry in batch["entries"]:
+            for row_number in entry["rows"]:
+                cell = sheet.cell(row_number, job_type_column)
+                cell.value = batch["job_type"]
+                cell.data_type = "s"
+                cell.number_format = "@"
         marker = f"LAUNCH_PENDING template={template_id}; {datetime.now(timezone.utc).isoformat()}"
         write_execution(sheet, execution_column, batch["entries"], marker)
         save_workbook(workbook, path)
         try:
-            result = client.post(f"job_templates/{template_id}/launch/", {
+            payload = {
                 "limit": batch["limit"], "extra_vars": batch["variables"],
-            })
+            }
+            if batch["credentials"]:
+                payload["credentials"] = batch["credentials"]
+            result = client.post(f"job_templates/{template_id}/launch/", payload)
             job_id = result.get("job") or result.get("id")
             if type(job_id) is not int or job_id < 1:
                 raise AWXError("Launch response has no job ID; check AWX before clearing the Excel marker.")
@@ -353,6 +465,8 @@ def execute_plan(workbook, sheet, path, client, settings, batches, existing, exe
 
 def main(argv=None):
     args = parse_arguments(argv)
+    if args.job_type is not None and not args.job_type.strip():
+        raise AWXError("--job-type must be nonempty, e.g. install, reinstall, or update.")
     connection = inventory.read_settings()
     inventory.apply_settings(connection)
     inventory.configure_debug(args.debug, connection["AWX_TOKEN"].strip())
@@ -373,12 +487,13 @@ def main(argv=None):
         if settings["SHEET_NAME"] not in workbook.sheetnames:
             raise AWXError(f"Worksheet {settings['SHEET_NAME']!r} does not exist in {path}.")
         sheet = workbook[settings["SHEET_NAME"]]
-        batches, existing, column, skipped = build_plan(sheet, client, settings)
+        batches, existing, column, skipped = build_plan(sheet, client, settings, job_type_override=args.job_type)
         print(f"Input: {path}; batch size: {settings['BATCH_SIZE']}; batches: {len(batches)}; "
               f"already recorded hosts: {len(existing)}; rows without job: {skipped}", flush=True)
         if args.dry_run:
             for index, batch in enumerate(batches, start=1):
                 print(f"Batch {index}: template={batch['template_id']}; limit={batch['limit']}; "
+                      f"credentials={list(batch['credential_refs'])}; job_type={batch['job_type'] or 'none'}; "
                       f"extra_vars={json.dumps(batch['variables'], ensure_ascii=False)}")
             print("Dry run: no jobs launched and no workbook changes.")
             return 0
@@ -388,6 +503,7 @@ def main(argv=None):
         if not batches:
             print("No new batches to launch.")
             return 0
+        resolve_credentials(client, batches)
         validate_templates(client, batches)
         if settings["WAIT_FOR_COMPLETION"]:
             # Resume without overlapping a job recorded before an interruption.

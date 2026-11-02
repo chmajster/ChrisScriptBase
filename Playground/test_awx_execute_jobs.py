@@ -10,6 +10,7 @@ from copy import deepcopy
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
 
 import awx_execute_jobs as runner
 
@@ -28,7 +29,15 @@ class FakeAWX(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self.server.calls.append(("GET", self.path, None))
-        if self.path.endswith("/launch/"):
+        parsed = urlsplit(self.path)
+        if parsed.path == "/api/v2/credentials/":
+            name = parse_qs(parsed.query).get("name", [""])[0]
+            matches = [credential for credential in self.server.credentials.values() if credential["name"] == name]
+            self.respond(200, {"results": matches, "next": None, "count": len(matches)})
+        elif parsed.path.startswith("/api/v2/credentials/"):
+            credential = self.server.credentials.get(int(parsed.path.rstrip("/").split("/")[-1]))
+            self.respond(200 if credential else 404, credential or {"detail": "Not found"})
+        elif self.path.endswith("/launch/"):
             self.respond(200, self.server.launch_details)
         elif "/jobs/" in self.path:
             self.respond(200, {"status": self.server.job_status})
@@ -70,7 +79,13 @@ class RunnerTests(unittest.TestCase):
         self.server.ignored_fields = {}
         self.server.launch_details = {
             "ask_limit_on_launch": True, "ask_variables_on_launch": True,
+            "ask_credential_on_launch": True,
             "defaults": {"job_slice_count": 1},
+        }
+        self.server.credentials = {
+            31: {"id": 31, "name": "machine-cred", "credential_type": 1, "kind": "ssh", "inputs": {}},
+            32: {"id": 32, "name": "vault-cred", "credential_type": 2, "kind": "vault", "inputs": {"vault_id": "one"}},
+            33: {"id": 33, "name": "other-machine", "credential_type": 1, "kind": "ssh", "inputs": {}},
         }
         self.output = io.StringIO()
         self.addCleanup(runner.inventory.apply_settings, runner.inventory.DEFAULT_SETTINGS)
@@ -82,9 +97,9 @@ class RunnerTests(unittest.TestCase):
         workbook = runner.inventory.Workbook()
         sheet = workbook.active
         sheet.title = "Results"
-        sheet.append(["hostname", "Job_Link", "Job_Variables", "exceiute_job"])
+        sheet.append(["hostname", "Job_Link", "Job_Variables", "exceiute_job", "Full_Credential"])
         for row in rows:
-            sheet.append(row)
+            sheet.append([*row, "machine-cred"] if len(row) == 4 else row)
         return workbook
 
     def save_rows(self, rows):
@@ -120,7 +135,10 @@ class RunnerTests(unittest.TestCase):
         launches = [call for call in self.server.calls if call[0] == "POST"]
         self.assertEqual([len(call[2]["limit"].split(",")) for call in launches], [10, 10, 3])
         self.assertTrue(all(call[2]["extra_vars"] == {"action": "check"} for call in launches))
-        self.assertEqual([call[0] for call in self.server.calls], ["GET", "POST", "GET", "POST", "GET", "POST", "GET"])
+        self.assertTrue(all(call[2]["credentials"] == [31] for call in launches))
+        self.assertEqual([call[0] for call in self.server.calls if "/credentials/" not in call[1]],
+                         ["GET", "POST", "GET", "POST", "GET", "POST", "GET"])
+        self.assertEqual(len([call for call in self.server.calls if "/credentials/" in call[1]]), 1)
         workbook = runner.inventory.load_workbook(self.path)
         self.addCleanup(workbook.close)
         sheet = workbook.active
@@ -128,6 +146,8 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(sheet["D12"].hyperlink.target, f"{self.base}/#/jobs/playbook/102/output")
         self.assertEqual(sheet["D22"].hyperlink.target, f"{self.base}/#/jobs/playbook/103/output")
         self.assertEqual(sheet["D25"].value, sheet["D2"].value)
+        self.assertEqual(sheet["F1"].value, "Job_Type")
+        self.assertEqual(sheet["F2"].value, "check")
         self.server.calls.clear()
         self.assertEqual(self.run_main(), 0)
         self.assertEqual(self.server.calls, [])
@@ -169,7 +189,11 @@ class RunnerTests(unittest.TestCase):
         ):
             with self.subTest(details=details):
                 self.server.calls = []
-                self.server.launch_details = details
+                self.server.launch_details = {"ask_credential_on_launch": True, **details}
+                if message == "password":
+                    self.save_rows([["host-1", self.link(), '{"action":"check"}', None, None]])
+                else:
+                    self.save_rows([["host-1", self.link(), '{"action":"check"}', None]])
                 with self.assertRaisesRegex(runner.AWXError, message):
                     self.run_main()
                 self.assertFalse(any(call[0] == "POST" for call in self.server.calls))
@@ -229,8 +253,92 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(runner.template_id_from_link(link, self.client), 7)
             self.assertIn("101", runner.job_url(link, self.client, 101))
 
+    def test_credential_names_and_ids_resolve_and_are_sent_to_awx(self):
+        self.save_rows([["host-1", self.link(), '{}', None, "machine-cred, 32, 31"]])
+        self.assertEqual(self.run_main("--job-type", "install"), 0)
+        launch = next(call for call in self.server.calls if call[0] == "POST")
+        self.assertEqual(launch[2]["credentials"], [31, 32])
+        self.assertEqual(launch[2]["extra_vars"], {"action": "install"})
+
+    def test_batch_groups_include_credentials_and_optional_job_type_column(self):
+        workbook = self.workbook([
+            ["host-1", self.link(), '{}', None, "machine-cred", "install"],
+            ["host-2", self.link(), '{}', None, "other-machine", "install"],
+            ["host-3", self.link(), '{}', None, "machine-cred", "update"],
+            ["host-4", self.link(), '{}', None, "machine-cred", "install"],
+        ])
+        self.addCleanup(workbook.close)
+        workbook.active["F1"] = "Job_Type"
+        batches, _, _, _ = runner.build_plan(workbook.active, self.client, self.settings)
+        self.assertEqual([batch["limit"] for batch in batches], ["host-1,host-4", "host-2", "host-3"])
+        self.assertEqual([batch["job_type"] for batch in batches], ["install", "install", "update"])
+
+    def test_job_type_precedence_and_custom_variable_name(self):
+        self.settings.update(JOB_TYPE="install", JOB_TYPE_VARIABLE="operation")
+        for override, cell, variables, expected in (
+            ("reinstall", "update", {"operation": "check"}, "reinstall"),
+            (None, "update", {"operation": "check"}, "update"),
+            (None, None, {"operation": "check"}, "install"),
+        ):
+            with self.subTest(override=override, cell=cell):
+                self.assertEqual(runner.apply_job_type(variables, cell, self.settings, override), expected)
+                self.assertEqual(variables["operation"], expected)
+        self.settings["JOB_TYPE"] = ""
+        variables = {"operation": "uninstall"}
+        self.assertEqual(runner.apply_job_type(variables, None, self.settings), "uninstall")
+
+    def test_dry_run_shows_action_and_credentials_without_resolving_them(self):
+        self.save_rows([["host-1", self.link(), '{}', None, "machine-cred,32"]])
+        self.assertEqual(self.run_main("--dry-run", "--job-type", "reinstall"), 0)
+        self.assertIn("reinstall", self.output.getvalue())
+        self.assertIn("machine-cred", self.output.getvalue())
+        self.assertEqual(self.server.calls, [])
+
+    def test_missing_or_ambiguous_credentials_stop_before_launch(self):
+        self.save_rows([["host-1", self.link(), '{}', None, "missing-cred"]])
+        with self.assertRaisesRegex(runner.AWXError, "not found"):
+            self.run_main()
+        self.server.credentials[34] = {**self.server.credentials[31], "id": 34}
+        self.save_rows([["host-1", self.link(), '{}', None, "machine-cred"]])
+        with self.assertRaisesRegex(runner.AWXError, "ambiguous"):
+            self.run_main()
+        self.assertFalse(any(call[0] == "POST" for call in self.server.calls))
+
+    def test_conflicting_credential_types_stop_before_launch(self):
+        self.save_rows([["host-1", self.link(), '{}', None, "machine-cred,other-machine"]])
+        with self.assertRaisesRegex(runner.AWXError, "conflicting credentials"):
+            self.run_main()
+        self.assertFalse(any(call[0] == "POST" for call in self.server.calls))
+
+    def test_credential_prompt_must_be_enabled(self):
+        self.server.launch_details["ask_credential_on_launch"] = False
+        self.save_rows([["host-1", self.link(), '{}', None]])
+        with self.assertRaisesRegex(runner.AWXError, "Prompt on launch for Credentials"):
+            self.run_main()
+        self.assertFalse(any(call[0] == "POST" for call in self.server.calls))
+
+    def test_credentials_with_interactive_passwords_rejected(self):
+        self.server.credentials[31]["inputs"] = {"password": "ASK"}
+        self.save_rows([["host-1", self.link(), '{}', None]])
+        with self.assertRaisesRegex(runner.AWXError, "interactive password"):
+            self.run_main()
+        self.assertFalse(any(call[0] == "POST" for call in self.server.calls))
+
+    def test_blank_credentials_preserve_template_credentials(self):
+        self.save_rows([["host-1", self.link(), '{}', None, "none"]])
+        self.assertEqual(self.run_main(), 0)
+        launch = next(call for call in self.server.calls if call[0] == "POST")
+        self.assertNotIn("credentials", launch[2])
+
+    def test_duplicate_host_with_different_credentials_is_rejected(self):
+        self.save_rows([["host-1", self.link(), '{}', None, "31"], ["host-1", self.link(), '{}', None, "33"]])
+        with self.assertRaisesRegex(runner.AWXError, "different job or variables or credentials"):
+            self.run_main()
+        self.assertEqual(self.server.calls, [])
+
     def test_invalid_settings(self):
-        for contents in ("BATCH_SIZE = 0", "BATCH_SIZE = True", "WAIT_FOR_COMPLETION = 'yes'", "EXECUTION_COLUMN = 'hostname'"):
+        for contents in ("BATCH_SIZE = 0", "BATCH_SIZE = True", "WAIT_FOR_COMPLETION = 'yes'", "EXECUTION_COLUMN = 'hostname'",
+                         "EXECUTION_COLUMN = 'Full_Credential'", "JOB_TYPE = 123", "JOB_TYPE_VARIABLE = 'invalid-name'"):
             with self.subTest(contents=contents):
                 settings_file = Path(self.directory.name) / "variables"
                 settings_file.write_text(contents)

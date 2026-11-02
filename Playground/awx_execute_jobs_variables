@@ -4,8 +4,19 @@ INPUT_FILE = None
 SHEET_NAME = "Results"
 
 # Maximum number of unique hosts sent as the limit of a single AWX job.
-# Hosts sharing the same template and Job_Variables are batched together.
+# Hosts sharing the same template, Job_Variables and Full_Credential are batched together.
 BATCH_SIZE = 10
+
+# Credentials come from the Full_Credential Excel column (case-insensitive header).
+# Values are AWX credential names or numeric IDs, separated using
+# FULL_CREDENTIAL_SEPARATOR from awx_invenotry_hosts_variables.
+# Blank/none keeps the credentials already configured on the template.
+
+# Playbook action, e.g. "install", "reinstall", "update", or your own value.
+# Empty preserves the value in Job_Variables (if present).
+# Precedence: --job-type > Excel Job_Type > JOB_TYPE > Job_Variables[JOB_TYPE_VARIABLE].
+JOB_TYPE = ""
+JOB_TYPE_VARIABLE = "action"
 
 # Column containing the launched job URL. Nonempty entries are skipped on restart.
 EXECUTION_COLUMN = "exceiute_job"
