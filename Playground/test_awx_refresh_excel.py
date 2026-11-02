@@ -97,9 +97,9 @@ class RefreshTests(unittest.TestCase):
         return records
 
     def test_refreshes_from_host_column_only_and_preserves_job_history(self):
-        headers = ["hostname", "ostype", "Job_Link", "Job_Variables", "Full_Credential", "Job_Type", "exceiute_job", "output", "notes"]
+        headers = ["hostname", "ostype", "Job_Link", "Job_Variables", "Full_Credential", "Job_Type", "exceiute_job", "output", "notes", "INVENTORY"]
         rows = [[name, "stale-os", "http://old.example/template", '{"old":true}', "old-key", "old-action",
-                 f"http://awx.test/#/jobs/playbook/{job_id}/output", f"log for {name}", f"note for {name}"]
+                 f"http://awx.test/#/jobs/playbook/{job_id}/output", f"log for {name}", f"note for {name}", "old-inventory"]
                 for job_id, name in enumerate(("aix-1", "linux-1", "windows-1"), start=101)]
         self.save_rows(headers, rows)
         self.assertEqual(self.run_main(), 0)
@@ -109,6 +109,7 @@ class RefreshTests(unittest.TestCase):
             name = record["hostname"]
             os = name.split("-")[0]
             self.assertEqual(record["ostype"], os)
+            self.assertEqual(record["INVENTORY"], "test_inventory")
             self.assertEqual(record["Full_Credential"].split(", ")[0], "shared-vault")
             self.assertEqual(record["Job_Type"], "install")
             self.assertEqual(json.loads(record["Job_Variables"]), {"source": os, "operation": "install"})
@@ -133,6 +134,7 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual([row["hostname"] for row in records], ["windows-1", "linux-1"])
         self.assertEqual(records[0]["host_limit"], "windows-1")
         self.assertEqual(records[0]["Full_Credential"], "shared-vault, windows-key")
+        self.assertEqual(records[0]["INVENTORY"], "test_inventory")
 
     def test_duplicate_hosts_are_looked_up_once_and_rows_are_preserved(self):
         self.save_rows(["hostname", "output"], [["linux-1", "first log"], ["linux-1", "second log"]])
@@ -144,14 +146,15 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual(host_call[2]["name__in"], "linux-1")
 
     def test_missing_hosts_have_stale_metadata_cleared_but_keep_history(self):
-        self.save_rows(["hostname", "Job_Link", "Full_Credential", "exceiute_job", "output"], [
-            ["not-found", "old-template", "old-key", "http://awx.test/#/jobs/playbook/99/output", "old log"],
-            ["windows-1", None, None, None, None],
+        self.save_rows(["hostname", "Job_Link", "Full_Credential", "exceiute_job", "output", "INVENTORY"], [
+            ["not-found", "old-template", "old-key", "http://awx.test/#/jobs/playbook/99/output", "old log", "old-inventory"],
+            ["windows-1", None, None, None, None, None],
         ])
         self.assertEqual(self.run_main(), 0)
         record = self.read_records()[1]
         self.assertEqual(record["AWX_Status"], "not_found")
         self.assertEqual(record["Full_Credential"], "none")
+        self.assertEqual(record["INVENTORY"], "none")
         self.assertEqual(record["Job_Link"], "none")
         self.assertEqual(record["output"], "old log")
         self.assertIn("99", record["exceiute_job"])
@@ -186,7 +189,7 @@ class RefreshTests(unittest.TestCase):
 
     def test_invalid_input_stops_before_api_requests(self):
         for headers, rows in ((["wrong-column"], [["linux-1"]]), (["hostname"], [["all:*"]]),
-                              (["hostname"], [[None]]), (["hostname", "HOSTNAME"], [["linux-1", "aix-1"]])):
+                              (["hostname", "HOSTNAME"], [["linux-1", "aix-1"]])):
             with self.subTest(headers=headers, rows=rows):
                 self.save_rows(headers, rows)
                 before = self.path.read_bytes()
@@ -194,6 +197,93 @@ class RefreshTests(unittest.TestCase):
                     self.run_main()
                 self.assertEqual(self.path.read_bytes(), before)
                 self.assertEqual(self.client.calls, [])
+
+    def test_header_only_workbook_gets_inventory_column_without_awx_requests(self):
+        self.save_rows(["hostname"], [])
+        self.assertEqual(self.run_main(), 0)
+        workbook = refresh.inventory.load_workbook(self.path)
+        headers = [cell.value for cell in workbook["Results"][1]]
+        self.assertIn("INVENTORY", headers)
+        self.assertIn("AWX_Status", headers)
+        self.assertEqual(workbook["Results"].max_row, 1)
+        workbook.close()
+        self.assertEqual(self.client.calls, [])
+        self.assertIn("No hostnames", self.output.getvalue())
+
+    def test_completely_empty_workbook_gets_headers_without_awx_requests(self):
+        self.save_rows([], [])
+        self.assertEqual(self.run_main(), 0)
+        workbook = refresh.inventory.load_workbook(self.path)
+        headers = [cell.value for cell in workbook["Results"][1]]
+        self.assertEqual(headers[:2], ["hostname", "INVENTORY"])
+        self.assertEqual(workbook["Notes"]["A1"].value, "Keep this worksheet")
+        workbook.close()
+        self.assertEqual(self.client.calls, [])
+
+    def test_blank_hostname_clears_stale_metadata_and_preserves_job_history(self):
+        self.save_rows(["hostname", "INVENTORY", "ostype", "Job_Link", "exceiute_job", "output"], [
+            [None, "old-inventory", "linux", "old-template", "http://awx.test/#/jobs/playbook/99/output", "old log"],
+        ])
+        self.assertEqual(self.run_main(), 0)
+        record = self.read_records()[0]
+        self.assertIsNone(record["INVENTORY"])
+        self.assertIsNone(record["ostype"])
+        self.assertIsNone(record["Job_Link"])
+        self.assertEqual(record["AWX_Status"], "no_hostname")
+        self.assertEqual(record["output"], "old log")
+        self.assertIn("99", record["exceiute_job"])
+        self.assertEqual(self.client.calls, [])
+
+    def test_empty_awx_inventory_marks_requested_hosts_not_found(self):
+        self.client.hosts = []
+        self.save_rows(["hostname", "INVENTORY"], [["windows-1", "old-inventory"]])
+        self.assertEqual(self.run_main(), 0)
+        record = self.read_records()[0]
+        self.assertEqual(record["INVENTORY"], "none")
+        self.assertEqual(record["AWX_Status"], "not_found")
+        self.assertFalse(any("/groups/" in call[1] for call in self.client.calls))
+
+    def test_inventory_header_is_updated_case_insensitively(self):
+        self.save_rows(["hostname", "inventory"], [["windows-1", "old-inventory"]])
+        self.assertEqual(self.run_main(), 0)
+        record = self.read_records()[0]
+        self.assertIn("INVENTORY", record)
+        self.assertNotIn("inventory", record)
+        self.assertEqual(record["INVENTORY"], "test_inventory")
+
+    def test_smart_inventory_uses_source_inventory_name(self):
+        original_get = self.client.get
+        original_items = self.client.items
+
+        def get(path, **kwargs):
+            if path == "inventories/2/":
+                self.client.calls.append(("GET", path, kwargs))
+                return {"id": 2, "name": "source_inventory"}
+            if path == "inventories/2/script/?all=1&hostvars=1":
+                return {"_meta": {"hostvars": {"windows-1": {"ostype": "windows"}}}}
+            return original_get(path, **kwargs)
+
+        def items(path, **kwargs):
+            return iter([]) if path == "inventories/2/groups/" else original_items(path, **kwargs)
+
+        self.client.hosts = [{"id": 1, "name": "windows-1", "inventory": 2}]
+        self.save_rows(["hostname"], [["windows-1"]])
+        with patch.object(self.client, "get", side_effect=get), patch.object(self.client, "items", side_effect=items):
+            self.assertEqual(self.run_main(), 0)
+        self.assertEqual(self.read_records()[0]["INVENTORY"], "source_inventory")
+
+    def test_regular_export_has_inventory_column_even_when_inventory_is_empty(self):
+        refresh.inventory.apply_settings(self.connection)
+        self.client.hosts = []
+        report = refresh.inventory.fetch_report(self.client, 1)
+        headers, rows = refresh.inventory.build_output_rows(report)
+        self.assertIn("INVENTORY", headers)
+        self.assertEqual(rows, [])
+        refresh.inventory.save_excel(headers, rows, self.path)
+        workbook = refresh.inventory.load_workbook(self.path)
+        self.assertIn("INVENTORY", [cell.value for cell in workbook.active[1]])
+        self.assertEqual(workbook.active.max_row, 1)
+        workbook.close()
 
     def test_legacy_fetch_report_still_rejects_all_missing_hosts(self):
         refresh.inventory.apply_settings(self.connection)

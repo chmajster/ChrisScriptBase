@@ -5,7 +5,7 @@ Run: python awx_refresh_excel.py
 Custom workbook: python awx_refresh_excel.py -file hosts.xlsx -d
 Custom host column / sheet: python awx_refresh_excel.py -file hosts.xlsx --host-column host_limit --sheet Sheet1
 
-Only the host column supplies lookup data. Existing OS, credentials, job template,
+Only the host column supplies lookup data. Existing INVENTORY, OS, credentials, job template,
 variables and job action are overwritten using the current configuration and AWX.
 Execution links, output, other columns and other worksheets are preserved.
 Rows are sorted Windows, Linux, AIX, then unknown/missing hosts and empty rows.
@@ -15,6 +15,8 @@ awx_execute_jobs_variables for the default workbook, worksheet and job action.
 Host columns are detected as hostname, host_limit, host or hosts (case-insensitive).
 Each cell must contain one hostname. Duplicate host rows are refreshed together;
 multiple credential matches are joined in Credential and Full_Credential.
+Empty input creates/updates headers without querying AWX. Missing hosts are marked
+not_found; data rows without a hostname have stale metadata cleared (no_hostname).
 Close the workbook in Excel before running. Requires openpyxl and both scripts.
 """
 
@@ -48,9 +50,16 @@ def read_host_rows(sheet, host_column=None):
         if cell.value is None:
             continue
         name = str(cell.value).strip().casefold()
+        if not name:
+            continue
         if name in columns:
             raise AWXError(f"Duplicate column {cell.value!r} in worksheet {sheet.title!r}.")
         columns[name] = cell.column
+    if not columns and host_column is None and not any(
+        cell.value is not None and str(cell.value).strip() for row in sheet for cell in row
+    ):
+        sheet.cell(1, 1).value = "hostname"
+        columns["hostname"] = 1
     selected = host_column.strip().casefold() if host_column is not None else next(
         (name for name in HOST_COLUMNS if name in columns), None
     )
@@ -67,8 +76,6 @@ def read_host_rows(sheet, host_column=None):
         if cell.data_type == "f" or not runner.HOSTNAME_PATTERN.fullmatch(hostname):
             raise AWXError(f"Row {row_number}: the host column must contain one literal hostname per cell.")
         rows[row_number] = hostname
-    if not rows:
-        raise AWXError("The host column contains no hostnames.")
     return rows, columns, columns[selected]
 
 
@@ -141,8 +148,17 @@ def refresh_sheet(sheet, host_rows, columns, source_column, metadata, headers):
             sheet.column_dimensions[inventory.get_column_letter(column)].width = (
                 65 if name in ("Job_Link", "Job_Variables", "Full_Credential") else 22
             )
-    for row_number, hostname in host_rows.items():
-        values = {"hostname": hostname, **metadata.get(hostname, missing_values)}
+        if name == "INVENTORY":
+            sheet.cell(1, columns[name.casefold()]).value = name
+    for row_number in range(2, sheet.max_row + 1):
+        if row_number in host_rows:
+            hostname = host_rows[row_number]
+            values = {"hostname": hostname, **metadata.get(hostname, missing_values)}
+        elif any(cell.value is not None and str(cell.value).strip() for cell in sheet[row_number]):
+            values = {name: "" for name in ["hostname", *headers]}
+            values["AWX_Status"] = "no_hostname"
+        else:
+            continue
         for name, value in values.items():
             cell = sheet.cell(row_number, columns[name.casefold()])
             cell.value = value
@@ -179,8 +195,12 @@ def main(argv=None):
         host_rows, columns, source_column = read_host_rows(sheet, args.host_column)
         hostnames = list(dict.fromkeys(host_rows.values()))
         print(f"Input: {path}; worksheet: {sheet_name}; unique hosts: {len(hostnames)}", flush=True)
-        client = inventory.AWXClient(connection["AWX_URL"], connection["AWX_TOKEN"].strip())
-        report = inventory.fetch_report(client, connection["INVENTORY"], hostnames=hostnames, allow_empty=True)
+        if hostnames:
+            client = inventory.AWXClient(connection["AWX_URL"], connection["AWX_TOKEN"].strip())
+            report = inventory.fetch_report(client, connection["INVENTORY"], hostnames=hostnames, allow_empty=True)
+        else:
+            print("No hostnames in Excel. Updating column headers without querying AWX.", flush=True)
+            report = {"hosts": [], "host_count": 0, "missing_hosts": []}
         metadata, headers = metadata_by_host(report, settings)
         protected = {settings["EXECUTION_COLUMN"].casefold(), "exceiute_job", "output"}
         managed = {name.casefold() for name in ["hostname", *headers]}

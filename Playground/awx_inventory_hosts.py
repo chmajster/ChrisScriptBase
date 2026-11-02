@@ -596,6 +596,7 @@ def fetch_report(client, selector, hostnames=None, *, allow_empty=False):
     hosts = []
     group_indexes = {}
     host_variables = {}
+    inventory_names = {inventory["id"]: inventory["name"]}
     host_purpose = f"Fetch hosts from inventory ID {inventory['id']} (name: {inventory['name']!r})"
     if requested is not None:
         host_purpose += f" for {len(requested)} names from the input file"
@@ -606,6 +607,11 @@ def fetch_report(client, selector, hostnames=None, *, allow_empty=False):
             continue
         # Smart Inventory hosts may belong to different source inventories.
         source_id = host.get("inventory") or inventory["id"]
+        if source_id not in inventory_names:
+            summary = (host.get("summary_fields") or {}).get("inventory") or {}
+            inventory_names[source_id] = summary.get("name") or client.get(
+                f"inventories/{source_id}/", purpose=f"Fetch source inventory name for ID {source_id}",
+            ).get("name") or str(source_id)
         if source_id not in group_indexes:
             LOGGER.debug("Loading the group index for source inventory ID %s", source_id)
             groups = list(client.items(
@@ -633,6 +639,7 @@ def fetch_report(client, selector, hostnames=None, *, allow_empty=False):
             {
                 "id": host["id"],
                 "name": host["name"],
+                "INVENTORY": inventory_names[source_id],
                 "ostype": host_variables[source_id].get(host["name"], {}).get("ostype"),
                 "enabled": host.get("enabled", True),
                 **group_indexes[source_id].for_host(host["name"]),
@@ -666,7 +673,7 @@ def build_output_rows(report):
     extra_credentials = extra_credential_values()
     if not isinstance(FULL_CREDENTIAL_SEPARATOR, str):
         raise AWXError("FULL_CREDENTIAL_SEPARATOR must be a string.")
-    headers = ["hostname", "ostype", "Job_Link", "Job_Variables", "Extra_Credentials", "Credential", "Full_Credential"]
+    headers = ["hostname", "INVENTORY", "ostype", "Job_Link", "Job_Variables", "Extra_Credentials", "Credential", "Full_Credential"]
     extra_text = FULL_CREDENTIAL_SEPARATOR.join(extra_credentials) or "none"
     rows = []
     for host in report["hosts"]:
@@ -703,7 +710,8 @@ def build_output_rows(report):
         job_variables = deepcopy(job.get("variables", {}))
         host["Job_Link"] = job_link
         host["Job_Variables"] = job_variables
-        fields = [host["name"], ostype_text, job_link or "none",
+        host["INVENTORY"] = host.get("INVENTORY") or report.get("inventory", {}).get("name") or "none"
+        fields = [host["name"], host["INVENTORY"], ostype_text, job_link or "none",
                   json.dumps(job_variables, ensure_ascii=False), extra_text]
         credentials = list(dict.fromkeys(
             value for variable in primary_variables for value in values_by_variable.get(variable, [])
