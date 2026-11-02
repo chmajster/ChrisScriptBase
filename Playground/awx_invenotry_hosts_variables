@@ -31,3 +31,12 @@ TIMEOUT = 30
 
 # Number of records per API page.
 PAGE_SIZE = 200
+
+# Job template links and extra variables for each host ostype.
+# Example url: https://awx.example.com/#/templates/job_template/42/details
+# Example variables: {"action": "check", "reboot": False}
+OS_JOBS = {
+    "windows": {"url": "", "variables": {}},
+    "linux": {"url": "", "variables": {}},
+    "aix": {"url": "", "variables": {}},
+}

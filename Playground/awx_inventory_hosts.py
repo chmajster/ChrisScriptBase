@@ -58,6 +58,11 @@ OUTPUT_FILE = Path("awx_inventory_hosts.json")
 EXCEL_OUTPUT_FILE = Path("awx_inventory_hosts.xlsx")
 TIMEOUT = 30  # Timeout for a single request, in seconds.
 PAGE_SIZE = 200
+OS_JOBS = {
+    "windows": {"url": "", "variables": {}},
+    "linux": {"url": "", "variables": {}},
+    "aix": {"url": "", "variables": {}},
+}
 # =================================================================
 
 DEFAULT_SETTINGS = {
@@ -71,6 +76,7 @@ DEFAULT_SETTINGS = {
     "EXCEL_OUTPUT_FILE": EXCEL_OUTPUT_FILE,
     "TIMEOUT": TIMEOUT,
     "PAGE_SIZE": PAGE_SIZE,
+    "OS_JOBS": OS_JOBS,
 }
 
 LOGGER = logging.getLogger("awx_inventory_hosts")
@@ -110,6 +116,23 @@ class AWXError(RuntimeError):
 
 def validate_settings(settings):
     """Validate setting types and prepare output file paths."""
+    jobs = settings["OS_JOBS"]
+    if not isinstance(jobs, dict) or any(os not in ("windows", "linux", "aix") for os in jobs):
+        raise AWXError("OS_JOBS must be a dictionary with windows, linux, or aix keys.")
+    for os, job in jobs.items():
+        if not isinstance(job, dict) or set(job) - {"url", "variables"}:
+            raise AWXError(f"OS_JOBS[{os!r}] must contain url and variables settings.")
+        url = job.get("url", "")
+        if not isinstance(url, str) or (url.strip() and (
+            urlsplit(url.strip()).scheme not in ("http", "https") or not urlsplit(url.strip()).netloc
+        )):
+            raise AWXError(f"OS_JOBS[{os!r}].url must be an HTTP(S) link or an empty string.")
+        if not isinstance(job.get("variables", {}), dict):
+            raise AWXError(f"OS_JOBS[{os!r}].variables must be a dictionary.")
+        try:
+            json.dumps(job.get("variables", {}), allow_nan=False)
+        except (TypeError, ValueError):
+            raise AWXError(f"OS_JOBS[{os!r}].variables must contain valid JSON values.") from None
     for name in ("AWX_URL", "AWX_TOKEN"):
         if not isinstance(settings[name], str) or not settings[name].strip():
             raise AWXError(f"{name} must be a nonempty string.")
@@ -572,6 +595,7 @@ def fetch_report(client, selector, hostnames=None):
     debug_variables("AWX host filters", host_filters)
     hosts = []
     group_indexes = {}
+    host_variables = {}
     host_purpose = f"Fetch hosts from inventory ID {inventory['id']} (name: {inventory['name']!r})"
     if requested is not None:
         host_purpose += f" for {len(requested)} names from the input file"
@@ -588,15 +612,15 @@ def fetch_report(client, selector, hostnames=None):
                 f"inventories/{source_id}/groups/", order_by="name",
                 purpose=f"Fetch group names and IDs from source inventory ID {source_id}",
             ))
-            # all=1 includes disabled hosts. Omitting hostvars avoids fetching
-            # unnecessary host variables. Exported vars contain group variables.
+            # Include disabled hosts and parsed host variables (JSON or YAML in AWX).
             exported = client.get(
-                f"inventories/{source_id}/script/?all=1",
+                f"inventories/{source_id}/script/?all=1&hostvars=1",
                 purpose=(
-                    f"Fetch host memberships, group hierarchy, and group variables from source inventory ID {source_id}; "
+                    f"Fetch host variables, memberships, group hierarchy, and group variables from source inventory ID {source_id}; "
                     "include disabled hosts"
                 ),
-            ) if groups else {}
+            )
+            host_variables[source_id] = exported.get("_meta", {}).get("hostvars", {})
             group_indexes[source_id] = InventoryGroupIndex(groups, exported, credential_variables)
             LOGGER.debug(
                 "Group index for source inventory ID %s is ready: %d groups and %d hosts with group memberships; "
@@ -609,6 +633,7 @@ def fetch_report(client, selector, hostnames=None):
             {
                 "id": host["id"],
                 "name": host["name"],
+                "ostype": host_variables[source_id].get(host["name"], {}).get("ostype"),
                 "enabled": host.get("enabled", True),
                 **group_indexes[source_id].for_host(host["name"]),
             }
@@ -641,7 +666,7 @@ def build_output_rows(report):
     extra_credentials = extra_credential_values()
     if not isinstance(FULL_CREDENTIAL_SEPARATOR, str):
         raise AWXError("FULL_CREDENTIAL_SEPARATOR must be a string.")
-    headers = ["hostname", "Extra_Credentials", "Credential", "Full_Credential"]
+    headers = ["hostname", "ostype", "Job_Link", "Job_Variables", "Extra_Credentials", "Credential", "Full_Credential"]
     extra_text = FULL_CREDENTIAL_SEPARATOR.join(extra_credentials) or "none"
     rows = []
     for host in report["hosts"]:
@@ -669,7 +694,17 @@ def build_output_rows(report):
         LOGGER.debug("Host %s: adding %d literal credential values from configuration", host["name"], len(extra_credentials))
         debug_variables(f"Full_Credential for host {host['name']!r}", full_credential)
 
-        fields = [host["name"], extra_text]
+        ostype = host.get("ostype")
+        ostype_text = "none" if ostype is None else (
+            ostype if isinstance(ostype, str) else json.dumps(ostype, ensure_ascii=False)
+        )
+        job = OS_JOBS.get(ostype.strip().casefold(), {}) if isinstance(ostype, str) else {}
+        job_link = job.get("url", "").strip()
+        job_variables = deepcopy(job.get("variables", {}))
+        host["Job_Link"] = job_link
+        host["Job_Variables"] = job_variables
+        fields = [host["name"], ostype_text, job_link or "none",
+                  json.dumps(job_variables, ensure_ascii=False), extra_text]
         credentials = list(dict.fromkeys(
             value for variable in primary_variables for value in values_by_variable.get(variable, [])
         ))
@@ -690,6 +725,12 @@ def save_excel(headers, rows, output_file):
     sheet.append(headers)
     for row in rows:
         sheet.append(row)
+    if "Job_Link" in headers:
+        link_column = headers.index("Job_Link") + 1
+        for row_number in range(2, sheet.max_row + 1):
+            cell = sheet.cell(row_number, link_column)
+            if cell.value and urlsplit(cell.value).scheme in ("http", "https"):
+                cell.hyperlink = cell.value
 
     widths = []
     for column in sheet.iter_cols():
@@ -709,6 +750,8 @@ def save_excel(headers, rows, output_file):
             cell.data_type = "s"
             cell.number_format = "@"
             cell.font = header_font if cell.row == 1 else body_font
+            if cell.hyperlink:
+                cell.font = Font(name="Arial", size=10, color="0563C1", underline="single")
             cell.alignment = Alignment(
                 horizontal="center" if cell.row == 1 else "left",
                 vertical="center", wrap_text=True,

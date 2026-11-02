@@ -1,0 +1,101 @@
+{
+  "inventory": {
+    "id": 7,
+    "name": "it2_inventory"
+  },
+  "host_count": 2,
+  "hosts": [
+    {
+      "id": 9,
+      "name": "it2-testvm",
+      "ostype": "linux",
+      "enabled": true,
+      "groups": [
+        {
+          "id": 11,
+          "name": "XD"
+        },
+        {
+          "id": 9,
+          "name": "it2_grp_cred_unix"
+        }
+      ],
+      "all_groups": [
+        {
+          "id": 11,
+          "name": "XD"
+        },
+        {
+          "id": 9,
+          "name": "it2_grp_cred_unix"
+        }
+      ],
+      "os_credential_groups": [
+        {
+          "id": 9,
+          "name": "it2_grp_cred_unix",
+          "os_credential": "it2_id_rsa_it2uaxt2",
+          "inherited": false
+        }
+      ],
+      "credential_groups": [
+        {
+          "id": 9,
+          "name": "it2_grp_cred_unix",
+          "variable": "os_credential",
+          "value": "it2_id_rsa_it2uaxt2",
+          "inherited": false
+        }
+      ],
+      "Extra_Credentials": [
+        "xd",
+        "123"
+      ],
+      "Full_Credential": "xd, 123, it2_id_rsa_it2uaxt2",
+      "Job_Link": "",
+      "Job_Variables": {}
+    },
+    {
+      "id": 10,
+      "name": "it2-testvm1",
+      "ostype": "linux",
+      "enabled": true,
+      "groups": [
+        {
+          "id": 10,
+          "name": "it2_grp_cred_unix_3hop"
+        }
+      ],
+      "all_groups": [
+        {
+          "id": 10,
+          "name": "it2_grp_cred_unix_3hop"
+        }
+      ],
+      "os_credential_groups": [
+        {
+          "id": 10,
+          "name": "it2_grp_cred_unix_3hop",
+          "os_credential": "it2_id_rsa_it2uaxt2_XYZ",
+          "inherited": false
+        }
+      ],
+      "credential_groups": [
+        {
+          "id": 10,
+          "name": "it2_grp_cred_unix_3hop",
+          "variable": "os_credential",
+          "value": "it2_id_rsa_it2uaxt2_XYZ",
+          "inherited": false
+        }
+      ],
+      "Extra_Credentials": [
+        "xd",
+        "123"
+      ],
+      "Full_Credential": "xd, 123, it2_id_rsa_it2uaxt2_XYZ",
+      "Job_Link": "",
+      "Job_Variables": {}
+    }
+  ]
+}
