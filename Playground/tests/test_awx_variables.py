@@ -24,6 +24,8 @@ class VariablesTests(unittest.TestCase):
             EXCEL_OUTPUT_FILE=str(self.root / "hosts.xlsx"), OUTPUT_FILE=str(self.root / "hosts.json"),
             INPUT_FILE=None, SHEET_NAME="Results", BATCH_SIZE=10, JOB_TYPE="install", DEBUG=False,
             DRY_RUN=False, HOST_COLUMN=None, EXECUTION_COLUMN="exceiute_job", OUTPUT_COLUMN="output",
+            HOSTS=[], JOB_URL="",
+            SURVEY_ANSWERS={}, SURVEY_EXCEL_DEFAULTS={}, SURVEY_INTERACTIVE=False,
             OS_JOBS={"linux": {"url": "http://awx.test/#/templates/job_template/7/details", "variables": {"channel": "stable"}},
                      "windows": {"url": "", "variables": {}}},
         )
@@ -43,6 +45,20 @@ class VariablesTests(unittest.TestCase):
         self.assertEqual(config.read_execution_settings()["BATCH_SIZE"], 10)
         self.assertEqual(config.read_output_settings()["OUTPUT_COLUMN"], "output")
         self.assertEqual(config.current_variables_file(), self.path)
+
+    def test_all_launchers_accept_the_multiline_os_jobs_layout(self):
+        content = self.path.read_text(encoding="utf-8")
+        original = "OS_JOBS = " + repr(self.values["OS_JOBS"])
+        replacement = "OS_JOBS = {'linux': {'url': '\n https://awx.test/#/templates/job_template/7/details\n', 'variables': {'action': 'install'}}}"
+        self.assertIn(original, content)
+        self.path.write_text(content.replace(original, replacement), encoding="utf-8")
+        before = self.path.read_bytes()
+        for operation in config.OPERATION_SCOPES:
+            with self.subTest(operation=operation), config.launcher_configuration(operation):
+                jobs = awx.read_inventory_settings()["OS_JOBS"]
+                self.assertEqual(jobs["linux"]["url"], "https://awx.test/#/templates/job_template/7/details")
+                self.assertEqual(jobs["linux"]["variables"], {"action": "install"})
+        self.assertEqual(self.path.read_bytes(), before)
 
     def test_launcher_overrides_file_and_operation_overrides(self):
         self.values["EXECUTE_OVERRIDES"] = {"BATCH_SIZE": 4, "JOB_TYPE": "update"}
@@ -134,6 +150,56 @@ class VariablesTests(unittest.TestCase):
         with config.launcher_configuration("inventory", variables_file=self.root / "missing"):
             with self.assertRaisesRegex(config.AWXError, "Cannot find variables file"):
                 awx.read_inventory_settings()
+
+    def test_host_and_job_url_launcher_values_are_normalized(self):
+        with config.launcher_configuration("execute", {"HOSTS": "host-2,host-1 host-2", "JOB_URL": " http://awx.test/#/templates/job_template/9/details "}):
+            settings = config.read_execution_settings()
+            self.assertEqual(settings["HOSTS"], ["host-2", "host-1"])
+            self.assertEqual(settings["JOB_URL"], "http://awx.test/#/templates/job_template/9/details")
+
+    def test_cli_hosts_and_url_override_launcher_values_in_a_real_dry_run(self):
+        path = self.root / "input.xlsx"
+        workbook = awx.excel.Workbook()
+        sheet = workbook.active
+        sheet.title = "Results"
+        sheet.append(["hostname", "Job_Link", "Job_Variables", "Full_Credential"])
+        for hostname in ("host-1", "host-2"):
+            sheet.append([hostname, "http://awx.test/#/templates/job_template/7/details", "{}", "machine-cred"])
+        workbook.save(path)
+        workbook.close()
+        before = path.read_bytes()
+        output = io.StringIO()
+        with patch.object(awx.AWXClient, "request", side_effect=AssertionError("No API requests allowed")), \
+             contextlib.redirect_stdout(output):
+            code = awx.run("execute", ["--hosts", "host-1", "--job-url", "http://awx.test/#/templates/job_template/8/details", "--dry-run"],
+                           variables={"INPUT_FILE": str(path), "HOSTS": ["host-2"], "JOB_URL": "http://awx.test/#/templates/job_template/9/details"},
+                           variables_file=self.path)
+        self.assertEqual(code, 0)
+        self.assertIn("template=8; limit=host-1", output.getvalue())
+        self.assertNotIn("limit=host-2", output.getvalue())
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_invalid_host_and_job_url_configuration_is_rejected(self):
+        for overrides in ({"HOSTS": ["*"]}, {"HOSTS": 3}, {"JOB_URL": 7}):
+            with self.subTest(overrides=overrides), config.launcher_configuration("execute", overrides):
+                with self.assertRaises(config.AWXError):
+                    config.read_execution_settings()
+
+    def test_survey_defaults_launcher_merge_and_cli_interactive_override(self):
+        self.values.update(SURVEY_ANSWERS={'operation': 'install', 'count': 2}, SURVEY_INTERACTIVE=True)
+        self.write_values()
+        with config.launcher_configuration('execute', {'SURVEY_ANSWERS': {'operation': 'reinstall'}}):
+            settings = config.read_execution_settings()
+            self.assertEqual(settings['SURVEY_ANSWERS'], {'operation': 'reinstall', 'count': 2})
+            self.assertTrue(settings['SURVEY_INTERACTIVE'])
+            self.assertFalse(awx.parse_execute_arguments(['--no-survey']).survey)
+
+    def test_invalid_survey_settings_are_rejected(self):
+        for values in ({'SURVEY_ANSWERS': []}, {'SURVEY_ANSWERS': {'': 'value'}}, {'SURVEY_INTERACTIVE': 'yes'},
+                       {'SURVEY_EXCEL_DEFAULTS': []}, {'SURVEY_EXCEL_DEFAULTS': {'': 'value'}}):
+            with self.subTest(values=values), config.launcher_configuration('execute', values):
+                with self.assertRaises(config.AWXError):
+                    config.read_execution_settings()
 
 
 if __name__ == "__main__":

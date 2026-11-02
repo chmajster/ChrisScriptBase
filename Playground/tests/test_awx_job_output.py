@@ -41,7 +41,9 @@ class FakeAWX(BaseHTTPRequestHandler):
         else:
             statuses = job.setdefault('statuses', ['successful'])
             status = statuses.pop(0) if len(statuses) > 1 else statuses[0]
-            self.respond(200, {'id': int(parts[4]), 'status': status, 'inventory': 5, 'summary_fields': job.get('summary_fields', {'inventory': {'id': 5, 'name': 'test_inventory'}})})
+            self.respond(200, {'id': int(parts[4]), 'status': status, 'inventory': 5,
+                               'summary_fields': job.get('summary_fields', {'inventory': {'id': 5, 'name': 'test_inventory'}}),
+                               'artifacts': job.get('artifacts', {})})
 
 class OutputTests(unittest.TestCase):
 
@@ -146,6 +148,7 @@ class OutputTests(unittest.TestCase):
         workbook.close()
 
     def test_waits_for_running_job_and_collects_failed_job_output(self):
+        self.settings['WAIT_FOR_COMPLETION'] = True
         self.server.jobs['101']['statuses'] = ['running', 'failed']
         self.save_rows([['host-1', 'linux', self.link(101), None]])
         self.assertEqual(self.run_main(), 0)
@@ -186,6 +189,68 @@ class OutputTests(unittest.TestCase):
         self.assertEqual(self.run_main(), 0)
         self.assertEqual(self.server.calls.count('/api/v2/jobs/101/'), 1)
 
+    def test_artifacts_are_downloaded_once_and_messages_match_each_host(self):
+        artifacts = {'results': {'linux-1': {'message': 'Installed'},
+                                 'linux-2': {'result': {'message': 'Updated'}},
+                                 'unrelated-host': {'message': 'Do not copy'}}}
+        self.server.jobs['101']['artifacts'] = artifacts
+        self.save_rows([['linux-1', 'linux', self.link(101), None],
+                        ['linux-2', 'linux', self.link(101), None],
+                        ['linux-missing', 'linux', self.link(101), None]])
+        self.assertEqual(self.run_main(), 0)
+        records = self.records()
+        for name in records:
+            self.assertEqual(json.loads(records[name]['Artifacts']), artifacts)
+        self.assertEqual(records['linux-1']['artifact filter'], 'Installed')
+        self.assertEqual(records['linux-2']['artifact filter'], 'Updated')
+        self.assertIsNone(records['linux-missing']['artifact filter'])
+        self.assertEqual(self.server.calls.count('/api/v2/jobs/101/'), 1)
+        headers = self.read_values()[0]
+        self.assertEqual(headers.index('artifact filter'), headers.index('Artifacts') + 1)
+
+    def test_artifacts_are_updated_even_when_stdout_is_unavailable(self):
+        artifacts = {'host-1': {'message': 'Credential failure'}}
+        self.server.jobs['101'].update(stdout_status=403, artifacts=artifacts)
+        self.save_rows([['host-1', 'linux', self.link(101), 'previous stdout']])
+        self.assertEqual(self.run_main(), 1)
+        record = self.records()['host-1']
+        self.assertEqual(record['output'], 'previous stdout')
+        self.assertEqual(json.loads(record['Artifacts']), artifacts)
+        self.assertEqual(record['artifact filter'], 'Credential failure')
+
+    def test_empty_artifacts_clear_previous_values_without_formula_execution(self):
+        self.server.jobs['101']['artifacts'] = {'host-1': {'message': '=literal result'}}
+        self.save_rows([['host-1', 'linux', self.link(101), None]])
+        self.assertEqual(self.run_main(), 0)
+        workbook = collector.load_workbook(self.path)
+        cell = self.cell(workbook.active, 2, 'artifact filter')
+        self.assertEqual(cell.value, '=literal result')
+        self.assertEqual(cell.data_type, 's')
+        workbook.close()
+        self.server.jobs['101']['artifacts'] = {}
+        self.assertEqual(self.run_main(), 0)
+        record = self.records()['host-1']
+        self.assertEqual(record['Artifacts'], '{}')
+        self.assertIsNone(record['artifact filter'])
+
+    def test_long_artifacts_are_truncated_with_a_link_to_full_awx_data(self):
+        self.server.jobs['101']['artifacts'] = {'host-1': {'message': 'x' * 40000}}
+        self.save_rows([['host-1', 'linux', self.link(101), None]])
+        self.assertEqual(self.run_main(), 0)
+        record = self.records()['host-1']
+        for name in ('Artifacts', 'artifact filter'):
+            self.assertEqual(len(record[name]), collector.EXCEL_CELL_LIMIT)
+            self.assertIn('truncated in Excel', record[name])
+            self.assertIn(self.base + '/api/v2/jobs/101/', record[name])
+
+    def test_missing_job_details_preserve_existing_artifact_history(self):
+        self.save_rows([['host-1', 'linux', self.link(999), 'old stdout', '{"old":true}', 'old message']],
+                       headers=['hostname', 'ostype', 'exceiute_job', 'output', 'Artifacts', 'artifact filter'])
+        self.assertEqual(self.run_main(), 1)
+        record = self.records()['host-1']
+        self.assertEqual(record['Artifacts'], '{"old":true}')
+        self.assertEqual(record['artifact filter'], 'old message')
+
     def test_invalid_urls_rejected_before_requests(self):
         for link in ('https://other.example/#/jobs/playbook/101/output', self.base + '/#/templates/job_template/101/details'):
             with self.subTest(link=link):
@@ -199,11 +264,37 @@ class OutputTests(unittest.TestCase):
             self.assertEqual(collector.job_id_from_link(link, self.client), 101)
 
     def test_configuration_validation(self):
-        for content in ("OUTPUT_DIRECTORY = ''", "WAIT_FOR_COMPLETION = 'yes'", 'POLL_INTERVAL = 0', 'UNKNOWN = 1'):
+        for content in ("OUTPUT_DIRECTORY = ''", "WAIT_FOR_COMPLETION = 'yes'", 'POLL_INTERVAL = 0', 'UNKNOWN = 1',
+                        "OUTPUT_COLUMN = 'Artifacts'", "OUTPUT_COLUMN = 'artifact filter'"):
             with self.subTest(content=content):
                 path = Path(self.directory.name) / 'variables'
                 path.write_text(content)
                 with self.assertRaises(collector.AWXError):
                     collector.read_output_settings(path)
+
+
+class ArtifactMessageTests(unittest.TestCase):
+    def test_nested_host_keys_and_host_records_support_multiple_messages(self):
+        artifacts = {'results': [{'hostname': 'HOST-1', 'message': 'First'},
+                                 {'host': 'host-1', 'data': {'message': 'Second'}},
+                                 {'inventory_hostname': 'host-2', 'message': 'Other host'},
+                                 {'host-1': {'message': 'First'}},
+                                 {'name': 'host-1', 'message': ['Third', 'Fourth']}],
+                     'message': 'Global message'}
+        self.assertEqual(collector.artifact_messages(artifacts, ' host-1 '), 'First\nSecond\n["Third", "Fourth"]')
+
+    def test_exact_hostname_matching_does_not_mix_similar_names(self):
+        artifacts = {'host-1.example.com': {'message': 'FQDN'},
+                     'host-10': {'message': 'Similar name'},
+                     'host-1': {'message': 'Exact host', 'child': {'host': 'host-2', 'message': 'Other host'}}}
+        self.assertEqual(collector.artifact_messages(artifacts, 'HOST-1'), 'Exact host')
+        self.assertEqual(collector.artifact_messages(artifacts, 'host-1.example.com'), 'FQDN')
+        self.assertEqual(collector.artifact_messages(artifacts, ''), '')
+
+    def test_missing_or_json_encoded_artifacts(self):
+        for artifacts in (None, {}, [], 'not JSON', {'message': 'Global only'}, {'host-1': {'message': None}}):
+            with self.subTest(artifacts=artifacts):
+                self.assertEqual(collector.artifact_messages(artifacts, 'host-1'), '')
+        self.assertEqual(collector.artifact_messages('{"host-1":{"message":"Success"}}', 'host-1'), 'Success')
 if __name__ == '__main__':
     unittest.main()

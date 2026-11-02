@@ -1,0 +1,15 @@
+# Przyklad sekcji survey do wklejenia do istniejacego awx_variable.
+# SURVEY_EXCEL_DEFAULTS wypelnia nowe/puste komorki wykrytych kolumn Survey_...
+# Refresh nadpisuje tez wypelnione komorki odpowiedziami ustawionymi w konfiguracji.
+# SURVEY_ANSWERS zawiera wspolne odpowiedzi; pusty slownik nie dodaje nadpisan.
+
+SURVEY_EXCEL_DEFAULTS = {
+    'installtesttypename': 'install',
+}
+SURVEY_ANSWERS = {
+    'installtesttypename': 'install',
+}
+
+# [] pobiera credentiale przypisane do szablonu joba.
+# Niepusta lista wybiera credentiale z konfiguracji, np. ['shared-vault'].
+EXTRA_CREDENTIAL_VARIABLES = []

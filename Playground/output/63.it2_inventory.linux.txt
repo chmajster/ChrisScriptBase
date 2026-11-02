@@ -1,0 +1,16 @@
+[DEPRECATION WARNING]: ANSIBLE_COLLECTIONS_PATHS option. Reason: does not fit 
+var naming standard, use the singular form ANSIBLE_COLLECTIONS_PATH instead 
+Alternatives: none. This feature will be removed in version 2.19. Deprecation 
+warnings can be disabled by setting deprecation_warnings=False in ansible.cfg.
+SSH password: 
+BECOME password[defaults to SSH password]: 
+
+PLAY [Hello world] *************************************************************
+
+TASK [Display Hello world] *****************************************************
+ok: [it2-testvm1] => {
+    "msg": "Hello world!"
+}
+
+PLAY RECAP *********************************************************************
+it2-testvm1                : ok=1    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   

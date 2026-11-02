@@ -39,14 +39,22 @@ class WorkflowAPI(BaseHTTPRequestHandler):
             names = {'shared-vault': 10, 'linux-key': 11, 'windows-key': 12}
             credential_id = names.get(name)
             matches = [{'id': credential_id, 'name': name, 'credential_type': 1 if credential_id == 10 else 2, 'kind': 'vault' if credential_id == 10 else 'ssh', 'inputs': {}}] if credential_id else []
+            if name in self.server.extra_credentials:
+                matches = [self.server.extra_credentials[name]]
             self.respond({'results': matches, 'next': None, 'count': len(matches)})
         elif parsed.path.endswith('/launch/'):
-            self.respond({'ask_limit_on_launch': True, 'ask_variables_on_launch': True, 'ask_credential_on_launch': True, 'defaults': {'job_slice_count': 1}})
+            self.respond({'ask_limit_on_launch': True, 'ask_variables_on_launch': True, 'ask_credential_on_launch': True,
+                          'survey_enabled': bool(self.server.survey_questions),
+                          'defaults': {'job_slice_count': 1, 'credentials': self.server.template_credentials}})
+        elif parsed.path.endswith('/survey_spec/'):
+            self.respond({'spec': self.server.survey_questions})
         elif parsed.path.endswith('/stdout/'):
             job_id = parsed.path.split('/')[4]
             self.respond(f"Job {job_id}: complete stdout\n", content_type='text/plain; charset=utf-8')
         elif '/jobs/' in parsed.path:
-            self.respond({'status': 'successful', 'inventory': 1, 'summary_fields': {'inventory': {'name': 'test_inventory'}}})
+            self.respond({'status': 'successful', 'inventory': 1,
+                          'summary_fields': {'inventory': {'name': 'test_inventory'}},
+                          'artifacts': {'linux-1': {'message': 'Linux complete'}, 'windows-1': {'message': 'Windows complete'}}})
         else:
             self.respond({'detail': 'Not found'}, 404)
 
@@ -64,6 +72,10 @@ class WorkflowTests(unittest.TestCase):
         self.path = self.root / 'hosts.xlsx'
         self.server = HTTPServer(('127.0.0.1', 0), WorkflowAPI)
         self.server.launches = []
+        self.server.survey_questions = []
+        self.server.template_credentials = []
+        self.server.extra_credentials = {}
+        self.server.with_jumphost = False
         thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         thread.start()
         self.addCleanup(thread.join)
@@ -73,10 +85,15 @@ class WorkflowTests(unittest.TestCase):
         self.connection = deepcopy(inventory.INVENTORY_DEFAULTS)
         self.connection.update(AWX_URL=self.base, AWX_TOKEN='test-token', INVENTORY=1, OUTPUT_FILE=self.root / 'hosts.json', EXCEL_OUTPUT_FILE=self.path, CREDENTIAL_VARIABLES=['os_credential'], EXTRA_CREDENTIAL_VARIABLES=['shared-vault'], OS_JOBS={os: {'url': f"{self.base}/#/templates/job_template/{index}/details", 'variables': {}} for index, os in enumerate(('windows', 'linux'), start=7)})
         self.execution = deepcopy(common.EXECUTION_DEFAULTS)
-        self.execution.update(JOB_TYPE='install', BATCH_SIZE=10)
+        self.execution.update(JOB_TYPE='install', BATCH_SIZE=10, HOSTS=[], JOB_URL='', WAIT_FOR_COMPLETION=True,
+                              SURVEY_ANSWERS={}, SURVEY_EXCEL_DEFAULTS={}, SURVEY_INTERACTIVE=False)
         self.outputs = deepcopy(common.OUTPUT_DEFAULTS)
         self.outputs['OUTPUT_DIRECTORY'] = str(self.root / 'output')
-        self.fake_inventory = InventoryResponses()
+        self.fake_inventory = InventoryResponses(self.base)
+        self.fake_inventory.credential_records = {
+            'linux-key': {'id': 11, 'name': 'linux-key', 'credential_type': 2, 'kind': 'ssh', 'inputs': {}},
+            'windows-key': {'id': 12, 'name': 'windows-key', 'credential_type': 2, 'kind': 'ssh', 'inputs': {}},
+        }
         self.fake_inventory.request_count = 0
         self.fake_inventory.hosts = [host for host in self.fake_inventory.hosts if host['name'] in ('linux-1', 'windows-1')]
         original_get = self.fake_inventory.get
@@ -85,15 +102,27 @@ class WorkflowTests(unittest.TestCase):
             result = original_get(path, **kwargs)
             if 'linux-other' in result:
                 result['linux-other']['hosts'] = []
+                if self.server.with_jumphost:
+                    result['test_3hop_group'] = {'children': ['linux-group']}
             return result
         self.fake_inventory.get = get
+        original_items = self.fake_inventory.items
+
+        def items(path, **kwargs):
+            result = original_items(path, **kwargs)
+            if self.server.with_jumphost and path == 'inventories/1/groups/':
+                return iter([*result, {'id': 91, 'name': 'test_3hop_group'}])
+            return result
+        self.fake_inventory.items = items
         self.addCleanup(inventory.apply_settings, inventory.INVENTORY_DEFAULTS)
 
     def assert_layout(self, execution_column, output_column):
         workbook = excel.load_workbook(self.path)
         sheet = workbook['Results']
         names = [cell.value for cell in sheet[1]]
-        self.assertEqual(names[:12], excel.headers(execution_column, output_column))
+        expected = excel.headers(execution_column, output_column)
+        self.assertEqual(names[:len(expected)], expected)
+        self.assertEqual(names.index('artifact filter'), names.index('Artifacts') + 1)
         self.assertEqual(len(names), len(set((name.casefold() for name in names))))
         self.assertEqual(sheet.freeze_panes, 'B2')
         self.assertFalse(sheet.sheet_view.showGridLines)
@@ -107,7 +136,25 @@ class WorkflowTests(unittest.TestCase):
         workbook.close()
         return records
 
-    def workflow(self, execution_column='exceiute_job', output_column='output', missing_inventory_header=False):
+    def workflow(self, execution_column='exceiute_job', output_column='output', missing_inventory_header=False, with_survey=False, template_credentials=False, with_jumphost=False):
+        if with_jumphost:
+            self.server.with_jumphost = True
+            self.server.extra_credentials = {
+                'test_3hop_first': {'id': 301, 'name': 'test_3hop_first', 'credential_type': 31, 'inputs': {}},
+                'test_3hop_second': {'id': 302, 'name': 'test_3hop_second', 'credential_type': 31, 'inputs': {}},
+            }
+            self.fake_inventory.credential_records.update(self.server.extra_credentials)
+        if template_credentials:
+            self.connection['EXTRA_CREDENTIAL_VARIABLES'] = []
+            defaults = [{'id': 10, 'name': 'shared-vault', 'credential_type': 1}]
+            self.fake_inventory.template_credentials = {7: defaults, 8: defaults}
+            self.server.template_credentials = defaults
+        if with_survey:
+            questions = [{'variable': 'deployment_mode', 'type': 'multiplechoice', 'required': True,
+                          'choices': ['install', 'reinstall'], 'default': 'install'}]
+            self.server.survey_questions = questions
+            self.fake_inventory.surveys = {7: questions, 8: questions}
+            self.execution['SURVEY_ANSWERS'] = {'deployment_mode': 'install'}
         self.execution['EXECUTION_COLUMN'] = execution_column
         self.outputs['EXECUTION_COLUMN'] = execution_column
         self.outputs['OUTPUT_COLUMN'] = output_column
@@ -115,9 +162,17 @@ class WorkflowTests(unittest.TestCase):
             with patch.object(inventory, 'AWXClient', return_value=self.fake_inventory):
                 self.assertEqual(inventory.inventory_main([]), 0)
             generated = self.assert_layout(execution_column, output_column)
+            if with_jumphost:
+                self.assertEqual(generated['linux-1']['jumphost_for_hops'], 'test_3hop_first')
+                self.assertEqual(generated['linux-1']['full_credential'], 'shared-vault, linux-key, test_3hop_first')
+            if template_credentials:
+                self.assertTrue(all(record['extra_credentials'] == 'shared-vault' for record in generated.values()))
             workbook = excel.load_workbook(self.path)
             sheet = workbook['Results']
             columns = excel.read_columns(sheet)
+            if with_survey:
+                self.assertEqual(generated['linux-1']['survey_deployment_mode'], 'install')
+                sheet.cell(3, columns['survey_deployment_mode']).value = 'reinstall'
             old_job = f"{self.base}/#/jobs/playbook/88/output"
             sheet.cell(2, columns[execution_column.casefold()]).value = old_job
             sheet.cell(2, columns[execution_column.casefold()]).hyperlink = old_job
@@ -145,17 +200,42 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(refreshed['windows-1'][execution_column.casefold()], old_job)
             self.assertEqual(refreshed['windows-1'][output_column.casefold()], 'historical stdout')
             self.assertEqual(refreshed['windows-1']['owner'], 'Windows team')
+            if with_survey:
+                self.assertEqual(refreshed['linux-1']['survey_deployment_mode'], 'install')
+                # Edit after refresh: execution must use the current Excel answer.
+                workbook = excel.load_workbook(self.path)
+                sheet = workbook['Results']
+                columns = excel.read_columns(sheet)
+                sheet.cell(3, columns['survey_deployment_mode']).value = 'reinstall'
+                workbook.save(self.path)
+                workbook.close()
+            if with_jumphost:
+                workbook = excel.load_workbook(self.path)
+                sheet = workbook['Results']
+                columns = excel.read_columns(sheet)
+                sheet.cell(3, columns['jumphost_for_hops']).value = 'test_3hop_second'
+                self.assertTrue(any(rule.promptTitle == 'AWX jumphost' for rule in sheet.data_validations.dataValidation))
+                workbook.save(self.path)
+                workbook.close()
             self.assertEqual(runner.execute_main([]), 0)
             launched = self.assert_layout(execution_column, output_column)
             self.assertEqual(len(self.server.launches), 1)
             self.assertEqual(self.server.launches[0]['limit'], 'linux-1')
-            self.assertEqual(self.server.launches[0]['credentials'], [10, 11])
-            self.assertEqual(self.server.launches[0]['extra_vars'], {'action': 'install'})
+            self.assertEqual(self.server.launches[0]['credentials'], [10, 11, 302] if with_jumphost else [10, 11])
+            if with_jumphost:
+                self.assertEqual(launched['linux-1']['full_credential'], 'shared-vault, linux-key, test_3hop_second')
+            expected_vars = {'action': 'install', **({'deployment_mode': 'reinstall'} if with_survey else {})}
+            self.assertEqual(self.server.launches[0]['extra_vars'], expected_vars)
             self.assertEqual(launched['windows-1'][execution_column.casefold()], old_job)
+            self.assertEqual(launched['linux-1']['artifact filter'], 'Linux complete')
             self.assertEqual(collector.output_main([]), 0)
             collected = self.assert_layout(execution_column, output_column)
             self.assertEqual(collected['windows-1'][output_column.casefold()], 'Job 88: complete stdout\n')
             self.assertEqual(collected['linux-1'][output_column.casefold()], 'Job 101: complete stdout\n')
+            self.assertEqual(collected['linux-1']['artifact filter'], 'Linux complete')
+            self.assertEqual(collected['windows-1']['artifact filter'], 'Windows complete')
+            if with_survey:
+                self.assertEqual(collected['linux-1']['survey_deployment_mode'], 'reinstall')
             self.assertEqual((self.root / 'output' / '101.test_inventory.linux.txt').read_text(), 'Job 101: complete stdout\n')
             workbook = excel.load_workbook(self.path)
             self.assertEqual(workbook['Notes']['A1'].value, 'keep this')
@@ -167,10 +247,19 @@ class WorkflowTests(unittest.TestCase):
     def test_all_four_scripts_share_the_same_schema_and_formatting(self):
         self.workflow()
 
+    def test_jumphost_default_dropdown_and_edited_choice_reach_launch(self):
+        self.workflow(with_jumphost=True)
+
     def test_all_four_scripts_respect_custom_execution_and_output_columns(self):
         self.workflow('launched_job', 'job_stdout')
 
     def test_missing_header_keeps_unlabelled_data_and_repairs_all_stages(self):
         self.workflow(missing_inventory_header=True)
+
+    def test_survey_columns_refresh_from_config_and_launch_edited_answers(self):
+        self.workflow(with_survey=True)
+
+    def test_credentials_from_template_are_used_across_all_four_scripts(self):
+        self.workflow(template_credentials=True)
 if __name__ == '__main__':
     unittest.main()

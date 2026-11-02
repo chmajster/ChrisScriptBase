@@ -1,19 +1,69 @@
 #!/usr/bin/env python3
-"""AWX output launcher. Implementation: lib/awx.py; defaults: awx_variable."""
+r"""Pobieranie logów jobów AWX do Excela i plików TXT.
+
+Przykłady:
+    python .\awx_job_output.py
+    python .\awx_job_output.py -file .\hosty.xlsx --output-dir .\output -d
+    python .\awx_job_output.py --help
+
+Skrypt odczytuje linki z EXECUTION_COLUMN (domyślnie exceiute_job) i system
+z ostype. Pobiera pełny stdout każdego unikalnego joba i wpisuje go do OUTPUT_COLUMN
+we wszystkich powiązanych wierszach. Puste linki i LAUNCH_PENDING są pomijane.
+
+Artifacts zawiera JSON z pola artifacts joba. Sąsiednia kolumna artifact filter
+zawiera message znalezione dla hostname z tego wiersza. Skrypt przeszukuje
+zagnieżdżone słowniki i listy: host jako klucz JSON lub wartość pola host,
+hostname albo inventory_hostname. Dopasowanie pełnej nazwy ignoruje wielkość
+liter. Kilka komunikatów łączy nowymi liniami; brak dopasowania daje puste pole.
+Artefakty są aktualizowane również wtedy, gdy pobranie stdout się nie powiedzie.
+
+Pełny log zapisuje również jako <id_joba>.<inventory>.<os>.txt w OUTPUT_DIRECTORY.
+Inventory pochodzi z danych joba AWX, a OS z Excela. Komórka Excela mieści do
+32767 znaków; dłuższy tekst jest skracany z podaniem adresu pełnego pliku TXT.
+Kolejne pobranie aktualizuje logi tych samych jobów, także nieudanych lub anulowanych.
+Artefakty przekraczające limit komórki są skracane z adresem pełnych danych w AWX.
+
+Domyślne ustawienia: awx_variable. Nadpisania tego launchera: VARIABLES poniżej.
+Argumenty komendy mają pierwszeństwo. Implementacja znajduje się w lib/.
+"""
+
+from lib.awx_dependencies import ensure_virtual_environment
+
+if __name__ == "__main__":
+    ensure_virtual_environment()
 
 from lib.awx import run
 
 
-# Uncomment only the values to override for this launcher.
-# Priority: command-line arguments > VARIABLES below > awx_variable.
+# Odkomentuj potrzebne nadpisania. Puste VARIABLES = {} korzysta z awx_variable.
+# Kolejność: komenda > VARIABLES > OUTPUT_OVERRIDES > wspólne ustawienia z pliku.
 VARIABLES = {
+    # Ten sam plik .xlsx, do którego execute zapisał linki uruchomień.
     # "INPUT_FILE": 'hosts.xlsx',
+    # "SHEET_NAME": 'Results',
+    # Nazwa musi odpowiadać kolumnie używanej przez launcher execute.
+    # "EXECUTION_COLUMN": 'exceiute_job',
+
+    # Kolumna z treścią logu; zostanie dodana, jeśli jej brak.
     # "OUTPUT_COLUMN": 'output',
+    # Katalog pełnych logów TXT. Ścieżki względne liczą się od katalogu uruchomienia.
     # "OUTPUT_DIRECTORY": 'output',
+
+    # True: oczekiwanie na koniec joba, również failed/error/canceled, i pobranie logu.
+    # False: pobranie tekstu dostępnego teraz; ponowne uruchomienie odświeży wynik.
     # "WAIT_FOR_COMPLETION": True,
+    # Odstęp sprawdzania statusu i limit oczekiwania, w sekundach.
+    # "POLL_INTERVAL": 5,
+    # "JOB_WAIT_TIMEOUT": 3600,
+    # Limit pojedynczego zapytania HTTP, niezależny od czasu trwania joba.
+    # "TIMEOUT": 30,
+    # Szczegóły pobierania. Nie uruchamia nowych jobów.
     # "DEBUG": True,
+    # Kolory: auto w terminalu, always wymusza ANSI, never wy??cza kolory.
+    # "COLOR": 'auto',
 }
 
 
 if __name__ == "__main__":
+    # Wspólny kod pobiera każdy job raz, a wynik przypisuje do wszystkich jego wierszy.
     raise SystemExit(run("output", variables=VARIABLES))

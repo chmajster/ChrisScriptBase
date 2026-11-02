@@ -3,6 +3,7 @@
 import ast
 import contextlib
 import io
+import json
 import runpy
 import subprocess
 import sys
@@ -14,6 +15,7 @@ from urllib.error import HTTPError, URLError
 
 from lib import awx
 from lib import awx_config
+from lib import awx_dependencies
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -28,11 +30,13 @@ LAUNCHERS = {
 class LibraryTests(unittest.TestCase):
     def test_all_root_launchers_delegate_to_the_same_library(self):
         for filename, operation in LAUNCHERS.items():
-            with self.subTest(filename=filename), patch.object(awx, "run", return_value=0) as run:
+            with self.subTest(filename=filename), patch.object(awx, "run", return_value=0) as run, \
+                 patch.object(awx_dependencies, "ensure_virtual_environment") as ensure_venv:
                 with self.assertRaises(SystemExit) as result:
                     runpy.run_path(str(ROOT / filename), run_name="__main__")
                 self.assertEqual(result.exception.code, 0)
                 run.assert_called_once_with(operation, variables={})
+                ensure_venv.assert_called_once_with()
                 tree = ast.parse((ROOT / filename).read_text(encoding="utf-8"))
                 self.assertFalse(any(isinstance(node, (ast.FunctionDef, ast.ClassDef)) for node in tree.body))
 
@@ -44,6 +48,8 @@ class LibraryTests(unittest.TestCase):
                                             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertIn("--file", result.stdout)
+                    self.assertIn("Przykłady:", result.stdout)
+                    self.assertIn("awx_variable", result.stdout)
 
     def test_module_dispatcher_forwards_operation_help(self):
         result = subprocess.run([sys.executable, "-B", "-m", "lib.awx", "refresh", "--help"], cwd=ROOT,
@@ -84,6 +90,18 @@ class LibraryTests(unittest.TestCase):
             with self.assertRaises(awx.AWXError):
                 client.get("http://other.example/api/v2/jobs/1/")
             open_request.assert_not_called()
+
+    def test_json_escaped_survey_password_is_redacted_from_launch_errors(self):
+        secret = 'private-\u00e4-value"\\end'
+        client = awx.AWXClient('http://awx.test', 'test-token')
+        client.add_sensitive_values([secret])
+        body = json.dumps({'detail': secret}).encode()
+        error = HTTPError('http://awx.test/api/v2/job_templates/7/launch/', 400, 'Bad Request', {}, io.BytesIO(body))
+        with patch.object(client.opener, 'open', side_effect=error), self.assertRaises(awx.AWXError) as result:
+            client.post('job_templates/7/launch/', {'extra_vars': {'private': secret}})
+        self.assertNotIn(secret, str(result.exception))
+        self.assertNotIn(json.dumps(secret)[1:-1], str(result.exception))
+        self.assertIn('***', str(result.exception))
 
     def test_one_error_handler_returns_consistent_exit_codes(self):
         for error, code in ((awx.AWXError("test error"), 1), (KeyboardInterrupt(), 130)):

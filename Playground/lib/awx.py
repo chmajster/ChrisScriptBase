@@ -23,12 +23,22 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 from xml.etree.ElementTree import ParseError
 from zipfile import BadZipFile
 
+from .awx_dependencies import ensure_virtual_environment
+
+if __name__ == "__main__":
+    ensure_virtual_environment()
+
 from . import awx_config as common
+from . import awx_console as console
 from . import awx_excel as excel
+from . import awx_jumphosts as jumphosts
+from . import awx_survey as survey
+from . import awx_survey_excel as survey_excel
 from .awx_config import AWXError, apply_job_type
 from .awx_excel import ensure_columns
 from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
+from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.exceptions import InvalidFileException
@@ -48,17 +58,20 @@ LOGGER.propagate = False
 class DebugFormatter(logging.Formatter):
     """Redact the token, including any occurrences in API response data."""
 
-    def __init__(self, token):
+    def __init__(self, token, stream=None):
         super().__init__('[%(levelname)s] %(message)s')
         self.token = token
+        self.stream = stream
 
     def format(self, record):
         message = super().format(record)
-        return message.replace(self.token, '***') if self.token else message
+        message = message.replace(self.token, '***') if self.token else message
+        level = "error" if record.levelno >= logging.ERROR else "warning" if record.levelno >= logging.WARNING else "debug" if record.levelno <= logging.DEBUG else "info"
+        return console.colorize(message, level, stream=self.stream if self.stream is not None else sys.stderr)
 
 def configure_debug(enabled, token=''):
     handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(DebugFormatter(token))
+    handler.setFormatter(DebugFormatter(token, handler.stream))
     LOGGER.handlers.clear()
     LOGGER.addHandler(handler)
     LOGGER.setLevel(logging.DEBUG if enabled else logging.WARNING)
@@ -150,20 +163,200 @@ def open_workbook_sheet(path, preferred="Results", explicit=None):
         raise
 
 
-def operation_parser(description, *, with_sheet=True):
-    parser = argparse.ArgumentParser(description=description)
-    parser.add_argument("-file", "--file", dest="input_file", type=Path, help="Input Excel workbook.")
+OPERATION_HELP = {
+    "inventory": r"""Działanie:
+  Pobiera hosty, inventory, ostype oraz credentiale z grup AWX.
+  ApplicationID po INVENTORY: pierwszy człon nazwy inventory przed znakiem _.
+  Job_Credentials po Job_Link: credentiale przypisane do szablonu w AWX.
+  HOPS: nazwy grup hosta i liczby z wzorca <liczba>_hop lub <liczba>hop,
+  także z grup nadrzędnych. Kilka dopasowań: osobne linie; brak: none.
+  HOPS_COUNT po HOPS zawiera samą liczbę całkowitą. Brak dopasowania lub
+  różne liczby w grupach pozostawiają pustą komórkę.
+  jumphost_for_hops po HOPS_COUNT: credentiale z ApplicationID i dokładnie
+  wskazaną liczbą hopów. Domyślnie najniższe ID; alternatywy na liście w Excelu.
+  Extra_Credentials: niepusta EXTRA_CREDENTIAL_VARIABLES z konfiguracji,
+  a przy [] credentiale przypisane do wybranego szablonu joba.
+  Full_Credential łączy Extra_Credentials, OS Credential i wybrane jumphost_for_hops bez powtórzeń.
+  Credential hosta zastępuje odziedziczony credential szablonu tego samego typu.
+  Credentiale Vault są zachowywane; podczas startu sprawdzane są ich Vault IDs.
+  OS_JOBS dobiera szablon i Job_Variables; JOB_TYPE ustawia akcję playbooka.
+  Zapisuje nowy JSON i Excel pod OUTPUT_FILE oraz EXCEL_OUTPUT_FILE.
+  W Excelu wykrywa włączony survey szablonów i dodaje Survey_<nazwa_zmiennej>.
+  Komórki można edytować; wartości początkowe: Job_Variables > SURVEY_EXCEL_DEFAULTS
+  > SURVEY_ANSWERS > default AWX. JOB_URL ma pierwszeństwo przed OS_JOBS w Job_Link
+  i przy wykrywaniu survey; pusty JOB_URL korzysta z ustawień systemu hosta.
+  Wynikowy Excel jest tworzony od nowa. Odświeżanie z zachowaniem historii:
+  użyj awx_refresh_excel.py.
+
+Wejście:
+  Bez INPUT_FILE: wszystkie hosty wybranego INVENTORY (nazwa lub ID).
+  Z --file lub INPUT_FILE: nazwy z kolumny host_limit w pliku .xlsx.
+  Plik wejściowy i wynikowy Excel muszą mieć różne adresy.
+
+Przykłady:
+  python .\awx_inventory_hosts.py
+  python .\awx_inventory_hosts.py --file .\lista_hostow.xlsx -d""",
+    "refresh": r"""Działanie:
+  Aktualizuje ten sam plik Excel, używając nazw hostów jako źródła wyszukiwania.
+  Odświeża INVENTORY, ostype, credentiale, szablon, zmienne i akcję joba.
+  Job_Link: JOB_URL, jeśli ustawiony; w przeciwnym razie url z OS_JOBS dla ostype.
+  Job_Credentials pokazuje aktualne credentiale szablonu, niezależnie od Extra_Credentials.
+  Extra_Credentials: EXTRA_CREDENTIAL_VARIABLES, a przy [] credentiale szablonu.
+  Full_Credential jest przeliczane razem z credentialami hosta.
+  jumphost_for_hops zachowuje wybór przy tym samym ApplicationID i HOPS_COUNT.
+  Wyczyść komórkę, aby przywrócić domyślny credential przy odświeżeniu.
+  Domyślny credential szablonu jest zastępowany przez credential hosta tego samego
+  typu (poza Vault). Jawne EXTRA_CREDENTIAL_VARIABLES są zachowywane.
+  Odtwarza brakujące kolumny oraz wspólne formatowanie i układ tabeli.
+  Dodaje kolumny Survey_<nazwa_zmiennej> z pytań włączonego survey.
+  Nadpisuje odpowiedzi wymienione w SURVEY_EXCEL_DEFAULTS / SURVEY_ANSWERS,
+  również w już wypełnionych komórkach. SURVEY_EXCEL_DEFAULTS ma pierwszeństwo.
+  Pozostałe odpowiedzi zachowuje, a puste komórki wypełnia defaultami.
+  Zachowuje historię EXECUTION_COLUMN, output, własne kolumny i inne arkusze.
+  Sortuje: Windows, Linux, AIX; pozostałe systemy i puste hosty na końcu.
+
+Wejście i statusy:
+  Jedna nazwa hosta w komórce. Automatyczne kolumny: hostname, host_limit, host, hosts.
+  --host-column wskazuje własną nazwę kolumny. Pusta lista przygotowuje nagłówki.
+  AWX_Status: found = znaleziony, not_found = brak w AWX, no_hostname = pusty host.
+
+Przykłady:
+  python .\awx_refresh_excel.py -file .\awx_inventory_hosts.xlsx -d
+  python .\awx_refresh_excel.py -file .\hosty.xlsx --sheet Results --host-column host_limit""",
+    "execute": r"""Działanie:
+  Czyta hostname, Job_Link, Job_Variables i Full_Credential z Excela.
+  Łączy hosty o wspólnym szablonie, zmiennych i credentialach w paczki BATCH_SIZE.
+  Full_Credential zawiera nazwy/ID oddzielone FULL_CREDENTIAL_SEPARATOR.
+  Full_Credential jest uzupełniane wyłącznie o wybór z jumphost_for_hops.
+  Zmiana wyboru zastępuje wcześniej dołączone jumphosty przy odświeżeniu/startowaniu.
+  Lista rozwijana wybiera jedną pozycję; wiele nazw/ID można wpisać po separatorze.
+  Puste pole lub none nie dodaje jumphostów. Nadal wymagany jest jeden credential
+  każdego typu (Vault IDs mogą się różnić).
+  Eksport/refresh bierze Extra_Credentials z EXTRA_CREDENTIAL_VARIABLES,
+  a przy pustej liście z szablonu joba wskazanego przez Job_Link / JOB_URL.
+  Są to credentiale joba zapisane w AWX, używane przez uruchamiany playbook.
+  AWX_TOKEN służy do uwierzytelniania API. Odczyt /credentials/ zamienia nazwy
+  credentiali joba na ID wymagane w polu credentials żądania uruchomienia.
+  Puste Full_Credential lub none zachowuje credentiale skonfigurowane na szablonie.
+  Szablon musi przyjmować Limit, a przy ich nadpisaniu także Credentials i Variables
+  (albo przekazywane zmienne muszą być obsługiwane przez survey).
+  Credentials: w edycji szablonu zaznacz Prompt on launch i zapisz ustawienie.
+  Odpowiada mu pole API ask_credential_on_launch=True.
+
+Wybrane hosty i URL:
+  --hosts host1 host2 lub HOSTS=['host1', 'host2'] ogranicza listę wykonania.
+  HOSTS=[] oznacza dotychczasowy tryb: wszystkie hosty z Excela.
+  Brakujące w arkuszu hosty są pobierane z INVENTORY w AWX i dopisywane.
+  Przy podaniu hostów plik może nie istnieć: skrypt utworzy arkusz z wynikami.
+  --job-url lub JOB_URL nadpisuje Job_Link dla nowych wykonań wybranych hostów.
+  URL wskazuje szablon UI/API na serwerze z AWX_URL, np. /job_template/7/details.
+  Pusty JOB_URL zachowuje linki z Excela lub OS_JOBS dla dopisanych hostów.
+
+Akcja i historia:
+  Job_Variables to obiekt JSON, np. {"action": "install"}.
+  Akcja: --job-type > kolumna Job_Type > JOB_TYPE > wartość w Job_Variables.
+  Trafia do extra_vars[JOB_TYPE_VARIABLE], domyślnie action.
+  Link joba zapisuje w EXECUTION_COLUMN (domyślnie exceiute_job).
+  Po zakończeniu joba zapisuje Artifacts (JSON) i artifact filter (message hosta).
+  Gdy WAIT_FOR_COMPLETION=False, pobierz końcowe artefakty przez awx_job_output.py.
+  Istniejące wpisy są pomijane. Przy braku nowych paczek pyta w terminalu
+  o ponowne uruchomienie: tak/T/y/yes potwierdza, Enter lub inna odpowiedź kończy
+  bez zapisu. Poprzedni link zostaje w komentarzu komórki EXECUTION_COLUMN.
+  LAUNCH_PENDING wymaga sprawdzenia uruchomienia w AWX i nie jest ponawiany pytaniem.
+  WAIT_FOR_COMPLETION=True czeka na sukces; błąd zatrzymuje kolejne paczki.
+
+Survey:
+  Odpowiedzi trafiają do extra_vars pod Answer Variable Name pytania w AWX.
+  Kolumny Survey_<nazwa_zmiennej> pozwalają edytować odpowiedzi w Excelu.
+  Wybór: --survey-answers JSON > kolumna Survey_... > Job_Variables
+  > SURVEY_ANSWERS > default survey. Pusta komórka korzysta z wartości domyślnej.
+  Odpowiedzi dla innych szablonów są pomijane. Liczby i listy są konwertowane
+  do typów AWX; multiselect przyjmuje JSON, np. ["first", "second"].
+  --job-type ma pierwszeństwo dla JOB_TYPE_VARIABLE; kolumna Survey_... ma
+  pierwszeństwo przed Job_Type / JOB_TYPE. Nazwę zmiennej akcji można zmienić.
+  --show-survey pokazuje pytania, wybory i defaulty bez startu jobów i zapisu.
+  --survey / SURVEY_INTERACTIVE=True pyta w terminalu o brakujące odpowiedzi.
+  Enter zachowuje default; pytania opcjonalne można pominąć. Hasła są ukryte.
+  Odpowiedzi z terminala są wspólne dla paczek tego szablonu; nie trafiają do Excela.
+  Eksport tworzy kolumny. Refresh synchronizuje także wypełnione komórki
+  z SURVEY_EXCEL_DEFAULTS / SURVEY_ANSWERS dla wykrytych pytań.
+  Ręczne odpowiedzi można zmienić po refresh, przed uruchomieniem joba.
+  Klucze SURVEY_EXCEL_DEFAULTS dla innych szablonów nie są wysyłane do joba.
+  Skrypt sprawdza wymagane pola, typy, limity i wybory przed pierwszym startem.
+  Survey musi być włączone w AWX. Zdefiniowanie pytań nie włącza survey.
+
+Przykłady:
+  python .\awx_execute_jobs.py --dry-run
+  python .\awx_execute_jobs.py --show-survey
+  python .\awx_execute_jobs.py --survey
+  python .\awx_execute_jobs.py --survey --dry-run
+  python .\awx_execute_jobs.py -file .\hosty.xlsx --batch-size 10 --job-type install
+  python .\awx_execute_jobs.py --hosts host1 --job-url "https://awx.example.com/#/templates/job_template/7/details" --dry-run
+  --dry-run: bez startu jobów i zapisu. Brakujące metadane może odczytać z AWX.
+  Zwykły --dry-run pokazuje nazwy zmiennych i maskuje wartości; bez walidacji survey.
+  --survey --dry-run odczytuje i waliduje survey oraz umożliwia podanie odpowiedzi.
+  --no-dry-run: wyłącza DRY_RUN ustawione w pliku lub launcherze.""",
+    "output": r"""Działanie:
+  Czyta linki z EXECUTION_COLUMN (domyślnie exceiute_job) i system z ostype.
+  Pobiera pełny stdout raz na unikalny job, także failed/error/canceled.
+  Wpisuje log do OUTPUT_COLUMN we wszystkich powiązanych wierszach tego joba.
+  Artifacts: JSON z pola artifacts joba. artifact filter: message dla hostname.
+  Szuka pełnej nazwy hosta w kluczach JSON oraz polach host/hostname/inventory_hostname.
+  Obsługuje zagnieżdżone słowniki/listy; wiele komunikatów łączy nowymi liniami.
+  Brak dopasowanego message zostawia pustą komórkę; brak artefaktów zapisuje {}.
+  Zapisuje pełny TXT: OUTPUT_DIRECTORY/<id_joba>.<inventory>.<os>.txt.
+  Inventory pochodzi z danych joba AWX, a OS z Excela. Niedozwolone znaki nazw
+  plików są zastępowane podkreśleniami.
+
+Oczekiwanie i rozmiar logu:
+  WAIT_FOR_COMPLETION=True czeka na zakończenie. False pobiera tekst dostępny teraz.
+  Excel: maksymalnie 32767 znaków w komórce; pełny tekst pozostaje w pliku TXT.
+  Ponowne uruchomienie odświeża logi i artefakty. Puste linki i LAUNCH_PENDING są pomijane.
+  Długie artefakty są skracane w Excelu z adresem pełnych danych w API AWX.
+
+Przykłady:
+  python .\awx_job_output.py
+  python .\awx_job_output.py -file .\hosty.xlsx --output-dir .\output -d""",
+}
+CONFIGURATION_HELP = """Ustawienia:
+  Domyślne wartości: awx_variable obok launcherów, niezależnie od katalogu startu.
+  Lokalne nadpisania: słownik VARIABLES w wybranym launcherze; {} używa pliku.
+  Kolejność: argumenty komendy > VARIABLES > *_OVERRIDES operacji > wartości wspólne.
+  Względne ścieżki plików liczą się od bieżącego katalogu uruchomienia.
+  DEBUG pokazuje szczegóły zapytań; sam DEBUG nie włącza trybu --dry-run.
+  COLOR: auto (terminal), always (wymuszenie), never (bez kolorów).
+  --color nadpisuje COLOR; --no-color wyłącza kolory. NO_COLOR wyłącza tryb auto.
+  URL-e w awx_variable mogą zawierać nowe linie; parser łączy je w jeden adres.
+  Dotyczy AWX_URL, JOB_URL i url w OS_JOBS; teksty w variables zachowują nowe linie.
+  Zamknij aktualizowany plik w Excelu przed zapisem.
+  Poza venv skrypt tworzy/używa .venv obok launcherów i restartuje się w nim.
+  Brakujące openpyxl instaluje się automatycznie w venv używanego Pythona.
+  Wspólna implementacja wszystkich launcherów: katalog lib/."""
+
+
+def operation_parser(description, *, with_sheet=True, operation=None):
+    detail = OPERATION_HELP.get(operation, "")
+    parser = argparse.ArgumentParser(description=description, formatter_class=argparse.RawDescriptionHelpFormatter,
+                                     epilog=(detail + "\n\n" if detail else "") + CONFIGURATION_HELP)
+    file_help = "Filtr hostów z kolumny host_limit; wynik zapisuje pod EXCEL_OUTPUT_FILE." if operation == "inventory" else "Plik .xlsx aktualizowany w miejscu; nadpisuje INPUT_FILE."
+    parser.add_argument("-file", "--file", dest="input_file", type=Path, help=file_help)
     if with_sheet:
-        parser.add_argument("--sheet", help="Worksheet name; otherwise configured sheet or active worksheet.")
-    parser.add_argument("-d", "-debug", "--debug", action="store_true", default=None, help="Show API request details.")
-    parser.add_argument("--no-debug", dest="debug", action="store_false", default=None, help="Disable debug logging set in variables.")
+        parser.add_argument("--sheet", help="Nazwa arkusza; domyślnie SHEET_NAME lub aktywny arkusz.")
+    parser.add_argument("-d", "-debug", "--debug", action="store_true", default=None, help="Szczegóły zapytań API; token jest maskowany.")
+    parser.add_argument("--no-debug", dest="debug", action="store_false", default=None, help="Wyłącz DEBUG ustawione w zmiennych.")
+    parser.add_argument("--color", choices=console.COLOR_MODES, default=None, help="Kolory: auto, always, never; nadpisuje COLOR.")
+    parser.add_argument("--no-color", dest="color", action="store_const", const="never", default=None, help="Wyłącz kolory w terminalu.")
     return parser
 
 
 def parse_operation_arguments(parser, argv=None):
     """Fill unset CLI options from the same launcher/file configuration."""
     args = parser.parse_args(argv)
+    if args.color is not None:
+        console.set_color_mode(args.color)
     defaults = common.read_runtime_settings()
+    args.color = args.color if args.color is not None else defaults["COLOR"]
+    console.set_color_mode(args.color)
     if args.debug is None:
         args.debug = defaults["DEBUG"]
     if hasattr(args, "dry_run") and args.dry_run is None:
@@ -174,7 +367,8 @@ def parse_operation_arguments(parser, argv=None):
 
 
 def parse_inventory_arguments(argv=None):
-    return parse_operation_arguments(operation_parser("Fetch AWX hosts and export the results to Excel.", with_sheet=False), argv)
+    return parse_operation_arguments(operation_parser("Pobierz hosty z AWX i utwórz eksport JSON oraz Excel.",
+                                                     with_sheet=False, operation="inventory"), argv)
 
 def read_host_limits(input_file):
     """Read unique hostnames from host_limit columns, preserving file order."""
@@ -240,6 +434,9 @@ class AWXClient:
         self.base_url = urlunsplit((parsed.scheme, parsed.netloc, self.api_path, '', ''))
         self.origin = self._origin(parsed)
         self.token = token
+        self.sensitive_values = {token} if token else set()
+        self.credential_cache = {}
+        self.jumphost_credential_cache = {}
         self.opener = build_opener(NoRedirect())
         self.request_count = 0
         LOGGER.debug('API base URL used for requests: %s', self.base_url)
@@ -267,6 +464,14 @@ class AWXClient:
                     LOGGER.debug('API path mapping: %s -> %s', parsed.path, new_path)
                     return urlunsplit((parsed.scheme, parsed.netloc, new_path, parsed.query, ''))
         return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ''))
+
+    def add_sensitive_values(self, values):
+        self.sensitive_values.update(value for value in values if isinstance(value, str) and value and value != '$encrypted$')
+
+    def redact(self, text):
+        for value in sorted(self.sensitive_values, key=len, reverse=True):
+            text = text.replace(value, '***').replace(json.dumps(value)[1:-1], '***')
+        return text
 
     def request(self, method, path, payload=None, *, response_format="json", purpose="Fetch an AWX resource"):
         """One authenticated request path; launch requests are never automatically retried."""
@@ -297,7 +502,7 @@ class AWXClient:
         except HTTPError as exc:
             code = exc.code
             try:
-                detail = exc.read(8192).decode("utf-8", errors="replace").replace(self.token, "***") if method == "POST" else ""
+                detail = self.redact(exc.read(8192).decode("utf-8", errors="replace")) if method == "POST" else ""
             finally:
                 exc.close()
             LOGGER.debug("Response #%d: HTTP %d error; elapsed %.3f s", number, code, time.perf_counter() - started)
@@ -312,7 +517,7 @@ class AWXClient:
             }.get(code, "The AWX server returned an error.")
             raise AWXError(f"HTTP {code}, {parsed.path}: {hint}") from None
         except (URLError, OSError, ValueError, LookupError) as exc:
-            detail = str(exc).replace(self.token, "***")
+            detail = self.redact(str(exc))
             if method == "POST":
                 raise AWXError(f"Launch result is uncertain ({detail}); check AWX before clearing the Excel marker.") from None
             raise AWXError(f"Cannot fetch {parsed.path}: {detail}") from None
@@ -508,18 +713,140 @@ def fetch_report(client, selector, hostnames=None, *, allow_empty=False):
     debug_variables('Host summary', {'host_count': len(hosts), 'source_inventory_count': len(group_indexes), 'source_inventory_ids': list(group_indexes), 'missing_hosts': report.get('missing_hosts', [])})
     return report
 
-def build_inventory_rows(report, settings=None, output_column=None):
+def template_credential_entries(client, link, cache):
+    """Read the selected template's launch credentials without fetching secrets."""
+    if client is None or not link:
+        return []
+    template_id = template_id_from_link(link, client)
+    details, _, _ = template_survey(client, template_id, cache)
+    credentials = details.get('defaults', {}).get('credentials', [])
+    if not isinstance(credentials, list):
+        raise AWXError(f'Template {template_id}: invalid default credentials response.')
+    names = {}
+    for credential in credentials:
+        if not isinstance(credential, dict) or type(credential.get('id')) is not int or credential['id'] < 1:
+            raise AWXError(f'Template {template_id}: invalid default credential.')
+        name = credential.get('name')
+        if isinstance(name, str) and name.strip():
+            names.setdefault(name.strip(), set()).add(credential['id'])
+    entries = []
+    seen = set()
+    for credential in credentials:
+        name = credential.get('name')
+        # Numeric or repeated names are ambiguous; use the actual object ID.
+        value = (name.strip() if isinstance(name, str) and name.strip() and not name.strip().isdigit()
+                 and len(names[name.strip()]) == 1 else str(credential['id']))
+        if credential['id'] not in seen:
+            entries.append((value, credential))
+            seen.add(credential['id'])
+    return entries
+
+
+def template_credential_values(client, link, cache):
+    return [reference for reference, _ in template_credential_entries(client, link, cache)]
+
+
+def unique_credential_references(references, client=None, *, resolve_aliases=False):
+    """Keep the first reference, trimming spaces and comparing known AWX IDs.
+
+    Names are case sensitive. Optional lookups only disambiguate mixed name/ID
+    lists during export; launch preparation can reuse its populated cache.
+    """
+    references = tuple(dict.fromkeys(reference.strip() for reference in references if reference.strip()))
+    has_numeric_ids = any(re.fullmatch('[0-9]+', reference) for reference in references)
+    cache = client.credential_cache if client is not None else {}
+    seen = set()
+    result = []
+    for reference in references:
+        credential = cache.get(reference)
+        numeric = bool(re.fullmatch('[0-9]+', reference))
+        if credential is None and client is not None and resolve_aliases and has_numeric_ids and not numeric:
+            try:
+                credential = lookup_credential(client, reference)
+            except AWXError as exc:
+                # Keep unresolved references for the existing launch validation.
+                LOGGER.debug('Cannot compare credential %r for duplicates: %s', reference, exc)
+        if credential is not None:
+            identity = ('id', credential['id'])
+        elif numeric:
+            identity = ('id', int(reference))
+        else:
+            identity = ('name', reference)
+        if identity not in seen:
+            seen.add(identity)
+            result.append(reference)
+    return tuple(result)
+
+
+def merge_full_credentials(client, extras, host_values, inherited):
+    """Host credentials replace inherited non-Vault credentials of the same type."""
+    extras = unique_credential_references(extras)
+    host_values = unique_credential_references(host_values)
+    inherited_ids = {credential['id'] for _, credential in inherited}
+    inherited_refs = {reference for reference, _ in inherited}
+    host_ids = set()
+    replaced_types = set()
+    if client is not None and inherited:
+        for reference in host_values:
+            reference = reference.strip()
+            if reference in inherited_refs:
+                continue
+            if reference.isascii() and reference.isdigit() and int(reference) in inherited_ids:
+                host_ids.add(int(reference))
+                continue
+            try:
+                credential = lookup_credential(client, reference)
+            except AWXError as exc:
+                LOGGER.debug('Cannot compare host credential %r with template defaults: %s', reference, exc)
+                continue
+            host_ids.add(credential['id'])
+            kind = credential.get('kind') or (credential.get('summary_fields') or {}).get('credential_type', {}).get('kind')
+            if kind and kind != 'vault' and type(credential.get('credential_type')) is int:
+                replaced_types.add(credential['credential_type'])
+        extras = [reference for reference, credential in inherited
+                  if credential['id'] not in host_ids and credential.get('credential_type') not in replaced_types]
+    return list(unique_credential_references([*extras, *host_values], client, resolve_aliases=True))
+
+
+def host_hop_details(host):
+    """Return group descriptions and a count only when groups agree on it."""
+    matches = {}
+    for group in host.get('all_groups', host.get('groups', [])):
+        name = group['name']
+        match = re.search(r'([0-9]+)_?hop', name, re.IGNORECASE)
+        if match:
+            matches[name] = int(match.group(1))
+    description = '\n'.join(f'{name} (HOPS: {count})' for name, count in sorted(matches.items())) or 'none'
+    counts = set(matches.values())
+    return description, next(iter(counts)) if len(counts) == 1 else None
+
+
+def host_hops(host):
+    """Show matching direct/ancestor group names and hop counts, once per group."""
+    return host_hop_details(host)[0]
+
+
+def build_inventory_rows(report, settings=None, output_column=None, *, client=None, template_cache=None, job_url_override=None):
     """Build shared output rows and add extra and full credentials to JSON host records."""
     settings = common.read_execution_settings() if settings is None else settings
     output_column = common.read_output_settings()['OUTPUT_COLUMN'] if output_column is None else output_column
     primary_variables = credential_variable_names()
-    extra_credentials = extra_credential_values()
+    configured_extras = extra_credential_values()
+    template_cache = {} if template_cache is None else template_cache
     if not isinstance(FULL_CREDENTIAL_SEPARATOR, str):
         raise AWXError('FULL_CREDENTIAL_SEPARATOR must be a string.')
     headers = excel.headers(settings['EXECUTION_COLUMN'], output_column)
-    extra_text = FULL_CREDENTIAL_SEPARATOR.join(extra_credentials) or 'none'
     rows = []
     for host in report['hosts']:
+        ostype = host.get('ostype')
+        ostype_text = 'none' if ostype is None else ostype if isinstance(ostype, str) else json.dumps(ostype, ensure_ascii=False)
+        job = OS_JOBS.get(ostype.strip().casefold(), {}) if isinstance(ostype, str) else {}
+        job_link = common.job_template_url(settings, job.get('url', ''), override=job_url_override)
+        template_credentials = template_credential_entries(client, job_link, template_cache)
+        inherited = template_credentials if not configured_extras else []
+        host['Job_Credentials'] = [reference for reference, _ in template_credentials]
+        extra_credentials = configured_extras or [reference for reference, _ in inherited]
+        extra_text = FULL_CREDENTIAL_SEPARATOR.join(extra_credentials) or 'none'
         values_by_variable = {}
         full_values_by_variable = {}
         for group in host['credential_groups']:
@@ -534,36 +861,48 @@ def build_inventory_rows(report, settings=None, output_column=None):
                 full_values = full_values_by_variable.setdefault(group['variable'], [])
                 if credential not in full_values:
                     full_values.append(credential)
-        full_parts = list(extra_credentials)
-        for variable in primary_variables:
-            full_parts.extend(full_values_by_variable.get(variable, []))
-        full_credential = FULL_CREDENTIAL_SEPARATOR.join(dict.fromkeys(full_parts)) or 'none'
+        host_values = [value for variable in primary_variables for value in full_values_by_variable.get(variable, [])]
+        full_parts = merge_full_credentials(client, extra_credentials, host_values, inherited)
         host['Extra_Credentials'] = list(extra_credentials)
-        host['Full_Credential'] = full_credential
-        LOGGER.debug('Host %s: adding %d literal credential values from configuration', host['name'], len(extra_credentials))
-        debug_variables(f"Full_Credential for host {host['name']!r}", full_credential)
-        ostype = host.get('ostype')
-        ostype_text = 'none' if ostype is None else ostype if isinstance(ostype, str) else json.dumps(ostype, ensure_ascii=False)
-        job = OS_JOBS.get(ostype.strip().casefold(), {}) if isinstance(ostype, str) else {}
-        job_link = job.get('url', '').strip()
+        LOGGER.debug('Host %s: using %d extra credentials from %s', host['name'], len(extra_credentials),
+                     'EXTRA_CREDENTIAL_VARIABLES' if configured_extras else 'job template')
         job_variables = deepcopy(job.get('variables', {}))
         host['Job_Link'] = job_link
         host['Job_Variables'] = job_variables
         host['INVENTORY'] = host.get('INVENTORY') or report.get('inventory', {}).get('name') or 'none'
+        host['ApplicationID'] = host['INVENTORY'].split('_', 1)[0].strip() or 'none'
         credentials = list(dict.fromkeys((value for variable in primary_variables for value in values_by_variable.get(variable, []))))
         job_type = common.apply_job_type(job_variables, None, settings)
         host['Job_Type'] = job_type
         host['AWX_Status'] = 'found'
-        values = {'hostname': host['name'], 'INVENTORY': host['INVENTORY'], 'ostype': ostype_text, 'Job_Link': job_link or 'none', 'Job_Variables': json.dumps(job_variables, ensure_ascii=False), 'Extra_Credentials': extra_text, 'Credential': FULL_CREDENTIAL_SEPARATOR.join(credentials) or 'none', 'Full_Credential': full_credential, 'Job_Type': job_type, 'AWX_Status': 'found'}
+        host['HOPS'], host['HOPS_COUNT'] = host_hop_details(host)
+        options = jumphosts.credential_options(client, host['ApplicationID'], host['HOPS_COUNT'], FULL_CREDENTIAL_SEPARATOR)
+        host['jumphost_for_hops_options'] = options
+        host['jumphost_for_hops'] = options[0] if options else 'none'
+        selected_jumps = options[:1]
+        full_credential = FULL_CREDENTIAL_SEPARATOR.join(unique_credential_references(
+            [*full_parts, *selected_jumps], client, resolve_aliases=True)) or 'none'
+        host['Full_Credential'] = full_credential
+        debug_variables(f"Full_Credential for host {host['name']!r}", full_credential)
+        debug_variables(f"HOPS for host {host['name']!r}", host['HOPS'])
+        values = {'hostname': host['name'], 'INVENTORY': host['INVENTORY'], 'ApplicationID': host['ApplicationID'], 'ostype': ostype_text, 'Job_Link': job_link or 'none', 'Job_Credentials': FULL_CREDENTIAL_SEPARATOR.join(host['Job_Credentials']) or 'none', 'Job_Variables': json.dumps(job_variables, ensure_ascii=False), 'HOPS': host['HOPS'], 'HOPS_COUNT': host['HOPS_COUNT'], 'jumphost_for_hops': host['jumphost_for_hops'], 'Extra_Credentials': extra_text, 'OS Credential': FULL_CREDENTIAL_SEPARATOR.join(credentials) or 'none', 'Full_Credential': full_credential, 'Job_Type': job_type, 'AWX_Status': 'found'}
         rows.append([values.get(name, '') for name in headers])
     return (headers, rows)
 
-def save_inventory_excel(headers, rows, output_file, settings=None, output_column=None):
+def save_inventory_excel(headers, rows, output_file, settings=None, output_column=None, client=None, template_cache=None):
     """Create the same complete, styled workbook used by every AWX script."""
     settings = common.read_execution_settings() if settings is None else settings
     output_column = common.read_output_settings()['OUTPUT_COLUMN'] if output_column is None else output_column
     workbook = excel.create_workbook(headers, rows, sheet_name=settings['SHEET_NAME'], execution_column=settings['EXECUTION_COLUMN'], output_column=output_column)
     try:
+        columns = excel.read_columns(workbook.active)
+        for row in range(2, workbook.active.max_row + 1):
+            jump_cell = workbook.active.cell(row, columns['jumphost_for_hops'])
+            selected = parse_credentials(jump_cell.value, row, 'jumphost_for_hops')
+            synchronise_full_credential(workbook.active, row, previous_jumps=selected)
+        if client is not None:
+            update_survey_columns(client, workbook.active, settings, cache=template_cache)
+            jumphosts.populate_choices(workbook.active, client, FULL_CREDENTIAL_SEPARATOR)
         excel.save_workbook(workbook, output_file, execution_column=settings['EXECUTION_COLUMN'], output_column=output_column)
     finally:
         workbook.close()
@@ -590,16 +929,17 @@ def inventory_main(argv=None):
             details = ', '.join(missing[:20])
             if len(missing) > 20:
                 details += f" ... (+{len(missing) - 20})"
-            print(f"Missing hosts ({len(missing)}): {details}", file=sys.stderr)
+            console.print_message(f"Missing hosts ({len(missing)}): {details}", file=sys.stderr, level="warning")
         workflow = common.read_execution_settings()
         output_column = common.read_output_settings()['OUTPUT_COLUMN']
-        headers, rows = build_inventory_rows(report, workflow, output_column)
+        template_cache = {}
+        headers, rows = build_inventory_rows(report, workflow, output_column, client=client, template_cache=template_cache)
         for row in rows:
-            print(' , '.join((f"{header} : {value}" for header, value in zip(headers, row))))
+            console.print_message(' , '.join((f"{header} : {value}" for header, value in zip(headers, row))), level="data")
         sys.stdout.flush()
         LOGGER.debug('JSON export: %d hosts, file %s', report['host_count'], OUTPUT_FILE)
         OUTPUT_FILE.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-        save_inventory_excel(headers, rows, EXCEL_OUTPUT_FILE, workflow, output_column)
+        save_inventory_excel(headers, rows, EXCEL_OUTPUT_FILE, workflow, output_column, client=client, template_cache=template_cache)
         debug_variables('Saved results', {'json': OUTPUT_FILE.resolve(), 'excel': EXCEL_OUTPUT_FILE.resolve(), 'rows': len(rows)})
         return 0
     finally:
@@ -610,17 +950,23 @@ def inventory_main(argv=None):
 
 EXECUTION_SETTINGS_FILE = common.EXECUTION_SETTINGS_FILE
 EXECUTION_DEFAULTS = common.EXECUTION_DEFAULTS
-HOSTNAME_PATTERN = re.compile('[A-Za-z0-9_][A-Za-z0-9_.-]*\\Z')
+HOSTNAME_PATTERN = common.HOSTNAME_PATTERN
 TEMPLATE_PATTERN = re.compile('(?:^|/)(?:job_templates|job_template|job-template)/([1-9][0-9]*)(?:/|$)')
 
 def read_execution_settings(settings_file=None):
     return common.read_execution_settings(settings_file)
 
 def parse_execute_arguments(argv=None):
-    parser = operation_parser("Launch AWX jobs for batches of Excel hosts and save job links.")
-    parser.add_argument("--batch-size", type=int, help="Maximum unique hosts in one job (default: BATCH_SIZE).")
-    parser.add_argument("--job-type", help="Override the action for new jobs, e.g. install, reinstall, update.")
-    parser.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=None, help="Show batches without API requests or file changes.")
+    parser = operation_parser("Uruchom joby AWX paczkami i zapisz linki do wykonań w Excelu.", operation="execute")
+    parser.add_argument("--hosts", "--host", nargs="+", help="Wybrane hosty, np. host1 host2 lub host1,host2; nadpisuje HOSTS.")
+    parser.add_argument("--job-url", help="URL szablonu joba dla wskazanych hostów; nadpisuje JOB_URL i Job_Link.")
+    parser.add_argument("--batch-size", type=int, help="Maksymalna liczba hostów w jobie; nadpisuje BATCH_SIZE.")
+    parser.add_argument("--job-type", help="Akcja playbooka, np. install/reinstall/update; nadpisuje także kolumnę Job_Type.")
+    parser.add_argument("--survey", action=argparse.BooleanOptionalAction, default=None,
+                        help="Pytaj w terminalu o brakujące odpowiedzi survey; --no-survey wyłącza pytania.")
+    parser.add_argument("--survey-answers", help="Odpowiedzi survey jako obiekt JSON; nadpisuje SURVEY_ANSWERS i Job_Variables.")
+    parser.add_argument("--show-survey", action="store_true", help="Pokaż pytania/defaulty survey; bez startu jobów i zapisu Excela.")
+    parser.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=None, help="Podgląd paczek; --no-dry-run wyłącza podgląd ustawiony w zmiennych.")
     return parse_operation_arguments(parser, argv)
 
 def resource_id_from_link(link, client, pattern, label):
@@ -651,19 +997,50 @@ def parse_variables(value, row_number):
         raise AWXError(f'Row {row_number}: Job_Variables must be a JSON object, e.g. {{"action": "check"}}.') from None
     return variables
 
-def parse_credentials(value, row_number):
+def parse_credentials(value, row_number, column_name='Full_Credential', *, keep_order=False):
     """Read credential references using the separator used by the inventory export."""
     if value is None or str(value).strip().casefold() in ('', 'none'):
         return ()
     separator = FULL_CREDENTIAL_SEPARATOR
     if not separator:
-        raise AWXError('FULL_CREDENTIAL_SEPARATOR cannot be empty when reading Full_Credential.')
+        raise AWXError(f'FULL_CREDENTIAL_SEPARATOR cannot be empty when reading {column_name}.')
     references = [part.strip() for part in str(value).split(separator.strip() or separator)]
     if any((not reference or reference.casefold() == 'none' for reference in references)):
-        raise AWXError(f"Row {row_number}: Full_Credential contains an empty or invalid credential reference.")
-    return tuple(sorted(set(references)))
+        raise AWXError(f"Row {row_number}: {column_name} contains an empty or invalid credential reference.")
+    unique = unique_credential_references(references)
+    return unique if keep_order else tuple(sorted(unique))
 
-def build_execution_plan(sheet, client, settings, job_type_override=None):
+
+def synchronise_full_credential(sheet, row_number, *, previous_jumps=None, client=None):
+    """Merge only the cell selection, replacing the previously merged jump refs.
+
+    The returned base refs retain the blank-Full_Credential/defaults behaviour.
+    Only cached identities are used when a client is provided; no API calls.
+    """
+    columns = excel.read_columns(sheet)
+    full_cell = sheet.cell(row_number, columns['full_credential'])
+    if full_cell.data_type == 'f':
+        raise AWXError(f'Row {row_number}: Full_Credential must contain literal credential names/IDs.')
+    full_refs = parse_credentials(full_cell.value, row_number, keep_order=True)
+    base_refs, selected = full_refs, ()
+    if 'jumphost_for_hops' in columns:
+        jump_cell = sheet.cell(row_number, columns['jumphost_for_hops'])
+        if jump_cell.data_type == 'f':
+            raise AWXError(f'Row {row_number}: jumphost_for_hops must contain literal credential names/IDs.')
+        selected = parse_credentials(jump_cell.value, row_number, 'jumphost_for_hops', keep_order=True)
+        previous = set(jumphosts.previous_full_selection(full_cell))
+        if previous_jumps is not None:
+            previous.update(previous_jumps)
+        base_refs = tuple(reference for reference in full_refs if reference not in previous)
+    combined = unique_credential_references([*base_refs, *selected], client)
+    full_cell.value = FULL_CREDENTIAL_SEPARATOR.join(combined) or 'none'
+    full_cell.data_type = 's'
+    full_cell.number_format = '@'
+    if 'jumphost_for_hops' in columns:
+        jumphosts.remember_full_selection(full_cell, selected)
+    return base_refs, selected
+
+def build_execution_plan(sheet, client, settings, job_type_override=None, hostnames=None, job_url_override=None, survey_overrides=None, survey_cache=None):
     """Validate the whole sheet, deduplicate hosts, and batch equal launch payloads."""
     columns = excel.read_columns(sheet)
     for name in ('hostname', 'job_link', 'job_variables', 'full_credential'):
@@ -671,35 +1048,56 @@ def build_execution_plan(sheet, client, settings, job_type_override=None):
             raise AWXError(f"Missing {name} column. Generate a new Excel export with awx_inventory_hosts.py.")
     execution_column = columns.get(settings['EXECUTION_COLUMN'].casefold(), sheet.max_column + 1)
     hosts = {}
+    selected = set(hostnames) if hostnames is not None else None
     skipped_without_job = 0
+    selected_job_url = common.job_template_url(settings, override=job_url_override)
     for row_number in range(2, sheet.max_row + 1):
         host_value = sheet.cell(row_number, columns['hostname']).value
         if host_value is None or not str(host_value).strip():
             continue
         hostname = str(host_value).strip()
+        if selected is not None and hostname not in selected:
+            continue
         if not HOSTNAME_PATTERN.fullmatch(hostname):
             raise AWXError(f"Row {row_number}: hostname must be a single literal hostname, without Ansible patterns.")
         link_cell = sheet.cell(row_number, columns['job_link'])
-        link = str(link_cell.value or '').strip()
+        link = common.job_template_url(settings, str(link_cell.value or ''), override=job_url_override)
         if link.casefold() in ('', 'none'):
             skipped_without_job += 1
             continue
-        if link_cell.data_type == 'f':
+        if not selected_job_url and link_cell.data_type == 'f':
             raise AWXError(f"Row {row_number}: Job_Link must contain a URL rather than an Excel formula.")
-        if link_cell.hyperlink and link_cell.hyperlink.target:
+        if not selected_job_url and link_cell.hyperlink and link_cell.hyperlink.target:
             link = link_cell.hyperlink.target
         template_id = template_id_from_link(link, client)
-        variables = parse_variables(sheet.cell(row_number, columns['job_variables']).value, row_number)
+        variables = deepcopy(settings.get('SURVEY_ANSWERS', {}))
+        variables.update(parse_variables(sheet.cell(row_number, columns['job_variables']).value, row_number))
         job_type_cell = sheet.cell(row_number, columns['job_type']) if 'job_type' in columns else None
         credential_cell = sheet.cell(row_number, columns['full_credential'])
         if credential_cell.data_type == 'f' or (job_type_cell is not None and job_type_cell.data_type == 'f'):
             raise AWXError(f"Row {row_number}: Full_Credential and Job_Type must contain literal values.")
-        job_type = apply_job_type(variables, job_type_cell.value if job_type_cell else None, settings, job_type_override)
-        credential_refs = parse_credentials(credential_cell.value, row_number)
-        key = (template_id, json.dumps(variables, sort_keys=True, ensure_ascii=False), credential_refs)
+        questions = survey_cache[template_id][1] if survey_cache is not None and template_id in survey_cache else None
+        overridden = set(survey_overrides or {})
+        if job_type_override is not None:
+            overridden.add(settings['JOB_TYPE_VARIABLE'])
+        answers = survey_excel.read_answers(sheet, row_number, questions, skip_variables=overridden)
+        variables.update(answers)
+        variables.update(deepcopy(survey_overrides or {}))
+        # Survey cells override saved/configured job types; the explicit CLI action wins.
+        action_override = job_type_override
+        action_variable = settings['JOB_TYPE_VARIABLE']
+        if action_override is None and (action_variable in answers or action_variable in (survey_overrides or {})):
+            action_override = variables[action_variable]
+            if not isinstance(action_override, str):
+                raise AWXError(f"Job_Variables[{action_variable!r}] must be a string for the job type.")
+        job_type = apply_job_type(variables, job_type_cell.value if job_type_cell else None, settings, action_override)
+        base_refs, jump_refs = synchronise_full_credential(sheet, row_number)
+        credential_refs = tuple(sorted(set(base_refs + jump_refs)))
+        preserve_defaults = bool(jump_refs and not base_refs)
+        key = (template_id, json.dumps(variables, sort_keys=True, ensure_ascii=False), credential_refs, preserve_defaults)
         execution = str(sheet.cell(row_number, execution_column).value or '').strip()
         if hostname not in hosts:
-            hosts[hostname] = {'key': key, 'template_id': template_id, 'link': link, 'variables': variables, 'credential_refs': credential_refs, 'job_type': job_type, 'hostname': hostname, 'rows': [], 'execution': ''}
+            hosts[hostname] = {'key': key, 'template_id': template_id, 'link': link, 'variables': variables, 'credential_refs': credential_refs, 'preserve_template_credentials': preserve_defaults, 'job_type': job_type, 'hostname': hostname, 'rows': [], 'execution': ''}
         host = hosts[hostname]
         if host['key'] != key:
             raise AWXError(f"Row {row_number}: duplicate host {hostname!r} has different job or variables or credentials.")
@@ -719,7 +1117,7 @@ def build_execution_plan(sheet, client, settings, job_type_override=None):
     for group in groups.values():
         for start in range(0, len(group), settings['BATCH_SIZE']):
             entries = group[start:start + settings['BATCH_SIZE']]
-            batches.append({'template_id': entries[0]['template_id'], 'link': entries[0]['link'], 'variables': entries[0]['variables'], 'entries': entries, 'credential_refs': entries[0]['credential_refs'], 'job_type': entries[0]['job_type'], 'limit': ','.join((host['hostname'] for host in entries))})
+            batches.append({'template_id': entries[0]['template_id'], 'link': entries[0]['link'], 'variables': entries[0]['variables'], 'entries': entries, 'credential_refs': entries[0]['credential_refs'], 'preserve_template_credentials': entries[0]['preserve_template_credentials'], 'job_type': entries[0]['job_type'], 'limit': ','.join((host['hostname'] for host in entries)), 'job_url_overridden': bool(selected_job_url)})
     return (batches, existing, execution_column, skipped_without_job)
 
 def write_execution(sheet, column, entries, value):
@@ -733,80 +1131,164 @@ def write_execution(sheet, column, entries, value):
 
 
 
+def lookup_credential(client, reference):
+    """One cached name/ID lookup used by metadata merging and launching."""
+    cache = client.credential_cache
+    if reference not in cache:
+        if re.fullmatch('[0-9]+', reference):
+            credential = client.get(f"credentials/{int(reference)}/", purpose=f"Resolve credential ID {reference}")
+        else:
+            matches = list(client.items('credentials/', name=reference, order_by='id', purpose=f"Resolve credential named {reference!r}"))
+            if not matches:
+                raise AWXError(f"Credential {reference!r} was not found or is not accessible.")
+            if len(matches) != 1:
+                ids = ', '.join(str(match['id']) for match in matches)
+                raise AWXError(f"Credential name {reference!r} is ambiguous (IDs: {ids}); use its numeric ID in Full_Credential.")
+            credential = matches[0]
+        if type(credential.get('id')) is not int or credential['id'] < 1:
+            raise AWXError(f"Invalid AWX credential response for {reference!r}.")
+        cache[reference] = credential
+        cache[str(credential['id'])] = credential
+    return cache[reference]
+
+
+def credential_identity(credential):
+    kind = credential.get('kind') or (credential.get('summary_fields') or {}).get('credential_type', {}).get('kind')
+    return (credential.get('credential_type'),
+            (credential.get('inputs') or {}).get('vault_id') if kind == 'vault' else None)
+
+
 def resolve_credentials(client, batches):
-    """Resolve credential names/IDs once and validate each selected credential set."""
-    cache = {}
+    """Resolve job credential references into IDs required by the launch API.
+
+    AWX_TOKEN authenticates these requests. Full_Credential selects the stored
+    credentials used by the job/playbook; it never authenticates the API client.
+    """
+    template_cache = {}
     for batch in batches:
         selected = {}
+        inherited = {}
+        if batch.get('preserve_template_credentials'):
+            for _, credential in template_credential_entries(client, batch['link'], template_cache):
+                inherited[credential['id']] = lookup_credential(client, str(credential['id']))
         for reference in batch['credential_refs']:
-            if reference not in cache:
-                if re.fullmatch('[0-9]+', reference):
-                    credential = client.get(f"credentials/{int(reference)}/", purpose=f"Resolve credential ID {reference}")
-                else:
-                    matches = list(client.items('credentials/', name=reference, order_by='id', purpose=f"Resolve credential named {reference!r}"))
-                    if not matches:
-                        raise AWXError(f"Credential {reference!r} from Full_Credential was not found or is not accessible.")
-                    if len(matches) != 1:
-                        ids = ', '.join((str(match['id']) for match in matches))
-                        raise AWXError(f"Credential name {reference!r} is ambiguous (IDs: {ids}); use its numeric ID in Full_Credential.")
-                    credential = matches[0]
-                if type(credential.get('id')) is not int or credential['id'] < 1:
-                    raise AWXError(f"Invalid AWX credential response for {reference!r}.")
-                cache[reference] = credential
-                cache[str(credential['id'])] = credential
-            credential = cache[reference]
+            try:
+                credential = lookup_credential(client, reference)
+            except AWXError as exc:
+                raise AWXError(
+                    f"Cannot resolve credential {reference!r} from Full_Credential / jumphost_for_hops for hosts [{batch['limit']}]. "
+                    f"{exc} Full_Credential selects job/template credentials; API authentication uses AWX_TOKEN. "
+                    "The launch API requires IDs of job credentials stored in AWX. "
+                    "Check Full_Credential and EXTRA_CREDENTIAL_VARIABLES in awx_variable or launcher VARIABLES; "
+                    "use existing job credential names/IDs, then refresh Excel after changing the settings. "
+                    "Playbook input values belong in OS_JOBS[os]['variables'] / Job_Variables."
+                ) from None
             selected[credential['id']] = credential
+        explicit_identities = {credential_identity(credential) for credential in selected.values()}
+        for credential in inherited.values():
+            if credential_identity(credential) not in explicit_identities:
+                selected[credential['id']] = credential
         identities = {}
         for credential in selected.values():
             inputs = credential.get('inputs') or {}
             if any((inputs.get(name) == 'ASK' for name in ('password', 'become_password', 'ssh_key_unlock', 'vault_password'))):
                 raise AWXError(f"Credential {credential['id']} requires an interactive password; configure it in AWX.")
             credential_type = credential.get('credential_type')
-            kind = credential.get('kind') or (credential.get('summary_fields') or {}).get('credential_type', {}).get('kind')
-            identity = (credential_type, inputs.get('vault_id') if kind == 'vault' else None)
+            identity = credential_identity(credential)
             if credential_type is not None and identity in identities:
-                raise AWXError(f"Full_Credential contains conflicting credentials {identities[identity]} and {credential['id']} of the same credential type. Select one credential per type (Vault IDs may differ).")
+                raise AWXError(f"Full_Credential / jumphost_for_hops contains conflicting credentials {identities[identity]} and {credential['id']} of the same credential type. Select one credential per type (Vault IDs may differ).")
             identities[identity] = credential['id']
         batch['credentials'] = sorted(selected)
         batch['credential_types'] = {credential.get('credential_type') for credential in selected.values()}
 
-def validate_templates(client, batches):
+def template_survey(client, template_id, cache):
+    if template_id not in cache:
+        details = client.get(f"job_templates/{template_id}/launch/", purpose=f"Check launch settings for template {template_id}")
+        questions = []
+        if details.get('survey_enabled'):
+            spec = client.get(f"job_templates/{template_id}/survey_spec/", purpose=f"Read survey for template {template_id}")
+            questions = survey.read_questions(spec, template_id)
+        cache[template_id] = (details, questions, {})
+    return cache[template_id]
+
+
+def update_survey_columns(client, sheet, settings, *, job_url_override=None, cache=None, row_numbers=None, overwrite_configured=False):
+    cache = {} if cache is None else cache
+    columns = excel.read_columns(sheet)
+    template_rows = {}
+    if 'hostname' not in columns:
+        return cache
+    override = common.job_template_url(settings, override=job_url_override)
+    rows = range(2, sheet.max_row + 1) if row_numbers is None else row_numbers
+    for row_number in rows:
+        if not str(sheet.cell(row_number, columns['hostname']).value or '').strip():
+            continue
+        cell = sheet.cell(row_number, columns['job_link']) if 'job_link' in columns else None
+        link = common.job_template_url(settings, str(cell.value or '') if cell is not None else '', override=job_url_override)
+        if not override and cell is not None and cell.hyperlink and cell.hyperlink.target:
+            link = cell.hyperlink.target
+        if link.casefold() in ('', 'none'):
+            continue
+        template_id = template_id_from_link(link, client)
+        template_survey(client, template_id, cache)
+        template_rows.setdefault(template_id, []).append(row_number)
+    added = survey_excel.populate_columns(sheet, template_rows, cache, settings, overwrite_configured=overwrite_configured)
+    if added:
+        console.print_message('Added survey columns: ' + ', '.join(added), level='info')
+    return cache
+
+
+def validate_templates(client, batches, *, interactive=False, check_credentials=True, cache=None):
     """Check prompting and required inputs before launching the first batch."""
-    cache = {}
+    cache = {} if cache is None else cache
     for batch in batches:
         template_id = batch['template_id']
-        if template_id not in cache:
-            details = client.get(f"job_templates/{template_id}/launch/", purpose=f"Check launch settings for template {template_id}")
-            if not details.get('ask_limit_on_launch'):
-                raise AWXError(f"Template {template_id}: enable Prompt on launch for Limit to restrict each job to its batch.")
-            if (details.get('defaults', {}).get('job_slice_count') or 1) > 1:
-                raise AWXError(f"Template {template_id}: set Job Slicing to 1; this script creates its own host batches.")
-            if details.get('inventory_needed_to_start'):
-                raise AWXError(f"Template {template_id}: configure its required inventory in AWX.")
-            cache[template_id] = (details, None)
-        details, survey_variables = cache[template_id]
-        if batch['credentials']:
+        details, questions, prompted = template_survey(client, template_id, cache)
+        if not details.get('ask_limit_on_launch'):
+            raise AWXError(f"Template {template_id}: enable Prompt on launch for Limit to restrict each job to its batch.")
+        if (details.get('defaults', {}).get('job_slice_count') or 1) > 1:
+            raise AWXError(f"Template {template_id}: set Job Slicing to 1; this script creates its own host batches.")
+        if details.get('inventory_needed_to_start'):
+            raise AWXError(f"Template {template_id}: configure its required inventory in AWX.")
+        if check_credentials and batch['credentials']:
             if not details.get('ask_credential_on_launch'):
-                raise AWXError(f"Template {template_id}: enable Prompt on launch for Credentials to accept Full_Credential.")
+                credential_ids = ', '.join(str(value) for value in batch['credentials'])
+                raise AWXError(
+                    f"Template {template_id}: enable Prompt on launch for Credentials to accept Full_Credential. "
+                    f"Edit {batch['link']}, select Prompt on launch next to Credentials "
+                    "(ask_credential_on_launch=True), save the template and rerun the script. "
+                    f"Requested credential IDs: {credential_ids}; hosts: {batch['limit']}."
+                )
             for default in details.get('defaults', {}).get('credentials', []):
                 if default['id'] not in batch['credentials'] and default.get('credential_type') not in batch['credential_types']:
                     raise AWXError(f"Template {template_id}: Full_Credential must include default credential {default['id']} or a replacement of the same credential type.")
-        elif details.get('passwords_needed_to_start') or details.get('credential_needed_to_start'):
+        elif check_credentials and (details.get('passwords_needed_to_start') or details.get('credential_needed_to_start')):
             raise AWXError(f"Template {template_id}: credentials require interactive passwords or are missing; fill Full_Credential.")
         variables = batch['variables']
+        if interactive and not details.get('survey_enabled'):
+            raise AWXError(f"Template {template_id}: survey is disabled. Enable Survey in AWX: {batch['link']}.")
+        if details.get('survey_enabled'):
+            password_keys = {question['variable'] for question in questions if question['type'] == 'password'}
+            client.add_sensitive_values(variables.get(key) for key in password_keys)
+            variables = survey.prepare_variables(questions, variables, template_id, interactive=interactive, prompted=prompted)
+            client.add_sensitive_values(variables.get(key) for key in password_keys)
+            batch['variables'] = variables
         if variables and (not details.get('ask_variables_on_launch')):
             if not details.get('survey_enabled'):
-                raise AWXError(f"Template {template_id}: enable Prompt on launch for Variables to accept Job_Variables.")
-            if survey_variables is None:
-                survey = client.get(f"job_templates/{template_id}/survey_spec/", purpose=f"Check survey variables for template {template_id}")
-                survey_variables = {item['variable'] for item in survey.get('spec', [])}
-                cache[template_id] = (details, survey_variables)
-            unsupported = set(variables) - survey_variables
+                raise AWXError(f"Template {template_id}: enable its Survey or Prompt on launch for Variables to accept Job_Variables / SURVEY_ANSWERS.")
+            unsupported = set(variables) - {question['variable'] for question in questions}
             if unsupported:
                 raise AWXError(f"Template {template_id}: variables outside its survey: {', '.join(sorted(unsupported))}.")
         missing = [name for name in details.get('variables_needed_to_start', []) if name not in variables]
         if missing:
             raise AWXError(f"Template {template_id}: missing required Job_Variables: {', '.join(missing)}.")
+
+
+def show_template_surveys(client, links):
+    for template_id in links:
+        details = client.get(f"job_templates/{template_id}/launch/", purpose=f"Read survey state for template {template_id}")
+        spec = client.get(f"job_templates/{template_id}/survey_spec/", purpose=f"Read survey questions for template {template_id}")
+        survey.display_questions(template_id, details.get('survey_enabled', False), survey.read_questions(spec or {'spec': []}, template_id))
 
 def job_url(template_link, client, job_id):
     parsed = urlsplit(template_link)
@@ -825,7 +1307,7 @@ def wait_for_job(client, job_id, settings, *, require_success=True):
         job = client.get(f"jobs/{job_id}/", purpose=f"Read status and metadata for job {job_id}")
         status = job.get("status")
         if status != last_status:
-            print(f"Job {job_id}: {status}", flush=True)
+            console.print_message(f"Job {job_id}: {status}", flush=True, level=console.job_status_level(status))
             last_status = status
         if status in ("successful", "failed", "error", "canceled"):
             if require_success and status != "successful":
@@ -839,20 +1321,30 @@ def wait_for_job(client, job_id, settings, *, require_success=True):
         time.sleep(min(settings["POLL_INTERVAL"], remaining))
 
 def execute_plan(workbook, sheet, path, client, settings, batches, existing, execution_column):
-    job_type_column = excel.read_columns(sheet)['job_type']
+    columns = excel.read_columns(sheet)
+    job_type_column = columns['job_type']
     output_column = settings.get('OUTPUT_COLUMN', 'output')
     for entry in existing:
         write_execution(sheet, execution_column, [entry], entry['execution'])
+    for batch in batches:
+        for entry in batch['entries']:
+            for row_number in entry['rows']:
+                synchronise_full_credential(sheet, row_number, client=client)
     excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=output_column)
     for index, batch in enumerate(batches, start=1):
         template_id = batch['template_id']
-        print(f"Batch {index}/{len(batches)}: template={template_id}; job_type={batch['job_type'] or 'none'}; credentials={batch['credentials']}; hosts={batch['limit']}", flush=True)
+        console.print_message(f"Batch {index}/{len(batches)}: template={template_id}; job_type={batch['job_type'] or 'none'}; credentials={batch['credentials']}; hosts={batch['limit']}", flush=True, level="progress")
         for entry in batch['entries']:
             for row_number in entry['rows']:
                 cell = sheet.cell(row_number, job_type_column)
                 cell.value = batch['job_type']
                 cell.data_type = 's'
                 cell.number_format = '@'
+                if batch.get('job_url_overridden'):
+                    template_cell = sheet.cell(row_number, columns['job_link'])
+                    template_cell.value = batch['link']
+                    template_cell.data_type = 's'
+                    template_cell.hyperlink = batch['link']
         marker = f"LAUNCH_PENDING template={template_id}; {datetime.now(timezone.utc).isoformat()}"
         write_execution(sheet, execution_column, batch['entries'], marker)
         excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=output_column)
@@ -865,60 +1357,175 @@ def execute_plan(workbook, sheet, path, client, settings, batches, existing, exe
             if type(job_id) is not int or job_id < 1:
                 raise AWXError('Launch response has no job ID; check AWX before clearing the Excel marker.')
             link = job_url(batch['link'], client, job_id)
-            print(f"Job {job_id}: {link}", flush=True)
+            console.print_message(f"Job {job_id}: {link}", flush=True, level="success")
             write_execution(sheet, execution_column, batch['entries'], link)
             excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=output_column)
             if result.get('ignored_fields'):
                 raise AWXError(f"Job {job_id}: AWX ignored launch fields {', '.join(result['ignored_fields'])}; stopped further launches.")
             if settings['WAIT_FOR_COMPLETION']:
-                wait_for_job(client, job_id, settings)
+                job = wait_for_job(client, job_id, settings, require_success=False)
+                write_job_artifacts(sheet, job, batch['entries'], client._resolve_url(f"jobs/{job_id}/"))
+                excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=output_column)
+                if job['status'] != 'successful':
+                    raise AWXError(f"Job {job_id} finished with status {job['status']}; remaining batches were not launched.")
+            else:
+                write_job_artifacts(sheet, result, batch['entries'], client._resolve_url(f"jobs/{job_id}/"))
+                excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=output_column)
         except BaseException:
-            print('Stopped. Check the saved execution links/markers and AWX before retrying the affected batch.', file=sys.stderr)
+            console.print_message('Stopped. Check the saved execution links/markers and AWX before retrying the affected batch.', file=sys.stderr, level="warning")
             raise
+
+def add_selected_hosts(sheet, hostnames, client, connection, settings, *, job_url_override=None, template_cache=None):
+    """Populate only selected hosts missing from Excel, using the existing AWX lookup."""
+    columns = excel.read_columns(sheet)
+    existing = {str(sheet.cell(row, columns['hostname']).value or '').strip()
+                for row in range(2, sheet.max_row + 1)}
+    missing = [hostname for hostname in hostnames if hostname not in existing]
+    if not missing:
+        return
+    console.print_message(f"Fetching AWX metadata for {len(missing)} selected hosts missing from Excel.", flush=True, level="info")
+    report = fetch_report(client, connection['INVENTORY'], hostnames=missing, allow_empty=True)
+    if report.get('missing_hosts'):
+        raise AWXError("Selected hosts not found in inventory: " + ", ".join(report['missing_hosts']))
+    headers, rows = build_inventory_rows(report, settings, settings['OUTPUT_COLUMN'], client=client,
+                                        template_cache=template_cache, job_url_override=job_url_override)
+    for values in rows:
+        row_number = sheet.max_row + 1
+        for name, value in zip(headers, values):
+            cell = sheet.cell(row_number, columns[name.casefold()])
+            cell.value = value
+            cell.data_type = 'n' if name == 'HOPS_COUNT' and (value is None or type(value) is int) else 's'
+        selected = parse_credentials(sheet.cell(row_number, columns['jumphost_for_hops']).value,
+                                     row_number, 'jumphost_for_hops')
+        synchronise_full_credential(sheet, row_number, previous_jumps=selected)
+    jumphosts.populate_choices(sheet, client, FULL_CREDENTIAL_SEPARATOR)
+
+
+def confirm_job_rerun(sheet, execution_column, entries):
+    """Confirm a repeat interactively; changes stay in memory until preflight passes."""
+    if not sys.stdin.isatty():
+        return False
+    try:
+        answer = input('Czy potwierdzasz ponowne uruchomienie joba? [tak/N]: ')
+    except EOFError:
+        return False
+    if answer.strip().casefold() not in ('tak', 't', 'yes', 'y'):
+        return False
+    for entry in entries:
+        for row_number in entry['rows']:
+            cell = sheet.cell(row_number, execution_column)
+            text = cell.comment.text if cell.comment else ''
+            note = 'Poprzedni job: ' + entry['execution']
+            if note not in text.splitlines():
+                text = (text + '\n' if text else '') + note
+            cell.comment = Comment(text, (cell.comment.author or 'AWX') if cell.comment else 'AWX')
+            cell.value = None
+            cell.hyperlink = None
+    return True
+
 
 def execute_main(argv=None):
     args = parse_execute_arguments(argv)
     if args.job_type is not None and (not args.job_type.strip()):
         raise AWXError('--job-type must be nonempty, e.g. install, reinstall, or update.')
+    if args.job_url is not None and not args.job_url.strip():
+        raise AWXError('--job-url must contain a job template URL.')
     connection = load_connection(args.debug)
     settings = read_execution_settings()
     settings['OUTPUT_COLUMN'] = common.read_output_settings()['OUTPUT_COLUMN']
+    interactive_survey = args.survey if args.survey is not None else settings['SURVEY_INTERACTIVE']
+    survey_overrides = None
+    if args.survey_answers is not None:
+        try:
+            survey_overrides = json.loads(args.survey_answers)
+        except ValueError:
+            raise AWXError('--survey-answers must contain a JSON object.') from None
+        survey_overrides = survey.answer_mapping(survey_overrides, '--survey-answers')
     if args.batch_size is not None:
         if args.batch_size < 1:
             raise AWXError('--batch-size must be positive.')
         settings['BATCH_SIZE'] = args.batch_size
+    selected_hosts = common.normalize_hostnames(args.hosts, required=True) if args.hosts is not None else settings.get('HOSTS', [])
+    selected_job_url = common.job_template_url(settings, override=args.job_url)
     path = workbook_path(args.input_file, connection, settings)
     client = AWXClient(connection['AWX_URL'], connection['AWX_TOKEN'].strip())
-    workbook, sheet = open_workbook_sheet(path, settings["SHEET_NAME"], args.sheet)
+    template_cache = {}
+    if selected_job_url:
+        template_id = template_id_from_link(selected_job_url, client)
+        if args.show_survey:
+            show_template_surveys(client, {template_id: selected_job_url})
+            return 0
+    if path.exists() or not selected_hosts:
+        workbook, sheet = open_workbook_sheet(path, settings["SHEET_NAME"], args.sheet)
+    else:
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = args.sheet or settings['SHEET_NAME']
     try:
         excel.prepare_sheet(sheet, settings['EXECUTION_COLUMN'], settings['OUTPUT_COLUMN'])
+        if selected_hosts:
+            add_selected_hosts(sheet, selected_hosts, client, connection, settings,
+                               job_url_override=selected_job_url, template_cache=template_cache)
         excel.sort_host_rows(sheet)
-        batches, existing, column, skipped = build_execution_plan(sheet, client, settings, job_type_override=args.job_type)
-        print(f"Input: {path}; batch size: {settings['BATCH_SIZE']}; batches: {len(batches)}; already recorded hosts: {len(existing)}; rows without job: {skipped}", flush=True)
+        batches, existing, column, skipped = build_execution_plan(
+            sheet, client, settings, job_type_override=args.job_type, hostnames=selected_hosts or None,
+            job_url_override=selected_job_url or None, survey_overrides=survey_overrides)
+        if args.show_survey:
+            links = {entry['template_id']: entry['link'] for entry in [*batches, *existing]}
+            show_template_surveys(client, links)
+            return 0
+        console.print_message(f"Input: {path}; batch size: {settings['BATCH_SIZE']}; batches: {len(batches)}; already recorded hosts: {len(existing)}; rows without job: {skipped}", flush=True, level="info")
         if args.dry_run:
+            if interactive_survey:
+                rows = [row for batch in batches for entry in batch['entries'] for row in entry['rows']]
+                cache = update_survey_columns(client, sheet, settings, job_url_override=selected_job_url,
+                                              row_numbers=rows, cache=template_cache)
+                batches, existing, column, skipped = build_execution_plan(
+                    sheet, client, settings, job_type_override=args.job_type, hostnames=selected_hosts or None,
+                    job_url_override=selected_job_url or None, survey_overrides=survey_overrides, survey_cache=cache)
+                validate_templates(client, batches, interactive=True, check_credentials=False, cache=cache)
             for index, batch in enumerate(batches, start=1):
-                print(f"Batch {index}: template={batch['template_id']}; limit={batch['limit']}; credentials={list(batch['credential_refs'])}; job_type={batch['job_type'] or 'none'}; extra_vars={json.dumps(batch['variables'], ensure_ascii=False)}")
-            print('Dry run: no jobs launched and no workbook changes.')
+                # No schema is fetched for an ordinary dry run, so mask all answer values.
+                preview = {key: '***' for key in batch['variables']}
+                console.print_message(f"Batch {index}: template={batch['template_id']}; limit={batch['limit']}; credentials={list(batch['credential_refs'])}; job_type={batch['job_type'] or 'none'}; extra_vars={json.dumps(preview, ensure_ascii=False)}", level="progress")
+            console.print_message('Dry run: no jobs launched and no workbook changes.', level="warning")
             return 0
         if any((entry['execution'].startswith('LAUNCH_PENDING') for entry in existing)):
             raise AWXError('An earlier launch has a LAUNCH_PENDING marker. Check AWX, then replace it with the job link or clear it only if no job was launched.')
+        rerun_entries = []
+        if not batches and existing:
+            if not confirm_job_rerun(sheet, column, existing):
+                console.print_message('Ponowne uruchomienie anulowane.', level='warning')
+                return 0
+            rerun_entries = existing
+            batches, existing, column, skipped = build_execution_plan(
+                sheet, client, settings, job_type_override=args.job_type, hostnames=selected_hosts or None,
+                job_url_override=selected_job_url or None, survey_overrides=survey_overrides)
         if not batches:
             excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=settings['OUTPUT_COLUMN'])
-            print('No new batches to launch.')
+            console.print_message('No new batches to launch.', level="warning")
             return 0
+        rows = [row for batch in batches for entry in batch['entries'] for row in entry['rows']]
+        cache = update_survey_columns(client, sheet, settings, job_url_override=selected_job_url,
+                                      row_numbers=rows, cache=template_cache)
+        batches, existing, column, skipped = build_execution_plan(
+            sheet, client, settings, job_type_override=args.job_type, hostnames=selected_hosts or None,
+            job_url_override=selected_job_url or None, survey_overrides=survey_overrides, survey_cache=cache)
         resolve_credentials(client, batches)
-        validate_templates(client, batches)
+        validate_templates(client, batches, interactive=interactive_survey, cache=cache)
         if settings['WAIT_FOR_COMPLETION']:
-            recorded_jobs = set()
-            for entry in existing:
+            recorded_jobs = {}
+            previous = [(entry, True) for entry in existing] + [(entry, False) for entry in rerun_entries]
+            for entry, require_success in previous:
                 parsed = urlsplit(entry['execution'])
                 match = re.search('/jobs/(?:playbook/)?([1-9][0-9]*)(?:/|$)', parsed.fragment or parsed.path)
                 if match and client._origin(parsed) == client.origin:
-                    recorded_jobs.add(int(match.group(1)))
+                    job_id = int(match.group(1))
+                    recorded_jobs[job_id] = recorded_jobs.get(job_id, False) or require_success
             for job_id in sorted(recorded_jobs):
-                wait_for_job(client, job_id, settings)
+                wait_for_job(client, job_id, settings, require_success=recorded_jobs[job_id])
         execute_plan(workbook, sheet, path, client, settings, batches, existing, column)
-        print(f"Saved job links to {settings['EXECUTION_COLUMN']} in {path}.")
+        console.print_message(f"Saved job links to {settings['EXECUTION_COLUMN']} in {path}.", level="success")
         return 0
     finally:
         workbook.close()
@@ -936,8 +1543,8 @@ def read_output_settings(settings_file=None):
     return common.read_output_settings(settings_file)
 
 def parse_output_arguments(argv=None):
-    parser = operation_parser("Download AWX job stdout to Excel and text files.")
-    parser.add_argument("--output-dir", type=Path, help="Directory for <job_id>.<inventory>.<os>.txt files.")
+    parser = operation_parser("Pobierz stdout jobów AWX do Excela i plików TXT.", operation="output")
+    parser.add_argument("--output-dir", type=Path, help="Katalog pełnych logów TXT; nadpisuje OUTPUT_DIRECTORY.")
     return parse_operation_arguments(parser, argv)
 
 def job_id_from_link(link, client):
@@ -947,7 +1554,8 @@ def build_output_plan(sheet, client, settings):
     columns = excel.read_columns(sheet)
     execution_name = settings['EXECUTION_COLUMN'].strip().casefold()
     output_name = settings['OUTPUT_COLUMN'].strip().casefold()
-    if output_name in (execution_name, 'hostname', 'ostype', 'job_link', 'job_variables', 'extra_credentials', 'credential', 'full_credential'):
+    reserved = {name.casefold() for name in (*common.METADATA_COLUMNS, *common.ARTIFACT_COLUMNS)}
+    if output_name == execution_name or output_name in reserved:
         raise AWXError('OUTPUT_COLUMN must name a separate output column.')
     for name in (execution_name, 'ostype'):
         if name not in columns:
@@ -1010,10 +1618,65 @@ def save_text(path, content):
         if temporary_path is not None and temporary_path.exists():
             temporary_path.unlink()
 
-def write_output(sheet, column, row_number, content, text_path):
+def artifact_messages(artifacts, hostname):
+    """Find message values under this exact host, across nested dict/list results."""
+    target = str(hostname or '').strip().casefold()
+    if not target:
+        return ''
+    if isinstance(artifacts, str):
+        try:
+            artifacts = json.loads(artifacts)
+        except ValueError:
+            return ''
+    messages = {}
+    pending = [(artifacts, False)]
+    while pending:
+        value, selected = pending.pop()
+        if isinstance(value, dict):
+            identifiers = [item for key, item in value.items()
+                           if str(key).casefold() in ('host', 'hostname', 'inventory_hostname')
+                           and isinstance(item, str)]
+            if identifiers:
+                selected = any(item.strip().casefold() == target for item in identifiers)
+            elif isinstance(value.get('name'), str) and value['name'].strip().casefold() == target:
+                selected = True
+            for key, item in reversed(list(value.items())):
+                key = str(key).strip().casefold()
+                if key == 'message':
+                    if selected and item is not None:
+                        message = item if isinstance(item, str) else json.dumps(item, ensure_ascii=False)
+                        messages.setdefault(message, None)
+                    continue
+                pending.append((item, selected or key == target))
+        elif isinstance(value, list):
+            pending.extend((item, selected) for item in reversed(value))
+    return '\n'.join(messages)
+
+
+def write_job_artifacts(sheet, job, entries, source):
+    """Shared job results writer for the launcher and the output collector."""
+    artifacts = job.get('artifacts')
+    artifacts = {} if artifacts is None else artifacts
+    try:
+        content = json.dumps(artifacts, ensure_ascii=False, indent=2, allow_nan=False)
+    except (TypeError, ValueError):
+        raise AWXError('Job artifacts must contain valid JSON data.') from None
+    columns = excel.read_columns(sheet)
+    ensure_columns(sheet, columns, common.ARTIFACT_COLUMNS)
+    for entry in entries:
+        rows = entry['rows'] if 'rows' in entry else [entry['row']]
+        for row_number in rows:
+            hostname = sheet.cell(row_number, columns['hostname']).value if 'hostname' in columns else ''
+            message = artifact_messages(artifacts, hostname)
+            write_output(sheet, columns['artifacts'], row_number, content, source, label='Artifacts')
+            write_output(sheet, columns['artifact filter'], row_number, message, source, label='Artifact message')
+
+
+def write_output(sheet, column, row_number, content, text_path, *, label='Output'):
     text = ILLEGAL_CHARACTERS_RE.sub('', content)
     if len(text) > EXCEL_CELL_LIMIT:
-        suffix = f"\n[Output truncated in Excel; full log: {text_path}]"
+        location = 'full log' if label == 'Output' else 'full artifacts'
+        suffix = f"\n[{label} truncated in Excel; {location}: {text_path}]"
         text = text[:EXCEL_CELL_LIMIT - len(suffix)] + suffix
     cell = sheet.cell(row_number, column)
     cell.value = text
@@ -1028,9 +1691,12 @@ def collect_outputs(workbook, sheet, path, output_directory, client, settings, j
     failures = 0
     completed = 0
     for job_id, entries in jobs.items():
+        artifacts_written = False
         try:
             job = read_job(client, job_id, settings)
             name = filename_part(job_inventory_name(client, job, inventory_names))
+            write_job_artifacts(sheet, job, entries, client._resolve_url(f"jobs/{job_id}/"))
+            artifacts_written = True
             content = client.stdout(job_id)
             files = {}
             for entry in entries:
@@ -1039,15 +1705,17 @@ def collect_outputs(workbook, sheet, path, output_directory, client, settings, j
                     text_path = output_directory / f"{job_id}.{name}.{os_name}.txt"
                     save_text(text_path, content)
                     files[os_name] = text_path
-                    print(f"Job {job_id}: {text_path}", flush=True)
+                    console.print_message(f"Job {job_id}: {text_path}", flush=True, level="success")
             for entry in entries:
                 write_output(sheet, column, entry['row'], content, files[filename_part(entry['ostype'])])
-            excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=settings['OUTPUT_COLUMN'])
             completed += 1
         except AWXError as exc:
             failures += 1
-            print(f"Error: {exc}", file=sys.stderr)
-    print(f"Collected: {completed} jobs; errors: {failures}; workbook: {path}", flush=True)
+            console.print_message(f"Error: {exc}", file=sys.stderr, level="error")
+        finally:
+            if artifacts_written:
+                excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=settings['OUTPUT_COLUMN'])
+    console.print_message(f"Collected: {completed} jobs; errors: {failures}; workbook: {path}", flush=True, level="error" if failures else "success")
     return 1 if failures else 0
 
 def output_main(argv=None):
@@ -1065,10 +1733,10 @@ def output_main(argv=None):
         excel.prepare_sheet(sheet, settings['EXECUTION_COLUMN'], settings['OUTPUT_COLUMN'])
         excel.sort_host_rows(sheet)
         jobs, column, skipped = build_output_plan(sheet, client, settings)
-        print(f"Input: {path}; unique jobs: {len(jobs)}; rows without a job link: {skipped}", flush=True)
+        console.print_message(f"Input: {path}; unique jobs: {len(jobs)}; rows without a job link: {skipped}", flush=True, level="info")
         if not jobs:
             excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=settings['OUTPUT_COLUMN'])
-            print('No job output to collect.')
+            console.print_message('No job output to collect.', level="warning")
             return 0
         return collect_outputs(workbook, sheet, path, output_directory, client, settings, jobs, column)
     finally:
@@ -1080,8 +1748,8 @@ def output_main(argv=None):
 HOST_COLUMNS = excel.HOST_COLUMNS
 
 def parse_refresh_arguments(argv=None):
-    parser = operation_parser("Read Excel hostnames and refresh AWX metadata in the same file.")
-    parser.add_argument("--host-column", help="Host column header; detected automatically if omitted.")
+    parser = operation_parser("Odśwież dane hostów w tym samym Excelu, zachowując historię jobów.", operation="refresh")
+    parser.add_argument("--host-column", help="Nagłówek kolumny hostów; nadpisuje HOST_COLUMN i automatyczne wykrywanie.")
     return parse_operation_arguments(parser, argv)
 
 def read_host_rows(sheet, host_column=None):
@@ -1094,7 +1762,7 @@ def read_host_rows(sheet, host_column=None):
             raise AWXError(f"Cannot find host column {host_column!r}. Check --host-column HEADER.")
         source_column = next(iter(columns.values()), 1)
         ensure_columns(sheet, columns, ['hostname'], source_column)
-        print('Added missing hostname column. Fill it with hostnames or use --host-column HEADER for an existing column.', flush=True)
+        console.print_message('Added missing hostname column. Fill it with hostnames or use --host-column HEADER for an existing column.', flush=True, level="warning")
         return ({}, columns, columns['hostname'])
     rows = {}
     for row_number in range(2, sheet.max_row + 1):
@@ -1107,9 +1775,10 @@ def read_host_rows(sheet, host_column=None):
         rows[row_number] = hostname
     return (rows, columns, columns[selected])
 
-def metadata_by_host(report, settings):
+def metadata_by_host(report, settings, *, client=None, template_cache=None):
     """Use exactly the same host records as the inventory generator."""
-    headers, rows = build_inventory_rows(report, settings, settings.get('OUTPUT_COLUMN', 'output'))
+    headers, rows = build_inventory_rows(report, settings, settings.get('OUTPUT_COLUMN', 'output'),
+                                        client=client, template_cache=template_cache)
     metadata = {}
     for row in rows:
         record = dict(zip(headers, row))
@@ -1119,13 +1788,14 @@ def metadata_by_host(report, settings):
 
 def refresh_sheet(sheet, host_rows, columns, source_column, metadata, headers, execution_column='exceiute_job', preserve_unidentified_rows=False, output_column='output'):
     missing_values = {name: 'none' for name in headers}
-    missing_values.update(Job_Variables='{}', Job_Type='', AWX_Status='not_found')
+    missing_values.update(Job_Variables='{}', Job_Type='', AWX_Status='not_found', HOPS_COUNT=None)
     repaired, added = excel.prepare_sheet(sheet, execution_column, output_column, reorder=False)
     columns.clear()
     columns.update(repaired)
     if added:
-        print(f"Added missing columns: {', '.join(added)}", flush=True)
+        console.print_message(f"Added missing columns: {', '.join(added)}", flush=True, level="info")
     for row_number in range(2, sheet.max_row + 1):
+        previous_context = tuple(sheet.cell(row_number, columns[name]).value for name in ('applicationid', 'hops_count'))
         if row_number in host_rows:
             hostname = host_rows[row_number]
             values = {'hostname': hostname, **metadata.get(hostname, missing_values)}
@@ -1138,10 +1808,17 @@ def refresh_sheet(sheet, host_rows, columns, source_column, metadata, headers, e
             continue
         for name, value in values.items():
             cell = sheet.cell(row_number, columns[name.casefold()])
+            if (name == 'jumphost_for_hops' and row_number in host_rows and host_rows[row_number] in metadata
+                    and previous_context == (values.get('ApplicationID'), values.get('HOPS_COUNT'))
+                    and cell.value is not None and str(cell.value).strip()):
+                continue
             cell.value = value
-            cell.data_type = 's'
-            cell.number_format = '@'
+            numeric = name == 'HOPS_COUNT' and (value is None or type(value) is int)
+            cell.data_type = 'n' if numeric else 's'
+            cell.number_format = '0' if numeric else '@'
             cell.hyperlink = value if name == 'Job_Link' and value.startswith(('http://', 'https://')) else None
+        selected_by_metadata = parse_credentials(values.get('jumphost_for_hops'), row_number, 'jumphost_for_hops')
+        synchronise_full_credential(sheet, row_number, previous_jumps=selected_by_metadata)
     repaired, _ = excel.prepare_sheet(sheet, execution_column, output_column)
     columns.clear()
     columns.update(repaired)
@@ -1161,24 +1838,29 @@ def refresh_main(argv=None):
         had_host_column = any((str(cell.value or '').strip().casefold() in HOST_COLUMNS for cell in sheet[1])) or args.host_column is not None
         host_rows, columns, source_column = read_host_rows(sheet, args.host_column)
         hostnames = list(dict.fromkeys(host_rows.values()))
-        print(f"Input: {path}; worksheet: {sheet_name}; unique hosts: {len(hostnames)}", flush=True)
+        console.print_message(f"Input: {path}; worksheet: {sheet_name}; unique hosts: {len(hostnames)}", flush=True, level="info")
+        client = None
+        template_cache = {}
         if hostnames:
             client = AWXClient(connection['AWX_URL'], connection['AWX_TOKEN'].strip())
             report = fetch_report(client, connection['INVENTORY'], hostnames=hostnames, allow_empty=True)
         else:
-            print('No hostnames in Excel. Updating column headers without querying AWX.', flush=True)
+            console.print_message('No hostnames in Excel. Updating column headers without querying AWX.', flush=True, level="warning")
             report = {'hosts': [], 'host_count': 0, 'missing_hosts': []}
-        metadata, headers = metadata_by_host(report, settings)
+        metadata, headers = metadata_by_host(report, settings, client=client, template_cache=template_cache)
         protected = {settings['EXECUTION_COLUMN'].casefold(), 'exceiute_job', settings['OUTPUT_COLUMN'].casefold()}
         managed = {name.casefold() for name in ['hostname', *headers]}
         if protected & managed or columns.get(settings['EXECUTION_COLUMN'].casefold()) == source_column or columns.get(settings['OUTPUT_COLUMN'].casefold()) == source_column:
             raise AWXError('The host or metadata column conflicts with a job history column.')
         refresh_sheet(sheet, host_rows, columns, source_column, metadata, headers, execution_column=settings['EXECUTION_COLUMN'], preserve_unidentified_rows=not had_host_column, output_column=settings['OUTPUT_COLUMN'])
+        if hostnames:
+            update_survey_columns(client, sheet, settings, overwrite_configured=True, cache=template_cache)
+            jumphosts.populate_choices(sheet, client, FULL_CREDENTIAL_SEPARATOR)
         excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=settings['OUTPUT_COLUMN'])
         missing = report.get('missing_hosts', [])
         if missing:
-            print(f"Not found in AWX ({len(missing)}): {', '.join(missing)}", file=sys.stderr)
-        print(f"Refreshed: {report['host_count']} unique hosts; not found: {len(missing)}; saved: {path}", flush=True)
+            console.print_message(f"Not found in AWX ({len(missing)}): {', '.join(missing)}", file=sys.stderr, level="warning")
+        console.print_message(f"Refreshed: {report['host_count']} unique hosts; not found: {len(missing)}; saved: {path}", flush=True, level="warning" if missing else "success")
         return 0
     finally:
         workbook.close()
@@ -1194,10 +1876,21 @@ OPERATIONS = {
 
 def run(operation=None, argv=None, *, variables=None, variables_file=None):
     """Shared dispatcher and error handling for all root launchers."""
+    color_token = console.set_color_mode("auto")
     try:
+        # Windows pipes otherwise use the local code page. Preserve readable Polish
+        # help/logs while respecting an explicitly requested PYTHONIOENCODING.
+        if os.name == "nt" and "PYTHONIOENCODING" not in os.environ:
+            for stream in (sys.stdout, sys.stderr):
+                reconfigure = getattr(stream, "reconfigure", None)
+                if callable(reconfigure):
+                    reconfigure(encoding="utf-8")
         if operation is None:
-            parser = argparse.ArgumentParser(description="AWX inventory, Excel refresh, job execution and output.")
-            parser.add_argument("operation", choices=OPERATIONS)
+            parser = argparse.ArgumentParser(
+                description="AWX: eksport hostów, odświeżanie Excela, uruchamianie jobów i pobieranie logów.",
+                epilog="Pomoc operacji: python -m lib.awx refresh --help. Ustawienia domyślne: awx_variable.")
+            parser.add_argument("operation", choices=OPERATIONS,
+                                help="inventory: nowy eksport; refresh: aktualizacja; execute: joby; output: logi.")
             arguments = list(sys.argv[1:] if argv is None else argv)
             selected = parser.parse_args(arguments[:1] if arguments and arguments[0] in OPERATIONS else arguments)
             operation = selected.operation
@@ -1207,11 +1900,13 @@ def run(operation=None, argv=None, *, variables=None, variables_file=None):
         with common.launcher_configuration(operation, variables, variables_file):
             return OPERATIONS[operation](argv)
     except (AWXError, OSError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        console.print_message(f"Error: {exc}", file=sys.stderr, level="error")
         return 1
     except KeyboardInterrupt:
-        print("\nInterrupted. Check saved execution links/markers before retrying a launch.", file=sys.stderr)
+        console.print_message("\nInterrupted. Check saved execution links/markers before retrying a launch.", file=sys.stderr, level="warning")
         return 130
+    finally:
+        console.reset_color_mode(color_token)
 
 
 if __name__ == "__main__":

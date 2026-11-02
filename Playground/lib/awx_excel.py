@@ -6,7 +6,7 @@ import tempfile
 from copy import copy
 from pathlib import Path
 
-from .awx_config import AWXError, METADATA_COLUMNS
+from .awx_config import ARTIFACT_COLUMNS, AWXError, METADATA_COLUMNS
 from .awx_dependencies import ensure_openpyxl
 
 ensure_openpyxl()
@@ -23,10 +23,10 @@ OS_ORDER = {"windows": 0, "linux": 1, "aix": 2}
 
 
 def headers(execution_column="exceiute_job", output_column="output"):
-    names = [*METADATA_COLUMNS, execution_column.strip(), output_column.strip()]
+    names = [*METADATA_COLUMNS, execution_column.strip(), output_column.strip(), *ARTIFACT_COLUMNS]
     keys = [name.casefold() for name in names]
     if any(not key for key in keys) or len(keys) != len(set(keys)):
-        raise AWXError("Execution/output column names must be separate from the metadata columns and each other.")
+        raise AWXError("Execution/output column names must be separate from metadata, artifact columns and each other.")
     return names
 
 
@@ -84,6 +84,10 @@ def prepare_sheet(sheet, execution_column="exceiute_job", output_column="output"
                for cell in next(sheet.iter_cols(min_col=column, max_col=column))):
             sheet.delete_cols(column)
     columns = read_columns(sheet)
+    if "credential" in columns and "os credential" not in columns:
+        column = columns.pop("credential")
+        sheet.cell(1, column).value = "OS Credential"
+        columns["os credential"] = column
     for column in range(1, sheet.max_column + 1):
         if not str(sheet.cell(1, column).value or "").strip() and any(
             cell.value is not None or cell.hyperlink is not None or cell.comment is not None
@@ -107,6 +111,18 @@ def prepare_sheet(sheet, execution_column="exceiute_job", output_column="output"
         canonical = [columns[name.casefold()] for name in names]
         order = [*canonical, *(column for column in range(1, sheet.max_column + 1) if column not in canonical)]
         if order != list(range(1, sheet.max_column + 1)):
+            # Survey dropdowns cover whole columns; retain their targets after repair.
+            mapping = {source: target for target, source in enumerate(order, 1)}
+            for rule in sheet.data_validations.dataValidation:
+                if rule.promptTitle in ('AWX survey', 'AWX jumphost'):
+                    targets = []
+                    for area in rule.sqref.ranges:
+                        for source in range(area.min_col, area.max_col + 1):
+                            if source not in mapping:
+                                continue
+                            letter = get_column_letter(mapping[source])
+                            targets.append(f'{letter}{area.min_row}:{letter}{area.max_row}')
+                    rule.sqref = ' '.join(targets)
             rows = [[copy(cell) for cell in row] for row in sheet.iter_rows()]
             dimensions = {column: copy(sheet.column_dimensions[get_column_letter(column)]) for column in order}
             for row_number, row in enumerate(rows, start=1):
@@ -146,6 +162,11 @@ def sort_host_rows(sheet, hostname_column=None, os_column=None):
         sheet.row_dimensions[target_row] = dimensions
         for source in cells:
             copy_cell(source, sheet.cell(target_row, source.column))
+    mapping = dict(zip(sorted_rows, source_rows))
+    for rule in sheet.data_validations.dataValidation:
+        if rule.promptTitle == 'AWX jumphost':
+            rule.sqref = ' '.join(f'{get_column_letter(area.min_col)}{mapping.get(area.min_row, area.min_row)}'
+                                 for area in rule.sqref.ranges)
 
 
 def format_sheet(sheet, execution_column="exceiute_job", output_column="output"):
@@ -169,11 +190,15 @@ def format_sheet(sheet, execution_column="exceiute_job", output_column="output")
         for cell in row:
             name = inverse.get(cell.column)
             if name in names:
-                # Workflow data is always literal text, including stdout starting with '='.
-                if cell.value is not None:
-                    cell.value = str(cell.value)
-                cell.data_type = "s"
-                cell.number_format = "@"
+                if name == "hops_count" and cell.row > 1 and (cell.value is None or type(cell.value) is int):
+                    cell.data_type = "n"
+                    cell.number_format = "0"
+                else:
+                    # Other workflow data is literal text, including stdout starting with '='.
+                    if cell.value is not None:
+                        cell.value = str(cell.value)
+                    cell.data_type = "s"
+                    cell.number_format = "@"
                 if name in link_columns:
                     cell.hyperlink = cell.value if str(cell.value or "").startswith(("http://", "https://")) else None
             cell.font = Font(name="Arial", size=10, bold=cell.row == 1,

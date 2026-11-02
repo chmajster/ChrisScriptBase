@@ -22,22 +22,24 @@ VARIABLES_FILE = PROJECT_ROOT / "awx_variable"
 EXECUTION_SETTINGS_FILE = VARIABLES_FILE
 OUTPUT_SETTINGS_FILE = VARIABLES_FILE
 METADATA_COLUMNS = (
-    "hostname", "INVENTORY", "ostype", "Job_Link", "Job_Variables", "Extra_Credentials",
-    "Credential", "Full_Credential", "Job_Type", "AWX_Status",
+    "hostname", "INVENTORY", "ApplicationID", "ostype", "Job_Link", "Job_Credentials", "Job_Variables", "HOPS", "HOPS_COUNT", "jumphost_for_hops", "Extra_Credentials",
+    "OS Credential", "Full_Credential", "Job_Type", "AWX_Status",
 )
+ARTIFACT_COLUMNS = ("Artifacts", "artifact filter")
 INVENTORY_KEYS = (
     "AWX_URL", "AWX_TOKEN", "INVENTORY", "CREDENTIAL_VARIABLES", "EXTRA_CREDENTIAL_VARIABLES",
     "FULL_CREDENTIAL_SEPARATOR", "OUTPUT_FILE", "EXCEL_OUTPUT_FILE", "TIMEOUT", "PAGE_SIZE", "OS_JOBS",
 )
 EXECUTION_KEYS = (
     "INPUT_FILE", "SHEET_NAME", "BATCH_SIZE", "EXECUTION_COLUMN", "JOB_TYPE", "JOB_TYPE_VARIABLE",
-    "WAIT_FOR_COMPLETION", "POLL_INTERVAL", "JOB_WAIT_TIMEOUT",
+    "WAIT_FOR_COMPLETION", "POLL_INTERVAL", "JOB_WAIT_TIMEOUT", "HOSTS", "JOB_URL",
+    "SURVEY_ANSWERS", "SURVEY_INTERACTIVE", "SURVEY_EXCEL_DEFAULTS",
 )
 OUTPUT_KEYS = (
     "INPUT_FILE", "SHEET_NAME", "EXECUTION_COLUMN", "OUTPUT_COLUMN", "OUTPUT_DIRECTORY",
     "WAIT_FOR_COMPLETION", "POLL_INTERVAL", "JOB_WAIT_TIMEOUT",
 )
-RUNTIME_KEYS = ("DEBUG", "DRY_RUN", "HOST_COLUMN")
+RUNTIME_KEYS = ("DEBUG", "DRY_RUN", "HOST_COLUMN", "COLOR")
 SETTING_NAMES = frozenset((*INVENTORY_KEYS, *EXECUTION_KEYS, *OUTPUT_KEYS, *RUNTIME_KEYS))
 OPERATION_SCOPES = {
     "inventory": "INVENTORY_OVERRIDES",
@@ -46,6 +48,127 @@ OPERATION_SCOPES = {
     "output": "OUTPUT_OVERRIDES",
 }
 _ACTIVE = ContextVar("awx_launcher_configuration", default=None)
+HOSTNAME_PATTERN = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*\Z")
+
+
+def normalize_hostnames(values, *, required=False):
+    """Accept literal host names as a list or a comma/space-separated string."""
+    if values is None or values == "":
+        values = []
+    if isinstance(values, str):
+        values = [values]
+    if not isinstance(values, (list, tuple)):
+        raise AWXError("HOSTS must be a list of hostnames or a comma/space-separated string.")
+    hosts = {}
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            raise AWXError("HOSTS must contain nonempty literal hostnames.")
+        parts = [part for part in re.split(r"[,;\s]+", value.strip()) if part]
+        if not parts:
+            raise AWXError("HOSTS contains no hostnames.")
+        for hostname in parts:
+            if not HOSTNAME_PATTERN.fullmatch(hostname):
+                raise AWXError(f"Invalid hostname {hostname!r}; HOSTS accepts literal hostnames without Ansible patterns.")
+            hosts.setdefault(hostname, None)
+    if required and not hosts:
+        raise AWXError("--hosts must contain at least one hostname.")
+    return list(hosts)
+
+
+def is_url_key(name):
+    return isinstance(name, str) and name.casefold() in ("url", "awx_url", "job_url")
+
+
+def prepare_multiline_url_literals(content):
+    """Allow physical newlines inside quoted URLs without changing source line numbers.
+
+    Ordinary Python quotes cannot span lines. Convert only URL value delimiters
+    to triple quotes for AST parsing; normalize the resulting values afterwards.
+    Comments and unrelated string literals are skipped as complete tokens.
+    """
+    tokens = []
+    replacements = []
+    index = 0
+    while index < len(content):
+        char = content[index]
+        if char.isspace():
+            index += 1
+            continue
+        if char == "#":
+            end = content.find("\n", index)
+            index = len(content) if end < 0 else end + 1
+            continue
+        if char in ("'", '"'):
+            start = index
+            delimiter = char * 3 if content.startswith(char * 3, start) else char
+            index += len(delimiter)
+            while index < len(content):
+                if content[index] == "\\":
+                    index += 2
+                elif content.startswith(delimiter, index):
+                    break
+                else:
+                    index += 1
+            if index >= len(content):
+                # Let ast.parse report an unfinished literal at its original line.
+                break
+            end = index + len(delimiter)
+            previous = tokens
+            # A raw/unicode string prefix belongs to the literal, not its context.
+            if previous and previous[-1][0] == "name" and previous[-1][1].casefold() in ("r", "u") and previous[-1][2] == start:
+                previous = previous[:-1]
+            url_value = bool(previous and previous[-1][0] == "url_value")
+            if len(previous) >= 2:
+                kind, name, _ = previous[-2]
+                operator = previous[-1][1]
+                url_value = url_value or (
+                    is_url_key(name) and ((kind == "string" and operator == ":") or (kind == "name" and operator == "="))
+                )
+            literal = content[start:end]
+            if url_value and len(delimiter) == 1 and ("\n" in literal or "\r" in literal):
+                replacements.extend(((start, start + 1, char * 3), (end - 1, end, char * 3)))
+            if url_value:
+                tokens.append(("url_value", None, end))
+            else:
+                try:
+                    value = ast.literal_eval(literal)
+                except (ValueError, SyntaxError):
+                    value = None
+                tokens.append(("string", value, end))
+            tokens = tokens[-3:]
+            index = end
+        elif char.isalpha() or char == "_":
+            start = index
+            index += 1
+            while index < len(content) and (content[index].isalnum() or content[index] == "_"):
+                index += 1
+            tokens.append(("name", content[start:index], index))
+            tokens = tokens[-3:]
+        else:
+            tokens.append(("operator", char, index + 1))
+            tokens = tokens[-3:]
+            index += 1
+    for start, end, replacement in reversed(replacements):
+        content = content[:start] + replacement + content[end:]
+    return content
+
+
+def normalize_url_values(value, name=None):
+    """Normalize configured connection/template URLs, keeping extra_vars intact."""
+    name = name.upper() if isinstance(name, str) else name
+    if isinstance(value, str) and name in ("AWX_URL", "JOB_URL") and ("\n" in value or "\r" in value):
+        return "".join(line.strip() for line in value.splitlines())
+    if isinstance(value, dict) and name in OPERATION_SCOPES.values():
+        return {key: normalize_url_values(item, key) for key, item in value.items()}
+    if isinstance(value, dict) and name == "OS_JOBS":
+        return {
+            os_name: {
+                key: normalize_url_values(item, "JOB_URL") if key == "url" else item
+                for key, item in job.items()
+            } if isinstance(job, dict) else job
+            for os_name, job in value.items()
+        }
+    return value
 
 
 def read_literal_settings(path, defaults, *, required=False):
@@ -60,7 +183,7 @@ def read_literal_settings(path, defaults, *, required=False):
     except (OSError, UnicodeError) as exc:
         raise AWXError(f"Cannot read {path}: {exc}") from None
     try:
-        tree = ast.parse(content, filename=str(path))
+        tree = ast.parse(prepare_multiline_url_literals(content), filename=str(path))
     except SyntaxError as exc:
         raise AWXError(f"Syntax error in {path}, line {exc.lineno}.") from None
     seen = set()
@@ -72,7 +195,7 @@ def read_literal_settings(path, defaults, *, required=False):
             raise AWXError(f"Unknown or duplicate setting {name} in {path}.")
         seen.add(name)
         try:
-            settings[name] = ast.literal_eval(node.value)
+            settings[name] = normalize_url_values(ast.literal_eval(node.value), name)
         except (ValueError, TypeError, SyntaxError):
             raise AWXError(f"Setting {name} must use a literal value.") from None
     return settings
@@ -88,7 +211,7 @@ def normalize_overrides(values):
         key = name.upper() if isinstance(name, str) else name
         if key not in SETTING_NAMES or key in result:
             raise AWXError(f"Unknown or duplicate launcher setting {name!r}.")
-        result[key] = deepcopy(value)
+        result[key] = normalize_url_values(deepcopy(value), key)
     return result
 
 
@@ -168,7 +291,19 @@ def read_inventory_settings(settings_file=None):
 
 
 def read_execution_settings(settings_file=None):
+    from .awx_survey import answer_mapping
+
     settings = group_settings(EXECUTION_KEYS, settings_file, "execute")
+    settings["SURVEY_ANSWERS"] = answer_mapping(settings["SURVEY_ANSWERS"])
+    settings["SURVEY_EXCEL_DEFAULTS"] = answer_mapping(settings["SURVEY_EXCEL_DEFAULTS"], "SURVEY_EXCEL_DEFAULTS")
+    if type(settings["SURVEY_INTERACTIVE"]) is not bool:
+        raise AWXError("SURVEY_INTERACTIVE must be True or False.")
+    settings["HOSTS"] = normalize_hostnames(settings["HOSTS"])
+    if settings["JOB_URL"] is None:
+        settings["JOB_URL"] = ""
+    if not isinstance(settings["JOB_URL"], str):
+        raise AWXError("JOB_URL must be a job template URL or an empty string.")
+    settings["JOB_URL"] = settings["JOB_URL"].strip()
     if settings["INPUT_FILE"] is not None and (
         not isinstance(settings["INPUT_FILE"], str) or not settings["INPUT_FILE"].strip()
     ):
@@ -178,7 +313,7 @@ def read_execution_settings(settings_file=None):
     if type(settings["BATCH_SIZE"]) is not int or settings["BATCH_SIZE"] < 1:
         raise AWXError("BATCH_SIZE must be a positive integer.")
     column = settings["EXECUTION_COLUMN"]
-    reserved = {name.casefold() for name in METADATA_COLUMNS} | {"output"}
+    reserved = {name.casefold() for name in (*METADATA_COLUMNS, *ARTIFACT_COLUMNS)} | {"output"}
     if not isinstance(column, str) or not column.strip() or column.strip().casefold() in reserved:
         raise AWXError("EXECUTION_COLUMN must name a separate output column.")
     settings["EXECUTION_COLUMN"] = column.strip()
@@ -206,7 +341,7 @@ def read_output_settings(settings_file=None):
         if not isinstance(value, str) or not value.strip():
             raise AWXError(f"{name} must be a nonempty string.")
     settings["OUTPUT_COLUMN"] = settings["OUTPUT_COLUMN"].strip()
-    if settings["OUTPUT_COLUMN"].casefold() in {name.casefold() for name in METADATA_COLUMNS}:
+    if settings["OUTPUT_COLUMN"].casefold() in {name.casefold() for name in (*METADATA_COLUMNS, *ARTIFACT_COLUMNS)}:
         raise AWXError("OUTPUT_COLUMN must name a separate output column.")
     if type(settings["WAIT_FOR_COMPLETION"]) is not bool:
         raise AWXError("WAIT_FOR_COMPLETION must be True or False.")
@@ -219,6 +354,10 @@ def read_output_settings(settings_file=None):
 
 def read_runtime_settings():
     settings = group_settings(RUNTIME_KEYS, None, "execute")
+    color = "auto" if settings["COLOR"] is None else settings["COLOR"]
+    if not isinstance(color, str) or color.strip().lower() not in ("auto", "always", "never"):
+        raise AWXError("COLOR must be auto, always, or never.")
+    settings["COLOR"] = color.strip().lower()
     for name in ("DEBUG", "DRY_RUN"):
         if type(settings[name]) is not bool:
             raise AWXError(f"{name} must be True or False.")
@@ -241,3 +380,9 @@ def apply_job_type(variables, cell_value, settings, override=None):
     if selected:
         variables[variable] = selected
     return selected
+
+
+def job_template_url(settings, fallback='', *, override=None):
+    """One template URL priority for export, refresh, surveys and execution."""
+    selected = settings.get('JOB_URL', '') if override is None else override
+    return (selected or fallback or '').strip()
