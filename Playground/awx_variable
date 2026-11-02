@@ -1,0 +1,57 @@
+# Shared defaults for all AWX launchers. Use literal NAME = value assignments.
+# Priority: command-line flags > launcher VARIABLES > this file.
+# Optional *_OVERRIDES below customize one operation without extra configuration files.
+
+
+# Connection shared by all launchers. Secrets are read from this file, not lib/.
+AWX_URL = 'http://10.0.0.204:30080'
+AWX_TOKEN = 'XhUJQQAbseBOUzqr0sG24649GSahs6'
+INVENTORY = 'it2_inventory'
+
+# Credential lookup and literal extras included in Full_Credential.
+CREDENTIAL_VARIABLES = ['os_credential']
+EXTRA_CREDENTIAL_VARIABLES = ['xd', '123']
+FULL_CREDENTIAL_SEPARATOR = ', '
+
+# Inventory JSON/Excel outputs. Relative paths use the current working directory.
+OUTPUT_FILE = 'awx_inventory_hosts.json'
+EXCEL_OUTPUT_FILE = 'awx_inventory_hosts.xlsx'
+TIMEOUT = 30
+PAGE_SIZE = 200
+
+# Job template URLs and extra_vars selected by host ostype.
+OS_JOBS = {'windows': {'url': '', 'variables': {}},
+ 'linux': {'url': '', 'variables': {}},
+ 'aix': {'url': '', 'variables': {}}}
+
+# Default input workbook; None uses EXCEL_OUTPUT_FILE. One hostname per row.
+INPUT_FILE = None
+SHEET_NAME = 'Results'
+
+# Maximum hosts per job. Credentials and action also determine each batch.
+BATCH_SIZE = 10
+EXECUTION_COLUMN = 'exceiute_job'
+
+# Playbook action: install/reinstall/update/custom; empty retains Job_Variables.
+JOB_TYPE = ''
+JOB_TYPE_VARIABLE = 'action'
+
+# Wait/poll options shared by job execution and log collection.
+WAIT_FOR_COMPLETION = True
+POLL_INTERVAL = 5
+JOB_WAIT_TIMEOUT = 3600
+
+# Downloaded stdout column and directory for <job_id>.<inventory>.<os>.txt.
+OUTPUT_COLUMN = 'output'
+OUTPUT_DIRECTORY = 'output'
+
+# CLI defaults. Command-line flags take priority over launcher and file values.
+DEBUG = False
+DRY_RUN = False
+HOST_COLUMN = None
+
+# Optional per-operation overrides. Keys use the same names as above.
+INVENTORY_OVERRIDES = {}
+REFRESH_OVERRIDES = {}
+EXECUTE_OVERRIDES = {}
+OUTPUT_OVERRIDES = {}

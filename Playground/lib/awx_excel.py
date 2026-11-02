@@ -1,0 +1,231 @@
+"""One Excel schema, layout, sorting rule and atomic writer for all AWX scripts."""
+
+import math
+import os
+import tempfile
+from copy import copy
+from pathlib import Path
+
+from .awx_config import AWXError, METADATA_COLUMNS
+from .awx_dependencies import ensure_openpyxl
+
+ensure_openpyxl()
+
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.filters import AutoFilter
+from openpyxl.worksheet.table import TableColumn
+
+
+HOST_COLUMNS = ("hostname", "host_limit", "host", "hosts")
+OS_ORDER = {"windows": 0, "linux": 1, "aix": 2}
+
+
+def headers(execution_column="exceiute_job", output_column="output"):
+    names = [*METADATA_COLUMNS, execution_column.strip(), output_column.strip()]
+    keys = [name.casefold() for name in names]
+    if any(not key for key in keys) or len(keys) != len(set(keys)):
+        raise AWXError("Execution/output column names must be separate from the metadata columns and each other.")
+    return names
+
+
+def read_columns(sheet):
+    columns = {}
+    for cell in sheet[1]:
+        name = str(cell.value or "").strip().casefold()
+        if not name:
+            continue
+        if name in columns:
+            raise AWXError(f"Duplicate column {cell.value!r} in worksheet {sheet.title!r}.")
+        columns[name] = cell.column
+    return columns
+
+
+def select_sheet(workbook, preferred="Results", explicit=None):
+    if explicit is not None:
+        if explicit not in workbook.sheetnames:
+            raise AWXError(f"Worksheet {explicit!r} does not exist.")
+        return workbook[explicit]
+    return workbook[preferred] if preferred in workbook.sheetnames else workbook.active
+
+
+def ensure_columns(sheet, columns, names, source_column=1):
+    added = []
+    for name in names:
+        key = name.casefold()
+        if key not in columns:
+            empty = sheet.max_row == 1 and sheet.max_column == 1 and sheet.cell(1, 1).value is None
+            column = 1 if empty else sheet.max_column + 1
+            columns[key] = column
+            sheet.cell(1, column).value = name
+            added.append(name)
+    return added
+
+
+def copy_cell(source, target):
+    target.value = source.value
+    target.data_type = source.data_type
+    target._style = copy(source._style)
+    target.hyperlink = copy(source.hyperlink)
+    target.comment = copy(source.comment)
+
+
+def prepare_sheet(sheet, execution_column="exceiute_job", output_column="output", *, reorder=True):
+    """Repair and order the complete schema without dropping custom columns or history."""
+    if any(merged.max_row > 1 for merged in sheet.merged_cells.ranges):
+        raise AWXError("Host data rows must not contain merged cells. Use one host per row.")
+    # Excel/openpyxl may retain empty column objects after columns are deleted.
+    # Keep unlabelled columns containing user data, and remove empty remnants.
+    for column in range(sheet.max_column, 0, -1):
+        if sheet.max_column == 1:
+            break
+        if all(cell.value in (None, "") and cell.hyperlink is None and cell.comment is None
+               for cell in next(sheet.iter_cols(min_col=column, max_col=column))):
+            sheet.delete_cols(column)
+    columns = read_columns(sheet)
+    for column in range(1, sheet.max_column + 1):
+        if not str(sheet.cell(1, column).value or "").strip() and any(
+            cell.value is not None or cell.hyperlink is not None or cell.comment is not None
+            for cell in next(sheet.iter_cols(min_col=column, max_col=column, min_row=2))
+        ):
+            name = f"Unlabelled_{column}"
+            while name.casefold() in columns:
+                name += "_"
+            sheet.cell(1, column).value = name
+            columns[name.casefold()] = column
+    names = headers(execution_column, output_column)
+    alias = next((columns[name] for name in HOST_COLUMNS if name in columns), None)
+    had_hostname = "hostname" in columns
+    added = ensure_columns(sheet, columns, names)
+    if not had_hostname and alias is not None:
+        for row_number in range(2, sheet.max_row + 1):
+            copy_cell(sheet.cell(row_number, alias), sheet.cell(row_number, columns["hostname"]))
+    for name in names:
+        sheet.cell(1, columns[name.casefold()]).value = name
+    if reorder:
+        canonical = [columns[name.casefold()] for name in names]
+        order = [*canonical, *(column for column in range(1, sheet.max_column + 1) if column not in canonical)]
+        if order != list(range(1, sheet.max_column + 1)):
+            rows = [[copy(cell) for cell in row] for row in sheet.iter_rows()]
+            dimensions = {column: copy(sheet.column_dimensions[get_column_letter(column)]) for column in order}
+            for row_number, row in enumerate(rows, start=1):
+                for target_column, source_column in enumerate(order, start=1):
+                    copy_cell(row[source_column - 1], sheet.cell(row_number, target_column))
+            sheet.column_dimensions.clear()
+            for target_column, source_column in enumerate(order, start=1):
+                dimension = dimensions[source_column]
+                dimension.index = get_column_letter(target_column)
+                dimension.min = target_column
+                dimension.max = target_column
+                sheet.column_dimensions[dimension.index] = dimension
+    return read_columns(sheet), added
+
+
+def sort_host_rows(sheet, hostname_column=None, os_column=None):
+    columns = read_columns(sheet)
+    hostname_column = hostname_column or columns.get("hostname")
+    os_column = os_column or columns.get("ostype")
+    if not hostname_column or not os_column:
+        return
+    source_rows = list(range(2, sheet.max_row + 1))
+
+    def rank(row_number):
+        if not str(sheet.cell(row_number, hostname_column).value or "").strip():
+            return 4
+        return OS_ORDER.get(str(sheet.cell(row_number, os_column).value or "").strip().casefold(), 3)
+
+    sorted_rows = sorted(source_rows, key=rank)
+    if sorted_rows == source_rows:
+        return
+    snapshots = {row_number: ([copy(cell) for cell in sheet[row_number]], copy(sheet.row_dimensions[row_number]))
+                 for row_number in source_rows}
+    for target_row, source_row in zip(source_rows, sorted_rows):
+        cells, dimensions = snapshots[source_row]
+        dimensions.index = target_row
+        sheet.row_dimensions[target_row] = dimensions
+        for source in cells:
+            copy_cell(source, sheet.cell(target_row, source.column))
+
+
+def format_sheet(sheet, execution_column="exceiute_job", output_column="output"):
+    """Apply the same formatting and text/link handling at every workflow stage."""
+    names = {name.casefold() for name in headers(execution_column, output_column)}
+    columns = read_columns(sheet)
+    inverse = {column: name for name, column in columns.items()}
+    sheet.sheet_view.showGridLines = False
+    sheet.freeze_panes = "B2"
+    sheet.auto_filter.ref = sheet.dimensions
+    widths = {}
+    for column in sheet.iter_cols():
+        name = inverse.get(column[0].column)
+        longest = max((len(line) for cell in column for line in str(cell.value or "").split("\n")), default=0)
+        width = min(90 if name == output_column.casefold() else 70, max(18, longest + 3))
+        widths[column[0].column] = width
+        sheet.column_dimensions[get_column_letter(column[0].column)].width = width
+    link_columns = {"job_link", execution_column.casefold()}
+    for row in sheet.iter_rows():
+        line_count = 1
+        for cell in row:
+            name = inverse.get(cell.column)
+            if name in names:
+                # Workflow data is always literal text, including stdout starting with '='.
+                if cell.value is not None:
+                    cell.value = str(cell.value)
+                cell.data_type = "s"
+                cell.number_format = "@"
+                if name in link_columns:
+                    cell.hyperlink = cell.value if str(cell.value or "").startswith(("http://", "https://")) else None
+            cell.font = Font(name="Arial", size=10, bold=cell.row == 1,
+                             color="FFFFFF" if cell.row == 1 else "0563C1" if cell.hyperlink else "1F2937",
+                             underline="single" if cell.row != 1 and cell.hyperlink else None)
+            cell.fill = PatternFill("solid", fgColor="1F3A5F" if cell.row == 1 else "F0F4F8" if cell.row % 2 == 0 else "FFFFFF")
+            cell.alignment = Alignment(horizontal="center" if cell.row == 1 else "left", vertical="center", wrap_text=True)
+            line_count = max(line_count, sum(max(1, math.ceil(len(line) / (widths[cell.column] - 3)))
+                                             for line in str(cell.value or "").split("\n")))
+        sheet.row_dimensions[row[0].row].height = min(120, max(26, line_count * 16 + 6))
+    for table in sheet.tables.values():
+        # Keep existing Excel table filters aware of newly restored columns.
+        if table.ref.split(":")[0] == "A1":
+            table.ref = sheet.dimensions
+            table.autoFilter = AutoFilter(ref=sheet.dimensions)
+            previous = {column.name.casefold(): column for column in table.tableColumns}
+            table_columns = []
+            for index, cell in enumerate(sheet[1], start=1):
+                column = copy(previous.get(str(cell.value).casefold()))
+                if column is None:
+                    column = TableColumn(id=index, name=str(cell.value))
+                column.id = index
+                column.name = str(cell.value)
+                table_columns.append(column)
+            table.tableColumns = table_columns
+
+
+def save_workbook(workbook, path, *, sheet=None, execution_column="exceiute_job", output_column="output"):
+    path = Path(path)
+    selected = sheet if sheet is not None else workbook.active
+    format_sheet(selected, execution_column, output_column)
+    temporary_path = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.stem}-", suffix=path.suffix, delete=False) as temporary:
+            temporary_path = Path(temporary.name)
+        workbook.save(temporary_path)
+        os.replace(temporary_path, path)
+    except OSError as exc:
+        raise AWXError(f"Cannot save {path}: {exc}. Close the file in Excel before running the script.") from None
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
+
+
+def create_workbook(names, rows, *, sheet_name="Results", execution_column="exceiute_job", output_column="output"):
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = sheet_name
+    sheet.append(names)
+    for row in rows:
+        sheet.append(row)
+    prepare_sheet(sheet, execution_column, output_column)
+    sort_host_rows(sheet)
+    return workbook
