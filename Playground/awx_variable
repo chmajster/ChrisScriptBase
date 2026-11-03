@@ -84,15 +84,15 @@ HOSTS = []
 
 # === 5. Uruchamianie zadań i akcja playbooka ===
 # Maksymalna liczba unikalnych hostów w jednym zadaniu (liczba całkowita > 0).
-# Osobne paczki tworzone są dla różnych szablonów, zmiennych i poświadczeń.
+# Osobne paczki tworzone są dla różnych szablonów, OS, zmiennych i poświadczeń.
 # Limit joba zawsze zaczyna się od localhost; automatyczny dodatek nie zużywa BATCH_SIZE.
 BATCH_SIZE = 10
 # Kolumna z linkami do uruchomień. Istniejące wpisy zapobiegają ponownemu startowi;
 # ponowienie wymaga potwierdzenia w terminalu. Tej samej kolumny używa pobieranie logów.
 EXECUTION_COLUMN = 'exceiute_job'
 # Domyślna akcja playbooka, np. install/reinstall/update/custom.
-# Wybór bez odpowiedzi survey: --job-type > Job_Type w Excelu > JOB_TYPE
-# > wartość JOB_TYPE_VARIABLE w Job_Variables. Pusty tekst nie narzuca akcji.
+# Wykonanie: --job-type > odpowiedzi survey > Job_Variables > Job_Type w Excelu > JOB_TYPE.
+# Pusty tekst nie narzuca akcji.
 JOB_TYPE = ''
 # Nazwa zmiennej extra_vars, do której trafia wybrana akcja.
 # Aby sterować akcją przez pytanie survey, podaj nazwę zmiennej tego pytania.

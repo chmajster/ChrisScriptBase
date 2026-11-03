@@ -295,7 +295,11 @@ Przykłady:
   python .\awx_find_templates.py --organization IT2 --hostname server1""",
     "execute": r"""Działanie:
   Czyta hostname, Job_Link, Job_Variables i Full_Credential z Excela.
-  Łączy hosty o wspólnym szablonie, zmiennych i credentialach w paczki BATCH_SIZE.
+  Łączy hosty o wspólnym szablonie (ID i nazwa), OS, zmiennych i credentialach w paczki BATCH_SIZE.
+  Różne OS, Job_Variables lub Full_Credential oznaczają osobne uruchomienia.
+  Ten sam hostname z różnymi parametrami również może mieć osobne uruchomienia.
+  Sprawdza template_job_name względem Job_Link w AWX oraz zgodność URL z hiperlinkiem.
+  Niezgodność zatrzymuje start przed wysłaniem żądania uruchomienia.
   Limit każdej paczki zaczyna się od localhost, np. localhost,host1,host2.
   localhost występuje raz; dodany automatycznie nie zużywa miejsca w BATCH_SIZE.
   Full_Credential zawiera nazwy/ID oddzielone FULL_CREDENTIAL_SEPARATOR.
@@ -320,13 +324,13 @@ Wybrane hosty i URL:
   HOSTS=[] oznacza dotychczasowy tryb: wszystkie hosty z Excela.
   Brakujące w arkuszu hosty są pobierane z INVENTORY w AWX i dopisywane.
   Przy podaniu hostów plik może nie istnieć: skrypt utworzy arkusz z wynikami.
-  --job-url lub JOB_URL nadpisuje Job_Link dla nowych wykonań wybranych hostów.
+  Szablon pochodzi z Excela. Jawne --job-url nadpisuje Job_Link i template_job_name.
   URL wskazuje szablon UI/API na serwerze z AWX_URL, np. /job_template/7/details.
-  Pusty JOB_URL zachowuje linki z Excela lub OS_JOBS dla dopisanych hostów.
+  JOB_URL z konfiguracji nie zastępuje linków z Excela.
 
 Akcja i historia:
   Job_Variables to obiekt JSON, np. {"action": "install"}.
-  Akcja: --job-type > kolumna Job_Type > JOB_TYPE > wartość w Job_Variables.
+  Akcja: --job-type > odpowiedzi survey > Job_Variables > kolumna Job_Type > JOB_TYPE.
   Trafia do extra_vars[JOB_TYPE_VARIABLE], domyślnie action.
   Link joba zapisuje w EXECUTION_COLUMN (domyślnie exceiute_job).
   Po zakończeniu joba zapisuje Artifacts (JSON) i artifact filter (message hosta).
@@ -1233,6 +1237,37 @@ def template_id_from_row(link, client, sheet, row_number, *, override=False):
             message += f'\n  Job_Link cell text ({cell.coordinate}): {cell.value!r}'
         raise AWXError(client.redact(message)) from None
 
+def execution_template_from_row(sheet, row_number, columns, client, override=''):
+    """Verify the Excel URL, hyperlink and template name before choosing a job."""
+    cell = sheet.cell(row_number, columns['job_link'])
+    displayed = str(cell.value or '').strip()
+    link = override or displayed
+    if link.casefold() in ('', 'none'):
+        return None
+    if not override:
+        if cell.data_type == 'f':
+            raise AWXError(f'Row {row_number}: Job_Link must contain a literal template URL.')
+        if cell.hyperlink and cell.hyperlink.target:
+            link = cell.hyperlink.target
+            target_id = template_id_from_row(link, client, sheet, row_number)
+            if displayed.casefold().startswith(('http://', 'https://')):
+                displayed_id = template_id_from_row(displayed, client, sheet, row_number)
+                if displayed_id != target_id:
+                    raise AWXError(f'Row {row_number}: Job_Link text points to template {displayed_id}, '
+                                   f'but its hyperlink points to template {target_id}. Refresh or correct both links.')
+    template_id = template_id_from_row(link, client, sheet, row_number, override=bool(override))
+    name_cell = sheet.cell(row_number, columns['template_job_name']) if 'template_job_name' in columns else None
+    if not override and name_cell is not None and name_cell.data_type == 'f':
+        raise AWXError(f'Row {row_number}: template_job_name must contain a literal name.')
+    details = templates.template_details(client, template_id)
+    name = details['name']
+    expected = str(name_cell.value or '').strip() if name_cell is not None else ''
+    if not override and expected.casefold() not in ('', 'none') and expected != name.strip():
+        raise AWXError(f'Row {row_number}: template_job_name {expected!r} does not match '
+                       f'template {template_id} from Job_Link ({name!r}). Refresh Excel before launching.')
+    return template_id, name, link
+
+
 def parse_variables(value, row_number):
     if value is None or (isinstance(value, str) and value.strip().casefold() in ('', 'none')):
         return {}
@@ -1296,7 +1331,7 @@ def batch_host_limit(hostnames):
 
 
 def build_execution_plan(sheet, client, settings, job_type_override=None, hostnames=None, job_url_override=None, survey_overrides=None, survey_cache=None):
-    """Validate the whole sheet, deduplicate hosts, and batch equal launch payloads."""
+    """Verify Excel templates and batch equal OS/payloads, preserving distinct runs per host."""
     columns = excel.read_columns(sheet)
     for name in ('hostname', 'job_link', 'job_variables', 'full_credential'):
         if name not in columns:
@@ -1305,7 +1340,7 @@ def build_execution_plan(sheet, client, settings, job_type_override=None, hostna
     hosts = {}
     selected = {common.hostname_key(name) for name in hostnames} if hostnames is not None else None
     skipped_without_job = 0
-    selected_job_url = common.job_template_url(settings, override=job_url_override)
+    selected_job_url = str(job_url_override or '').strip()
     for row_number in range(2, sheet.max_row + 1):
         host_value = sheet.cell(row_number, columns['hostname']).value
         if host_value is None or not str(host_value).strip():
@@ -1318,19 +1353,19 @@ def build_execution_plan(sheet, client, settings, job_type_override=None, hostna
             continue
         if not HOSTNAME_PATTERN.fullmatch(hostname):
             raise AWXError(f"Row {row_number}: hostname must be a single literal hostname, without Ansible patterns.")
-        link_cell = sheet.cell(row_number, columns['job_link'])
-        link = common.job_template_url(settings, str(link_cell.value or ''), override=job_url_override)
-        if link.casefold() in ('', 'none'):
+        os_cell = sheet.cell(row_number, columns['ostype']) if 'ostype' in columns else None
+        if os_cell is not None and os_cell.data_type == 'f':
+            raise AWXError(f'Row {row_number}: ostype must contain a literal operating system name.')
+        ostype = common.normalize_ostype(str(os_cell.value or '')) if os_cell is not None else ''
+        selected_template = execution_template_from_row(sheet, row_number, columns, client, selected_job_url)
+        if selected_template is None:
             LOGGER.debug('Plan wykonania: pomijam wiersz %d — host %s nie ma szablonu zadania.', row_number, hostname)
             skipped_without_job += 1
             continue
-        if not selected_job_url and link_cell.data_type == 'f':
-            raise AWXError(f"Row {row_number}: Job_Link must contain a URL rather than an Excel formula.")
-        if not selected_job_url and link_cell.hyperlink and link_cell.hyperlink.target:
-            link = link_cell.hyperlink.target
-        template_id = template_id_from_row(link, client, sheet, row_number, override=bool(selected_job_url))
+        template_id, template_name, link = selected_template
+        excel_variables = parse_variables(sheet.cell(row_number, columns['job_variables']).value, row_number)
         variables = deepcopy(settings.get('SURVEY_ANSWERS', {}))
-        variables.update(parse_variables(sheet.cell(row_number, columns['job_variables']).value, row_number))
+        variables.update(excel_variables)
         job_type_cell = sheet.cell(row_number, columns['job_type']) if 'job_type' in columns else None
         credential_cell = sheet.cell(row_number, columns['full_credential'])
         if credential_cell.data_type == 'f' or (job_type_cell is not None and job_type_cell.data_type == 'f'):
@@ -1342,10 +1377,11 @@ def build_execution_plan(sheet, client, settings, job_type_override=None, hostna
         answers = survey_excel.read_answers(sheet, row_number, questions, skip_variables=overridden)
         variables.update(answers)
         variables.update(deepcopy(survey_overrides or {}))
-        # Survey cells override saved/configured job types; the explicit CLI action wins.
+        # Explicit CLI/survey answers win; otherwise preserve the action in Excel's variables.
         action_override = job_type_override
         action_variable = settings['JOB_TYPE_VARIABLE']
-        if action_override is None and (action_variable in answers or action_variable in (survey_overrides or {})):
+        if action_override is None and (action_variable in answers or action_variable in (survey_overrides or {})
+                                        or action_variable in excel_variables):
             action_override = variables[action_variable]
             if not isinstance(action_override, str):
                 raise AWXError(f"Job_Variables[{action_variable!r}] must be a string for the job type.")
@@ -1353,20 +1389,23 @@ def build_execution_plan(sheet, client, settings, job_type_override=None, hostna
         base_refs, jump_refs = synchronise_full_credential(sheet, row_number)
         credential_refs = tuple(sorted(set(base_refs + jump_refs)))
         preserve_defaults = bool(jump_refs and not base_refs)
-        key = (template_id, json.dumps(variables, sort_keys=True, ensure_ascii=False), credential_refs, preserve_defaults)
+        key = (template_id, template_name, ostype, json.dumps(variables, sort_keys=True, ensure_ascii=False),
+               credential_refs, preserve_defaults)
+        execution_key = (host_key, key)
         execution = str(sheet.cell(row_number, execution_column).value or '').strip()
-        if host_key not in hosts:
-            hosts[host_key] = {'key': key, 'template_id': template_id, 'link': link, 'variables': variables, 'credential_refs': credential_refs, 'preserve_template_credentials': preserve_defaults, 'job_type': job_type, 'hostname': hostname, 'rows': [], 'execution': ''}
-        host = hosts[host_key]
-        if host['key'] != key:
-            raise AWXError(f"Row {row_number}: duplicate host {hostname!r} has different job or variables or credentials.")
+        if execution_key not in hosts:
+            hosts[execution_key] = {'key': key, 'template_id': template_id, 'template_job_name': template_name,
+                                    'ostype': ostype, 'link': link, 'variables': variables,
+                                    'credential_refs': credential_refs, 'preserve_template_credentials': preserve_defaults,
+                                    'job_type': job_type, 'hostname': hostname, 'rows': [], 'execution': ''}
+        host = hosts[execution_key]
         if execution:
             if host['execution'] and host['execution'] != execution:
                 raise AWXError(f"Host {hostname!r} has conflicting execution links/markers; check its rows.")
             host['execution'] = execution
         host['rows'].append(row_number)
         debug_step('Plan wykonania', 'przypisano wiersz do hosta', Wiersz=row_number, Host=hostname,
-                   Szablon_ID=template_id, Źródło_szablonu='JOB_URL / --job-url' if selected_job_url else 'Job_Link',
+                   Szablon_ID=template_id, Źródło_szablonu='--job-url' if selected_job_url else 'Job_Link',
                    Nazwy_zmiennych=', '.join(map(str, variables)) or 'brak',
                    Historia='istnieje wpis wykonania' if execution else 'nowe wykonanie')
     groups = {}
@@ -1380,9 +1419,15 @@ def build_execution_plan(sheet, client, settings, job_type_override=None, hostna
     for group in groups.values():
         for start in range(0, len(group), settings['BATCH_SIZE']):
             entries = group[start:start + settings['BATCH_SIZE']]
-            batches.append({'template_id': entries[0]['template_id'], 'link': entries[0]['link'], 'variables': entries[0]['variables'], 'entries': entries, 'credential_refs': entries[0]['credential_refs'], 'preserve_template_credentials': entries[0]['preserve_template_credentials'], 'job_type': entries[0]['job_type'], 'limit': batch_host_limit(host['hostname'] for host in entries), 'job_url_overridden': bool(selected_job_url)})
+            batches.append({'template_id': entries[0]['template_id'], 'template_job_name': entries[0]['template_job_name'],
+                            'ostype': entries[0]['ostype'], 'link': entries[0]['link'], 'variables': entries[0]['variables'],
+                            'entries': entries, 'credential_refs': entries[0]['credential_refs'],
+                            'preserve_template_credentials': entries[0]['preserve_template_credentials'],
+                            'job_type': entries[0]['job_type'], 'limit': batch_host_limit(host['hostname'] for host in entries),
+                            'job_url_overridden': bool(selected_job_url)})
     debug_step('Plan wykonania', 'utworzono paczki według szablonu, zmiennych i poświadczeń',
-               Unikalne_hosty=len(hosts), Paczki=len(batches), Hosty_z_historią=len(existing),
+               Unikalne_hosty=len({common.hostname_key(host['hostname']) for host in hosts.values()}),
+               Wpisy_wykonania=len(hosts), Paczki=len(batches), Uruchomienia_z_historią=len(existing),
                Hosty_bez_szablonu=skipped_without_job, Limit_hostów_na_paczkę=settings['BATCH_SIZE'])
     return (batches, existing, execution_column, skipped_without_job)
 
@@ -1669,13 +1714,20 @@ def execute_plan(workbook, sheet, path, client, settings, batches, existing, exe
     excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=output_column, excel_columns=settings.get('EXCEL_COLUMNS'))
     for index, batch in enumerate(batches, start=1):
         template_id = batch['template_id']
-        console.print_message(f"Batch {index}/{len(batches)}: template={template_id}\njob_type={batch['job_type'] or 'none'}\ncredentials={batch['credentials']}\nhosts={batch['limit']}", flush=True, level="progress")
+        console.print_message(f"Batch {index}/{len(batches)}: template={template_id}\n"
+                              f"template_job_name={batch.get('template_job_name') or 'none'}\n"
+                              f"ostype={batch.get('ostype') or 'unknown'}\njob_type={batch['job_type'] or 'none'}\n"
+                              f"credentials={batch['credentials']}\nhosts={batch['limit']}", flush=True, level="progress")
         for entry in batch['entries']:
             for row_number in entry['rows']:
                 cell = sheet.cell(row_number, job_type_column)
                 cell.value = batch['job_type']
                 cell.data_type = 's'
                 cell.number_format = '@'
+                if 'template_job_name' in columns and batch.get('template_job_name'):
+                    name_cell = sheet.cell(row_number, columns['template_job_name'])
+                    name_cell.value = batch['template_job_name']
+                    name_cell.data_type = 's'
                 if batch.get('job_url_overridden'):
                     template_cell = sheet.cell(row_number, columns['job_link'])
                     template_cell.value = batch['link']
@@ -1793,7 +1845,7 @@ def execute_main(argv=None):
             raise AWXError('--batch-size must be positive.')
         settings['BATCH_SIZE'] = args.batch_size
     selected_hosts = common.normalize_hostnames(args.hosts, required=True) if args.hosts is not None else settings.get('HOSTS', [])
-    selected_job_url = common.job_template_url(settings, override=args.job_url)
+    selected_job_url = args.job_url.strip() if args.job_url is not None else ''
     path = workbook_path(args.input_file, connection, settings)
     debug_step('Wykonanie', 'efektywne ustawienia uruchomienia', Plik=path,
                Hosty=selected_hosts or 'wszystkie hosty arkusza', Szablon=selected_job_url or 'Job_Link z każdego wiersza',
@@ -1806,7 +1858,7 @@ def execute_main(argv=None):
         try:
             template_id = template_id_from_link(selected_job_url, client)
         except AWXError as exc:
-            raise AWXError(f'JOB_URL / --job-url: {exc}') from None
+            raise AWXError(f'--job-url: {exc}') from None
         if args.show_survey:
             show_template_surveys(client, {template_id: selected_job_url})
             return 0
@@ -1832,7 +1884,7 @@ def execute_main(argv=None):
             links = {entry['template_id']: entry['link'] for entry in [*batches, *existing]}
             show_template_surveys(client, links)
             return 0
-        console.print_message(f"Input: {path}\nbatch size: {settings['BATCH_SIZE']}\nbatches: {len(batches)}\nalready recorded hosts: {len(existing)}\nrows without job: {skipped}", flush=True, level="info")
+        console.print_message(f"Input: {path}\nbatch size: {settings['BATCH_SIZE']}\nbatches: {len(batches)}\nalready recorded runs: {len(existing)}\nrows without job: {skipped}", flush=True, level="info")
         if args.dry_run:
             LOGGER.debug('Podgląd wykonania: nie uruchamiam zadań i nie zapisuję pliku\n  Walidacja ankiety w AWX: %s',
                          'włączona' if interactive_survey else 'wyłączona w zwykłym podglądzie')
@@ -1847,7 +1899,10 @@ def execute_main(argv=None):
             for index, batch in enumerate(batches, start=1):
                 # No schema is fetched for an ordinary dry run, so mask all answer values.
                 preview = {key: '***' for key in batch['variables']}
-                console.print_message(f"Batch {index}: template={batch['template_id']}\nlimit={batch['limit']}\ncredentials={list(batch['credential_refs'])}\njob_type={batch['job_type'] or 'none'}\nextra_vars={json.dumps(preview, ensure_ascii=False)}", level="progress")
+                console.print_message(f"Batch {index}: template={batch['template_id']}\n"
+                                      f"template_job_name={batch['template_job_name']}\nostype={batch['ostype'] or 'unknown'}\n"
+                                      f"limit={batch['limit']}\ncredentials={list(batch['credential_refs'])}\n"
+                                      f"job_type={batch['job_type'] or 'none'}\nextra_vars={json.dumps(preview, ensure_ascii=False)}", level="progress")
             console.print_message('Dry run: no jobs launched and no workbook changes.', level="warning")
             return 0
         if any((entry['execution'].startswith('LAUNCH_PENDING') for entry in existing)):

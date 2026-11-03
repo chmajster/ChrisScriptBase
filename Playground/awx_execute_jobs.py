@@ -10,7 +10,7 @@ Przykłady:
     python .\awx_execute_jobs.py --hosts host1 host2 --job-url "https://awx.example.com/#/templates/job_template/7/details" --dry-run
     python .\awx_execute_jobs.py --help
 
-Wejście: hostname, Job_Link, Job_Variables i Full_Credential. Zmienne joba
+Wejście: hostname, ostype, template_job_name, Job_Link, Job_Variables i Full_Credential. Zmienne joba
 muszą być obiektem JSON, np. {"action": "install"}. Credentiale joba są rozwiązywane
 z nazw lub ID obiektów zapisanych w AWX. API jest uwierzytelniane przez AWX_TOKEN.
 Full_Credential wskazuje credentiale używane przez playbook uruchamianego joba.
@@ -26,8 +26,13 @@ Eksport/refresh bierze Extra_Credentials z niepustej EXTRA_CREDENTIAL_VARIABLES
 albo z przypisanych credentiali szablonu joba i łączy je z credentialami hosta.
 W Full_Credential credential hosta zastępuje domyślny credential szablonu
 tego samego typu (poza Vault). Jawne dodatki z konfiguracji są zachowywane.
-Hosty z takim samym szablonem, zmiennymi i zestawem credentiali
-trafiają do wspólnych paczek. Powtórzenia tego samego hosta są rozpoznawane.
+Hosty z takim samym szablonem, nazwą szablonu, OS, zmiennymi i zestawem credentiali
+trafiają do wspólnych paczek. Różnica w dowolnym z tych pól oznacza osobny run.
+Identyczne wpisy hosta są łączone; różne parametry tego samego hosta tworzą osobne runy.
+Windows/window, Linux i AIX są rozdzielane nawet przy wspólnym szablonie.
+Przed startem nazwa template_job_name jest porównywana z definicją wskazaną przez
+Job_Link w AWX. Tekst URL i hiperlink komórki muszą wskazywać ten sam szablon.
+Niezgodność zatrzymuje wykonanie przed wysłaniem żądania startu.
 Limit każdego joba zaczyna się od localhost, np. localhost,host1,host2.
 Jeśli localhost już występuje w paczce, jest przenoszony na początek bez powtórzeń.
 Automatycznie dodany localhost nie zużywa miejsca w BATCH_SIZE.
@@ -41,7 +46,8 @@ SURVEY_EXCEL_DEFAULTS w awx_variable wypełnia nowe/puste komórki wyłącznie
 dla wykrytych pytań; klucze dla innych szablonów są pomijane. Refresh nadpisuje
 także wypełnione komórki wartościami z SURVEY_EXCEL_DEFAULTS / SURVEY_ANSWERS.
 --job-type nadal ma pierwszeństwo dla zmiennej JOB_TYPE_VARIABLE; kolumna
-Survey_... nadpisuje akcję zapisaną w Job_Type lub JOB_TYPE w konfiguracji.
+Survey_... i --survey-answers zachowują swój priorytet. Akcja z Job_Variables
+ma pierwszeństwo przed Job_Type i JOB_TYPE, które uzupełniają brakującą wartość.
 --survey pyta w terminalu o brakujące odpowiedzi, pokazując dostępne wybory
 i defaulty. Hasła są wpisywane bez echa. Odpowiedzi są używane dla paczek tego
 samego szablonu i nie są dopisywane do Excela. --show-survey pokazuje pytania
@@ -50,8 +56,9 @@ także dla wyłączonego survey; działa bez uruchamiania jobów i bez zapisu pl
 HOSTS / --hosts ogranicza wykonanie do wskazanych nazw. Brakujące w Excelu hosty
 są pobierane z ustawionego INVENTORY w AWX i dopisywane do arkusza. Jeśli plik
 nie istnieje, zostanie utworzony pod INPUT_FILE lub EXCEL_OUTPUT_FILE.
-JOB_URL / --job-url wskazuje szablon do uruchomienia i nadpisuje Job_Link dla
-nowych wykonań. Akceptowany jest URL szablonu UI/API na serwerze z AWX_URL.
+Szablon jest wybierany z Job_Link w Excelu. JOB_URL z konfiguracji nie zastępuje
+linków z arkusza. Jawne --job-url nadpisuje Job_Link i aktualizuje template_job_name.
+Akceptowany jest URL szablonu UI/API na serwerze z AWX_URL.
 
 Uruchomienie zapisuje link do joba w EXECUTION_COLUMN (domyślnie exceiute_job).
 Po zakończeniu joba zapisuje również Artifacts (JSON) i artifact filter
@@ -102,16 +109,13 @@ VARIABLES = {
     # Można też podać tekst 'host1,host2'. [] oznacza wszystkie wiersze z Excela.
     # Hosty nieobecne w arkuszu zostaną odszukane w INVENTORY i dopisane.
     # "HOSTS": ['host1', 'host2'],
-    # URL SZABLONU joba (UI lub API), na tym samym serwerze co AWX_URL.
-    # Pusty tekst zachowuje Job_Link z Excela / OS_JOBS dla nowych hostów.
-    # URL istniejącego wykonania /jobs/playbook/... nie jest URL-em szablonu.
-    # "JOB_URL": 'https://awx.example.com/#/templates/job_template/7/details',
+    # Szablon jest odczytywany z Job_Link w Excelu. Jawne --job-url nadpisuje go w komendzie.
 
     # Maksymalna liczba unikalnych hostów w jednym jobie; liczba całkowita > 0.
     # "BATCH_SIZE": 10,
 
     # Akcja playbooka, np. install/reinstall/update/custom.
-    # Wybór: --job-type > kolumna Job_Type > JOB_TYPE > wartość w Job_Variables.
+    # Wybór: --job-type > odpowiedzi survey > Job_Variables > Job_Type > JOB_TYPE.
     # "JOB_TYPE": 'install',
     # Akcja trafia do extra_vars[JOB_TYPE_VARIABLE], np. {"action": "install"}.
     # "JOB_TYPE_VARIABLE": 'action',
