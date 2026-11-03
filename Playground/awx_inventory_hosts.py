@@ -15,6 +15,10 @@ awx_refresh_excel.py. Kolejność systemów w wynikowym Excelu: Windows, Linux, 
 Ustawienia wspólne: awx_variable obok launcherów. Słownik VARIABLES poniżej
 pozwala zmienić wartości tylko dla tego launchera. Argumenty komendy mają
 pierwszeństwo. Puste VARIABLES = {} zachowuje ustawienia z pliku.
+Tryb -d opisuje filtr hostów, pobieranie stron API, grupy bezpośrednie i nadrzędne,
+źródła poświadczeń, wybór szablonów, ankiety oraz zapis JSON i Excela.
+Pokazuje użycie pamięci podręcznej, liczbę żądań i czas operacji.
+Wartości zmiennych grup i zadań nie są wypisywane w diagnostyce.
 Logika, konfiguracja i zapis Excela są wspólne i znajdują się w lib/.
 ApplicationID po INVENTORY to pierwszy człon nazwy inventory przed znakiem _.
 Job_Credentials po Job_Link pokazuje credentiale przypisane do szablonu w AWX.
@@ -54,6 +58,9 @@ VARIABLES = {
     # Pliki wynikowe. Istniejące pliki pod tymi adresami zostaną nadpisane.
     # "OUTPUT_FILE": 'awx_inventory_hosts.json',
     # "EXCEL_OUTPUT_FILE": 'hosts.xlsx',
+    # Widoczne kolumny; [] pokazuje wszystkie. Pozostałe są ukrywane z zachowaniem danych.
+    # Własne nazwy, np. 'Uwagi', dodają puste kolumny do uzupełnienia.
+    # "EXCEL_COLUMNS": ['hostname', 'ostype', 'AWX_Status', 'Uwagi'],
     # None oznacza wszystkie hosty. Ścieżka oznacza filtr z kolumny host_limit.
     # Plik wejściowy musi mieć inny adres niż wynikowy EXCEL_OUTPUT_FILE.
     # "INPUT_FILE": 'host-list.xlsx',

@@ -1,12 +1,13 @@
 """One Excel schema, layout, sorting rule and atomic writer for all AWX scripts."""
 
+import logging
 import math
 import os
 import tempfile
 from copy import copy
 from pathlib import Path
 
-from .awx_config import ARTIFACT_COLUMNS, AWXError, METADATA_COLUMNS
+from .awx_config import ARTIFACT_COLUMNS, AWXError, METADATA_COLUMNS, normalize_excel_columns
 from .awx_dependencies import ensure_openpyxl
 
 ensure_openpyxl()
@@ -20,6 +21,7 @@ from openpyxl.worksheet.table import TableColumn
 
 HOST_COLUMNS = ("hostname", "host_limit", "host", "hosts")
 OS_ORDER = {"windows": 0, "linux": 1, "aix": 2}
+LOGGER = logging.getLogger('awx_inventory_hosts')
 
 
 def headers(execution_column="exceiute_job", output_column="output"):
@@ -226,10 +228,22 @@ def format_sheet(sheet, execution_column="exceiute_job", output_column="output")
             table.tableColumns = table_columns
 
 
-def save_workbook(workbook, path, *, sheet=None, execution_column="exceiute_job", output_column="output"):
+def save_workbook(workbook, path, *, sheet=None, execution_column="exceiute_job", output_column="output",
+                  excel_columns=None):
     path = Path(path)
     selected = sheet if sheet is not None else workbook.active
+    LOGGER.debug('Zapis Excela: przygotowuję formatowanie i widoczność kolumn\n  Plik: %s\n  Arkusz: %s', path, selected.title)
+    visible = normalize_excel_columns(excel_columns)
+    if excel_columns is not None:
+        # Własne kolumny dodajemy na końcu, bez zmiany indeksów używanych przez zadania.
+        ensure_columns(selected, read_columns(selected), visible)
     format_sheet(selected, execution_column, output_column)
+    if excel_columns is not None:
+        visible_keys = {name.casefold() for name in visible}
+        for name, column in read_columns(selected).items():
+            dimension = selected.column_dimensions[get_column_letter(column)]
+            dimension.min = dimension.max = column
+            dimension.hidden = bool(visible_keys) and name not in visible_keys
     temporary_path = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -237,6 +251,8 @@ def save_workbook(workbook, path, *, sheet=None, execution_column="exceiute_job"
             temporary_path = Path(temporary.name)
         workbook.save(temporary_path)
         os.replace(temporary_path, path)
+        LOGGER.debug('Zapis Excela zakończony: plik wynikowy zastąpiono gotowym plikiem tymczasowym\n  Plik: %s\n  Wiersze danych: %d\n  Kolumny: %d',
+                     path, max(0, selected.max_row - 1), selected.max_column)
     except OSError as exc:
         raise AWXError(f"Cannot save {path}: {exc}. Close the file in Excel before running the script.") from None
     finally:

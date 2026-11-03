@@ -64,6 +64,11 @@ w Excelu, może odczytać ich metadane z AWX, aby przygotować podgląd.
 Wartości extra_vars są w podglądzie maskowane. --survey --dry-run dodatkowo
 odczytuje pytania z AWX i waliduje odpowiedzi, nadal bez startu jobów i zapisu.
 
+Tryb -d pokazuje ustawienia wykonania, powody pomijania wierszy i tworzenie paczek.
+Opisuje dobór ID poświadczeń, walidację szablonów i ankiet oraz zapis LAUNCH_PENDING
+przed startem. Potwierdza zapis linku do zadania i podaje czas oraz liczbę żądań API.
+Wypisuje nazwy zmiennych zadania, a ich wartości pozostają ukryte.
+
 Domyślne ustawienia: awx_variable. Nadpisania tego launchera: VARIABLES poniżej.
 Argumenty komendy mają pierwszeństwo. Implementacja znajduje się w lib/.
 """
@@ -86,6 +91,8 @@ VARIABLES = {
     # Plik .xlsx z danymi hostów i historią. Przy HOSTS może też być nowym plikiem.
     # "INPUT_FILE": 'hosts.xlsx',
     # "SHEET_NAME": 'Results',
+    # Widoczne kolumny; [] pokazuje wszystkie. Ukryte dane nadal służą do wykonania zadań.
+    # "EXCEL_COLUMNS": ['hostname', 'exceiute_job', 'Artifacts', 'artifact filter', 'Uwagi'],
 
     # Wybrane hosty: jeden host ['host1'] albo lista ['host1', 'host2'].
     # Można też podać tekst 'host1,host2'. [] oznacza wszystkie wiersze z Excela.

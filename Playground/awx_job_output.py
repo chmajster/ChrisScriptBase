@@ -23,6 +23,15 @@ Inventory pochodzi z danych joba AWX, a OS z Excela. Komórka Excela mieści do
 Kolejne pobranie aktualizuje logi tych samych jobów, także nieudanych lub anulowanych.
 Artefakty przekraczające limit komórki są skracane z adresem pełnych danych w AWX.
 
+Komunikaty opisują odczyt arkusza, liczbę zadań i powiązanych wierszy,
+status każdego zadania, pobranie stdout, zapis TXT oraz aktualizację Excela.
+Podsumowanie rozróżnia liczbę pobranych logów od błędów ich pobierania:
+log zadania ze statusem failed także może zostać poprawnie pobrany.
+Opcja -d dodaje cele żądań API, adresy, kody HTTP, czas odpowiedzi,
+powody pomijania wierszy i informacje o widocznych kolumnach.
+WAIT_FOR_COMPLETION=False pobiera log dostępny teraz; True czeka na koniec
+zadania według POLL_INTERVAL i JOB_WAIT_TIMEOUT.
+
 Domyślne ustawienia: awx_variable. Nadpisania tego launchera: VARIABLES poniżej.
 Argumenty komendy mają pierwszeństwo. Implementacja znajduje się w lib/.
 """
@@ -41,6 +50,8 @@ VARIABLES = {
     # Ten sam plik .xlsx, do którego execute zapisał linki uruchomień.
     # "INPUT_FILE": 'hosts.xlsx',
     # "SHEET_NAME": 'Results',
+    # Widoczne kolumny; [] pokazuje wszystkie. Pozostałe są ukrywane z zachowaniem danych.
+    # "EXCEL_COLUMNS": ['hostname', 'exceiute_job', 'output', 'Artifacts', 'artifact filter'],
     # Nazwa musi odpowiadać kolumnie używanej przez launcher execute.
     # "EXECUTION_COLUMN": 'exceiute_job',
 

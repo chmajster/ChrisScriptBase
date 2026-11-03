@@ -107,3 +107,18 @@ def job_status_level(status):
     if status in ("new", "pending", "waiting", "canceled"):
         return "warning"
     return "progress"
+
+
+def job_status_description(status):
+    """Wyjaśnij status zadania, zachowując nazwę zwróconą przez API AWX."""
+    descriptions = {
+        "new": "utworzone, jeszcze nieuruchomione",
+        "pending": "oczekuje w kolejce na uruchomienie",
+        "waiting": "oczekuje na dostępne zasoby lub zależności",
+        "running": "w trakcie wykonywania",
+        "successful": "zakończone pomyślnie",
+        "failed": "zakończone niepowodzeniem",
+        "error": "błąd wykonania po stronie AWX",
+        "canceled": "anulowane",
+    }
+    return f"{descriptions.get(status, 'nieznany status')} ({status or 'brak statusu'})"

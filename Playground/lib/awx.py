@@ -80,6 +80,14 @@ def debug_variables(label, values):
     if LOGGER.isEnabledFor(logging.DEBUG):
         LOGGER.debug('%s: %s', label, json.dumps(values, ensure_ascii=False, default=str))
 
+
+def debug_step(operation, stage, **details):
+    """Opisz etap operacji i jawnie wybrane dane diagnostyczne w osobnych liniach."""
+    if LOGGER.isEnabledFor(logging.DEBUG):
+        lines = [f'{operation} — {stage}']
+        lines.extend(f'  {name.replace("_", " ")}: {value}' for name, value in details.items())
+        LOGGER.debug('\n'.join(lines))
+
 def validate_inventory_settings(settings):
     """Validate setting types and prepare output file paths."""
     jobs = settings['OS_JOBS']
@@ -125,7 +133,7 @@ def validate_inventory_settings(settings):
 
 def read_inventory_settings(variables_file=None):
     """Read shared variables and launcher overrides, then validate inventory fields."""
-    LOGGER.debug("Configuration: reading settings from %s", variables_file or common.current_variables_file())
+    LOGGER.debug("Konfiguracja: odczytuję ustawienia z %s", variables_file or common.current_variables_file())
     return validate_inventory_settings(common.read_inventory_settings(variables_file))
 
 def apply_settings(settings):
@@ -152,12 +160,16 @@ def workbook_path(input_file, connection, *preferences):
 
 def open_workbook_sheet(path, preferred="Results", explicit=None):
     """One workbook loader, worksheet selection policy and cleanup path."""
+    LOGGER.debug('Excel: otwieram plik %s', path)
     try:
         workbook = load_workbook(path, keep_links=True)
     except (OSError, ValueError, BadZipFile, ParseError, InvalidFileException) as exc:
         raise AWXError(f"Cannot read {path}: {exc}") from None
     try:
-        return workbook, excel.select_sheet(workbook, preferred, explicit)
+        sheet = excel.select_sheet(workbook, preferred, explicit)
+        debug_step('Excel', 'wybrano arkusz', Plik=path, Arkusz=sheet.title,
+                   Wiersze_danych=max(0, sheet.max_row - 1), Kolumny=sheet.max_column)
+        return workbook, sheet
     except BaseException:
         workbook.close()
         raise
@@ -379,14 +391,14 @@ def parse_inventory_arguments(argv=None):
 
 def read_host_limits(input_file):
     """Read unique hostnames from host_limit columns, preserving file order."""
-    LOGGER.debug('Excel input: opening %s and looking for the host_limit column', input_file)
+    LOGGER.debug('Filtr hostów: otwieram %s i szukam kolumny host_limit', input_file)
     workbook = None
     hostnames = {}
     found_column = False
     try:
         workbook = load_workbook(input_file, read_only=True, data_only=True, keep_links=False)
         for sheet in workbook.worksheets:
-            LOGGER.debug('Excel input: searching worksheet %r', sheet.title)
+            LOGGER.debug('Filtr hostów: przeszukuję arkusz %r', sheet.title)
             column_index = None
             for row_number, row in enumerate(sheet.iter_rows(values_only=True), start=1):
                 if column_index is None:
@@ -396,7 +408,7 @@ def read_host_limits(input_file):
                     if matching_columns:
                         column_index = matching_columns[0]
                         found_column = True
-                        LOGGER.debug('Excel input: found host_limit in worksheet %r, row %d, column %s', sheet.title, row_number, get_column_letter(column_index + 1))
+                        LOGGER.debug('Filtr hostów: znaleziono host_limit\n  Arkusz: %r\n  Wiersz: %d\n  Kolumna: %s', sheet.title, row_number, get_column_letter(column_index + 1))
                     continue
                 value = row[column_index] if column_index < len(row) else None
                 if value is None:
@@ -413,8 +425,8 @@ def read_host_limits(input_file):
         raise AWXError(f"No host_limit column was found in {input_file}.")
     if not hostnames:
         raise AWXError(f"The host_limit column in {input_file} contains no hostnames.")
-    LOGGER.debug('Excel input: read %d unique hostnames', len(hostnames))
-    debug_variables(f"Hostnames from {input_file}", list(hostnames.values()))
+    LOGGER.debug('Filtr hostów: odczytano %d unikalnych nazw hostów', len(hostnames))
+    debug_variables(f"Nazwy hostów z pliku {input_file}", list(hostnames.values()))
     return list(hostnames.values())
 
 class NoRedirect(HTTPRedirectHandler):
@@ -447,7 +459,7 @@ class AWXClient:
         self.jumphost_credential_cache = {}
         self.opener = build_opener(NoRedirect())
         self.request_count = 0
-        LOGGER.debug('API base URL used for requests: %s', self.base_url)
+        LOGGER.debug('Połączenie z AWX: bazowy adres API dla żądań: %s', self.base_url)
 
     @staticmethod
     def _origin(parsed):
@@ -469,7 +481,7 @@ class AWXClient:
             for prefix in ('/api/controller/v2/', '/controller/v2/', '/api/v2/'):
                 if parsed.path.casefold().startswith(prefix):
                     new_path = self.api_path + parsed.path[len(prefix):]
-                    LOGGER.debug('API path mapping: %s -> %s', parsed.path, new_path)
+                    LOGGER.debug('Mapowanie ścieżki API: %s -> %s', parsed.path, new_path)
                     return urlunsplit((parsed.scheme, parsed.netloc, new_path, parsed.query, ''))
         return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ''))
 
@@ -498,7 +510,7 @@ class AWXClient:
             text = text.replace(value, '***').replace(json.dumps(value)[1:-1], '***')
         return text
 
-    def request(self, method, path, payload=None, *, response_format="json", purpose="Fetch an AWX resource"):
+    def request(self, method, path, payload=None, *, response_format="json", purpose="Pobranie zasobu AWX"):
         """One authenticated request path; launch requests are never automatically retried."""
         url = self._resolve_url(path)
         parsed = urlsplit(url)
@@ -512,8 +524,8 @@ class AWXClient:
         self.request_count += 1
         number = self.request_count
         started = time.perf_counter()
-        LOGGER.debug("Request #%d purpose: %s", number, purpose)
-        LOGGER.debug("Request #%d: %s %s", number, method, url)
+        LOGGER.debug("Żądanie #%d — cel: %s", number, purpose)
+        LOGGER.debug("Żądanie #%d: %s %s", number, method, url)
         try:
             with self.opener.open(request, timeout=TIMEOUT) as response:
                 status = getattr(response, "status", None)
@@ -530,7 +542,7 @@ class AWXClient:
                 detail = self.redact(exc.read(8192).decode("utf-8", errors="replace")) if method == "POST" else ""
             finally:
                 exc.close()
-            LOGGER.debug("Response #%d: HTTP %d error; elapsed %.3f s", number, code, time.perf_counter() - started)
+            LOGGER.debug("Odpowiedź #%d: błąd HTTP %d\n  Czas żądania: %.3f s", number, code, time.perf_counter() - started)
             if method == "POST":
                 raise AWXError(f"Launch returned HTTP {code}: {detail}") from None
             hint = {
@@ -549,26 +561,26 @@ class AWXClient:
         if not text_response and not isinstance(result, dict):
             hint = " Check AWX before clearing the Excel marker." if method == "POST" else ""
             raise AWXError(f"Unexpected response format from {parsed.path}.{hint}")
-        LOGGER.debug("Response #%d: HTTP %s; elapsed %.3f s", number, status, time.perf_counter() - started)
+        LOGGER.debug("Odpowiedź #%d: HTTP %s\n  Czas żądania: %.3f s", number, status, time.perf_counter() - started)
         if isinstance(result, dict) and isinstance(result.get("results"), list):
-            LOGGER.debug("Request #%d result: records on page=%d; total reported by API=%s; next page=%s",
-                         number, len(result["results"]), result.get("count", "not provided"), "yes" if result.get("next") else "no")
+            LOGGER.debug("Wynik żądania #%d: rekordy na stronie=%d\n  Łącznie według API=%s\n  Kolejna strona=%s",
+                         number, len(result["results"]), result.get("count", "brak danych"), "tak" if result.get("next") else "nie")
         return result
 
-    def get(self, path, *, purpose="Fetch an AWX resource"):
+    def get(self, path, *, purpose="Pobranie zasobu AWX"):
         return self.request("GET", path, purpose=purpose)
 
     def post(self, path, payload):
-        return self.request("POST", path, payload, purpose="Launch an AWX job")
+        return self.request("POST", path, payload, purpose="Uruchomienie zadania AWX")
 
     def stdout(self, job_id):
         return self.request("GET", f"jobs/{job_id}/stdout/?format=txt_download", response_format="text",
-                            purpose=f"Fetch complete stdout for job {job_id}")
+                            purpose=f"Pobranie pełnego logu wykonania (stdout) zadania {job_id}")
 
-    def items(self, path, *, purpose='Fetch an AWX resource list', **filters):
+    def items(self, path, *, purpose='Pobranie listy zasobów AWX', **filters):
         """Fetch all pages by following the API's next links."""
         parameters = {'page_size': PAGE_SIZE, **filters}
-        debug_variables(f"Parameters: {purpose}", parameters)
+        debug_variables(f"Parametry żądania: {purpose}", parameters)
         query = urlencode(parameters)
         url = self._resolve_url(path)
         url += ('&' if urlsplit(url).query else '?') + query
@@ -580,23 +592,23 @@ class AWXClient:
                 raise AWXError('The API returned a repeated pagination link.')
             visited.add(url)
             page_number += 1
-            page = self.get(url, purpose=f"{purpose}; page {page_number}")
+            page = self.get(url, purpose=f"{purpose}\n  Strona: {page_number}")
             if not isinstance(page.get('results'), list):
                 raise AWXError('The API response is missing the results list.')
             record_count += len(page['results'])
             yield from page['results']
             next_page = page.get('next')
             url = self._resolve_url(next_page, relative_to=url) if next_page else None
-        LOGGER.debug('Completed: %s; fetched %d records across %d pages', purpose, record_count, page_number)
+        LOGGER.debug('Zakończono: %s\n  Pobrane rekordy: %d\n  Pobrane strony: %d', purpose, record_count, page_number)
 
 def find_inventory(client, selector):
     if isinstance(selector, int):
         if selector < 1:
             raise AWXError('The inventory ID must be positive.')
-        return client.get(f"inventories/{selector}/", purpose=f"Fetch details for inventory ID {selector}")
+        return client.get(f"inventories/{selector}/", purpose=f"Odczyt szczegółów inwentarza ID {selector}")
     if not isinstance(selector, str) or not selector.strip():
         raise AWXError('Set INVENTORY to an inventory name or numeric ID.')
-    matches = list(client.items('inventories/', name=selector, purpose=f"Find inventory named {selector!r}"))
+    matches = list(client.items('inventories/', name=selector, purpose=f"Wyszukanie inwentarza o nazwie {selector!r}"))
     if not matches:
         raise AWXError(f"No accessible inventory named {selector!r} was found.")
     if len(matches) > 1:
@@ -641,7 +653,8 @@ class InventoryGroupIndex:
             if not isinstance(group_data, dict) or not isinstance(group_data.get('vars', {}), dict):
                 raise AWXError(f"Invalid data for group {name!r} in the inventory export.")
             self.variables[name] = group_data.get('vars', {})
-            debug_variables(f"Variables for group {name!r} (ID {self.groups[name]['id']})", self.variables[name])
+            LOGGER.debug('Grupa %r (ID %s): dostępne zmienne: %s\n  Wartości zmiennych grupy nie są wypisywane.',
+                         name, self.groups[name]['id'], ', '.join(map(str, self.variables[name])) or 'brak')
             for hostname in group_data.get('hosts', []):
                 self.direct_by_host.setdefault(common.hostname_key(hostname), set()).add(name)
             for child_name in group_data.get('children', []):
@@ -668,19 +681,20 @@ class InventoryGroupIndex:
         all_names = set()
         for name in direct_names:
             all_names.update(self.all_group_names(name))
-        LOGGER.debug('Host %s: looking for variables %s locally in %d groups (direct=%d, inherited=%d)', hostname, self.credential_variables, len(all_names), len(direct_names), len(all_names - direct_names))
+        LOGGER.debug('Host %s: szukam zmiennych %s lokalnie w %d grupach\n  Grupy bezpośrednie: %d\n  Grupy nadrzędne: %d', hostname, self.credential_variables, len(all_names), len(direct_names), len(all_names - direct_names))
         matches = []
         sorted_names = sorted(all_names)
         for variable in self.credential_variables:
             previous_matches = len(matches)
             for name in sorted_names:
                 if variable in self.variables[name]:
-                    LOGGER.debug('Host %s: found %s in group %r (%s)', hostname, variable, name, 'direct' if name in direct_names else 'inherited')
+                    LOGGER.debug('Host %s: znaleziono zmienną %s w grupie %r (%s)', hostname, variable, name, 'bezpośredniej' if name in direct_names else 'nadrzędnej')
                     matches.append({**self.groups[name], 'variable': variable, 'value': self.variables[name][variable], 'inherited': name not in direct_names})
             if len(matches) == previous_matches:
-                LOGGER.debug('Host %s: variable %s was not found in its groups', hostname, variable)
+                LOGGER.debug('Host %s: nie znaleziono zmiennej %s w jego grupach.', hostname, variable)
         result = {'groups': [self.groups[name] for name in sorted(direct_names)], 'all_groups': [self.groups[name] for name in sorted_names], 'os_credential_groups': [{'id': match['id'], 'name': match['name'], 'os_credential': match['value'], 'inherited': match['inherited']} for match in matches if match['variable'] == 'os_credential'], 'credential_groups': matches}
-        debug_variables(f"Host {hostname!r}", result)
+        debug_step('Host', 'zakończono wyszukiwanie poświadczeń w grupach', Host=hostname,
+                   Grupy=', '.join(sorted_names) or 'brak', Dopasowania=len(matches))
         return result
 
 def host_index(hosts):
@@ -708,21 +722,21 @@ def host_name_filters(hostnames):
 def fetch_report(client, selector, hostnames=None, *, allow_empty=False):
     credential_variables = credential_variable_names()
     extra_credentials = extra_credential_values()
-    debug_variables('Literal extra credential values from configuration', extra_credentials)
+    debug_variables('Dodatkowe nazwy lub ID poświadczeń z konfiguracji', extra_credentials)
     inventory = find_inventory(client, selector)
-    LOGGER.debug('Selected inventory: ID=%s; name=%r; type=%s', inventory['id'], inventory['name'], inventory.get('kind') or 'standard')
-    debug_variables('Credential variables to look up', credential_variables)
+    LOGGER.debug('Wybrano inwentarz: ID=%s\n  Nazwa=%r\n  Typ=%s', inventory['id'], inventory['name'], inventory.get('kind') or 'standard')
+    debug_variables('Nazwy zmiennych poświadczeń do wyszukania', credential_variables)
     requested = common.unique_hostnames(hostnames) if hostnames is not None else None
     requested_names = {common.hostname_key(name) for name in requested} if requested is not None else None
     host_filters = host_name_filters(requested)
-    debug_variables('AWX host filters', host_filters)
+    debug_variables('Filtry hostów wysyłane do AWX', host_filters)
     hosts = []
     group_indexes = {}
     host_variables = {}
     inventory_names = {inventory['id']: inventory['name']}
-    host_purpose = f"Fetch hosts from inventory ID {inventory['id']} (name: {inventory['name']!r})"
+    host_purpose = f"Pobranie hostów z inwentarza ID {inventory['id']} (nazwa: {inventory['name']!r})"
     if requested is not None:
-        host_purpose += f" for {len(requested)} names from the input file"
+        host_purpose += f" dla {len(requested)} nazw z pliku wejściowego"
     candidates = [host for host in client.items(f"inventories/{inventory['id']}/hosts/", purpose=host_purpose, **host_filters)
                   if requested_names is None or common.hostname_key(host['name']) in requested_names]
     host_index(candidates)
@@ -730,17 +744,17 @@ def fetch_report(client, selector, hostnames=None, *, allow_empty=False):
         source_id = host.get('inventory') or inventory['id']
         if source_id not in inventory_names:
             summary = (host.get('summary_fields') or {}).get('inventory') or {}
-            inventory_names[source_id] = summary.get('name') or client.get(f"inventories/{source_id}/", purpose=f"Fetch source inventory name for ID {source_id}").get('name') or str(source_id)
+            inventory_names[source_id] = summary.get('name') or client.get(f"inventories/{source_id}/", purpose=f"Odczyt nazwy inwentarza źródłowego ID {source_id}").get('name') or str(source_id)
         if source_id not in group_indexes:
-            LOGGER.debug('Loading the group index for source inventory ID %s', source_id)
-            groups = list(client.items(f"inventories/{source_id}/groups/", order_by='name', purpose=f"Fetch group names and IDs from source inventory ID {source_id}"))
-            exported = client.get(f"inventories/{source_id}/script/?all=1&hostvars=1", purpose=f"Fetch host variables, memberships, group hierarchy, and group variables from source inventory ID {source_id}; include disabled hosts")
+            LOGGER.debug('Buduję indeks grup dla inwentarza źródłowego ID %s.', source_id)
+            groups = list(client.items(f"inventories/{source_id}/groups/", order_by='name', purpose=f"Pobranie nazw i ID grup z inwentarza źródłowego ID {source_id}"))
+            exported = client.get(f"inventories/{source_id}/script/?all=1&hostvars=1", purpose=f"Pobranie zmiennych hostów i grup oraz hierarchii grup z inwentarza źródłowego ID {source_id}\n  Uwzględniam również hosty wyłączone")
             host_variables[source_id] = {common.hostname_key(name): values
                                          for name, values in exported.get('_meta', {}).get('hostvars', {}).items()}
             group_indexes[source_id] = InventoryGroupIndex(groups, exported, credential_variables)
-            LOGGER.debug('Group index for source inventory ID %s is ready: %d groups and %d hosts with group memberships; credential lookup runs locally', source_id, len(groups), len(group_indexes[source_id].direct_by_host))
+            LOGGER.debug('Indeks inwentarza ID %s gotowy\n  Grupy: %d\n  Hosty z przypisanymi grupami: %d\n  Poświadczenia wyszukuję lokalnie w pobranych danych.', source_id, len(groups), len(group_indexes[source_id].direct_by_host))
         else:
-            LOGGER.debug('Host %s: reusing the cached group index for source inventory ID %s', host['name'], source_id)
+            LOGGER.debug('Host %s: korzystam z gotowego indeksu grup inwentarza ID %s, bez ponownego pobierania.', host['name'], source_id)
         hosts.append({'id': host['id'], 'name': host['name'], 'INVENTORY': inventory_names[source_id], 'ostype': host_variables[source_id].get(common.hostname_key(host['name']), {}).get('ostype'), 'enabled': host.get('enabled', True), **group_indexes[source_id].for_host(host['name'])})
     report = {'inventory': {'id': inventory['id'], 'name': inventory['name']}, 'host_count': len(hosts), 'hosts': hosts}
     if requested is not None:
@@ -750,7 +764,8 @@ def fetch_report(client, selector, hostnames=None, *, allow_empty=False):
         hosts.sort(key=lambda host: order[common.hostname_key(host['name'])])
         found_names = {common.hostname_key(host['name']) for host in hosts}
         report['missing_hosts'] = [name for name in requested if common.hostname_key(name) not in found_names]
-    debug_variables('Host summary', {'host_count': len(hosts), 'source_inventory_count': len(group_indexes), 'source_inventory_ids': list(group_indexes), 'missing_hosts': report.get('missing_hosts', [])})
+    debug_step('Inwentarz', 'zakończono pobieranie hostów', Hosty=len(hosts),
+               Inwentarze_źródłowe=len(group_indexes), Brakujące_hosty=', '.join(report.get('missing_hosts', [])) or 'brak')
     return report
 
 def template_credential_entries(client, link, cache):
@@ -834,7 +849,7 @@ def unique_credential_references(references, client=None, *, resolve_aliases=Fal
                 credential = lookup_credential(client, reference)
             except AWXError as exc:
                 # Keep unresolved references for the existing launch validation.
-                LOGGER.debug('Cannot compare credential %r for duplicates: %s', reference, exc)
+                LOGGER.debug('Nie można porównać poświadczenia %r przy usuwaniu powtórzeń: %s', reference, exc)
         if credential is not None:
             identity = ('id', credential['id'])
         elif numeric:
@@ -866,7 +881,7 @@ def merge_full_credentials(client, extras, host_values, inherited):
             try:
                 credential = lookup_credential(client, reference)
             except AWXError as exc:
-                LOGGER.debug('Cannot compare host credential %r with template defaults: %s', reference, exc)
+                LOGGER.debug('Nie można porównać poświadczenia hosta %r z domyślnymi poświadczeniami szablonu: %s', reference, exc)
                 continue
             host_ids.add(credential['id'])
             kind = credential_kind(credential)
@@ -944,8 +959,8 @@ def build_inventory_rows(report, settings=None, output_column=None, *, client=No
         full_parts = merge_full_credentials(client, extra_credentials, host_values, inherited)
         full_parts = without_template_machines(full_parts, template_machines, client)
         host['Extra_Credentials'] = list(extra_credentials)
-        LOGGER.debug('Host %s: using %d extra credentials from %s', host['name'], len(extra_credentials),
-                     'EXTRA_CREDENTIAL_VARIABLES' if configured_extras else 'job template')
+        LOGGER.debug('Host %s: dodatkowe poświadczenia: %d\n  Źródło: %s', host['name'], len(extra_credentials),
+                     'EXTRA_CREDENTIAL_VARIABLES' if configured_extras else 'szablon zadania')
         job_variables = deepcopy(job.get('variables', {}))
         host['Job_Link'] = job_link
         host['Job_Variables'] = job_variables
@@ -963,8 +978,10 @@ def build_inventory_rows(report, settings=None, output_column=None, *, client=No
         full_credential = FULL_CREDENTIAL_SEPARATOR.join(unique_credential_references(
             [*full_parts, *selected_jumps], client, resolve_aliases=True)) or 'none'
         host['Full_Credential'] = full_credential
-        debug_variables(f"Full_Credential for host {host['name']!r}", full_credential)
-        debug_variables(f"HOPS for host {host['name']!r}", host['HOPS'])
+        debug_step('Eksport hosta', 'przygotowano metadane', Host=host['name'], System=ostype_text,
+                   Szablon=job_link or 'brak', Akcja=job_type or 'zachowana w zmiennych',
+                   Nazwy_zmiennych=', '.join(map(str, job_variables)) or 'brak', HOPS=host['HOPS'],
+                   Wybrany_jumphost=host['jumphost_for_hops'], Full_Credential=full_credential)
         values = {'hostname': host['name'], 'INVENTORY': host['INVENTORY'], 'ApplicationID': host['ApplicationID'], 'ostype': ostype_text, 'Job_Link': job_link or 'none', 'Job_Credentials': FULL_CREDENTIAL_SEPARATOR.join(host['Job_Credentials']) or 'none', 'Job_Variables': json.dumps(job_variables, ensure_ascii=False), 'HOPS': host['HOPS'], 'HOPS_COUNT': host['HOPS_COUNT'], 'jumphost_for_hops': host['jumphost_for_hops'], 'Extra_Credentials': extra_text, 'OS Credential': FULL_CREDENTIAL_SEPARATOR.join(credentials) or 'none', 'Full_Credential': full_credential, 'Job_Type': job_type, 'AWX_Status': 'found'}
         rows.append([values.get(name, '') for name in headers])
     return (headers, rows)
@@ -983,18 +1000,21 @@ def save_inventory_excel(headers, rows, output_file, settings=None, output_colum
         if client is not None:
             update_survey_columns(client, workbook.active, settings, cache=template_cache)
             jumphosts.populate_choices(workbook.active, client, FULL_CREDENTIAL_SEPARATOR)
-        excel.save_workbook(workbook, output_file, execution_column=settings['EXECUTION_COLUMN'], output_column=output_column)
+        excel.save_workbook(workbook, output_file, execution_column=settings['EXECUTION_COLUMN'], output_column=output_column, excel_columns=settings.get('EXCEL_COLUMNS'))
     finally:
         workbook.close()
 
 def inventory_main(argv=None):
+    started = time.perf_counter()
     args = parse_inventory_arguments(argv)
     configure_debug(args.debug, AWX_TOKEN if isinstance(AWX_TOKEN, str) else '')
     client = None
     try:
         settings = load_connection(args.debug)
         token = AWX_TOKEN.strip()
-        debug_variables('Configuration', {'AWX_URL': AWX_URL, 'VARIABLES_FILE': VARIABLES_FILE, 'AWX_TOKEN': '***', 'INVENTORY': INVENTORY, 'CREDENTIAL_VARIABLES': CREDENTIAL_VARIABLES, 'EXTRA_CREDENTIAL_VARIABLES': EXTRA_CREDENTIAL_VARIABLES, 'FULL_CREDENTIAL_SEPARATOR': FULL_CREDENTIAL_SEPARATOR, 'OUTPUT_FILE': OUTPUT_FILE, 'EXCEL_OUTPUT_FILE': EXCEL_OUTPUT_FILE, 'TIMEOUT': TIMEOUT, 'PAGE_SIZE': PAGE_SIZE, 'input_file': args.input_file})
+        debug_step('Eksport', 'ustawienia połączenia i plików', Serwer=AWX_URL, Inwentarz=INVENTORY,
+                   Limit_HTTP_s=TIMEOUT, Rekordy_na_stronę=PAGE_SIZE,
+                   Plik_JSON=OUTPUT_FILE, Plik_Excel=EXCEL_OUTPUT_FILE)
         hostnames = None
         input_file = args.input_file or common.read_execution_settings()["INPUT_FILE"]
         if input_file is not None:
@@ -1002,6 +1022,8 @@ def inventory_main(argv=None):
             if input_file.resolve() == EXCEL_OUTPUT_FILE.resolve():
                 raise AWXError('The input and output Excel files must use different paths. Change EXCEL_OUTPUT_FILE in the configuration.')
             hostnames = read_host_limits(input_file)
+        debug_step('Eksport', 'wybór hostów', Filtr=input_file or 'wszystkie hosty inwentarza',
+                   Liczba_nazw=len(hostnames) if hostnames is not None else 'bez ograniczenia')
         client = AWXClient(AWX_URL, token)
         report = fetch_report(client, INVENTORY, hostnames=hostnames)
         missing = report.get('missing_hosts', [])
@@ -1014,16 +1036,19 @@ def inventory_main(argv=None):
         output_column = common.read_output_settings()['OUTPUT_COLUMN']
         template_cache = {}
         headers, rows = build_inventory_rows(report, workflow, output_column, client=client, template_cache=template_cache)
+        debug_step('Eksport', 'przygotowano dane wynikowe', Wiersze=len(rows),
+                   Kolumny=', '.join(headers), Widoczne_kolumny=workflow.get('EXCEL_COLUMNS') or 'wszystkie')
         for row in rows:
             console.print_message(' , '.join((f"{header} : {value}" for header, value in zip(headers, row))), level="data")
         sys.stdout.flush()
-        LOGGER.debug('JSON export: %d hosts, file %s', report['host_count'], OUTPUT_FILE)
+        LOGGER.debug('Zapisuję eksport JSON: %s\n  Liczba hostów: %d', OUTPUT_FILE, report['host_count'])
         OUTPUT_FILE.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
         save_inventory_excel(headers, rows, EXCEL_OUTPUT_FILE, workflow, output_column, client=client, template_cache=template_cache)
-        debug_variables('Saved results', {'json': OUTPUT_FILE.resolve(), 'excel': EXCEL_OUTPUT_FILE.resolve(), 'rows': len(rows)})
+        debug_step('Eksport', 'zapisano wyniki', JSON=OUTPUT_FILE.resolve(), Excel=EXCEL_OUTPUT_FILE.resolve(), Wiersze=len(rows))
         return 0
     finally:
-        LOGGER.debug('Total API requests: %d', client.request_count if client is not None else 0)
+        debug_step('Eksport', 'koniec obsługi operacji', Żądania_API=client.request_count if client is not None else 0,
+                   Czas_s=f'{time.perf_counter() - started:.3f}')
 
 
 # RUNNER WORKFLOW
@@ -1155,16 +1180,19 @@ def build_execution_plan(sheet, client, settings, job_type_override=None, hostna
     for row_number in range(2, sheet.max_row + 1):
         host_value = sheet.cell(row_number, columns['hostname']).value
         if host_value is None or not str(host_value).strip():
+            LOGGER.debug('Plan wykonania: pomijam wiersz %d — pusta nazwa hosta.', row_number)
             continue
         hostname = str(host_value).strip()
         host_key = common.hostname_key(hostname)
         if selected is not None and host_key not in selected:
+            LOGGER.debug('Plan wykonania: pomijam wiersz %d — host %s nie należy do wybranej listy.', row_number, hostname)
             continue
         if not HOSTNAME_PATTERN.fullmatch(hostname):
             raise AWXError(f"Row {row_number}: hostname must be a single literal hostname, without Ansible patterns.")
         link_cell = sheet.cell(row_number, columns['job_link'])
         link = common.job_template_url(settings, str(link_cell.value or ''), override=job_url_override)
         if link.casefold() in ('', 'none'):
+            LOGGER.debug('Plan wykonania: pomijam wiersz %d — host %s nie ma szablonu zadania.', row_number, hostname)
             skipped_without_job += 1
             continue
         if not selected_job_url and link_cell.data_type == 'f':
@@ -1208,6 +1236,10 @@ def build_execution_plan(sheet, client, settings, job_type_override=None, hostna
                 raise AWXError(f"Host {hostname!r} has conflicting execution links/markers; check its rows.")
             host['execution'] = execution
         host['rows'].append(row_number)
+        debug_step('Plan wykonania', 'przypisano wiersz do hosta', Wiersz=row_number, Host=hostname,
+                   Szablon_ID=template_id, Źródło_szablonu='JOB_URL / --job-url' if selected_job_url else 'Job_Link',
+                   Nazwy_zmiennych=', '.join(map(str, variables)) or 'brak',
+                   Historia='istnieje wpis wykonania' if execution else 'nowe wykonanie')
     groups = {}
     existing = []
     for host in hosts.values():
@@ -1220,6 +1252,9 @@ def build_execution_plan(sheet, client, settings, job_type_override=None, hostna
         for start in range(0, len(group), settings['BATCH_SIZE']):
             entries = group[start:start + settings['BATCH_SIZE']]
             batches.append({'template_id': entries[0]['template_id'], 'link': entries[0]['link'], 'variables': entries[0]['variables'], 'entries': entries, 'credential_refs': entries[0]['credential_refs'], 'preserve_template_credentials': entries[0]['preserve_template_credentials'], 'job_type': entries[0]['job_type'], 'limit': ','.join((host['hostname'] for host in entries)), 'job_url_overridden': bool(selected_job_url)})
+    debug_step('Plan wykonania', 'utworzono paczki według szablonu, zmiennych i poświadczeń',
+               Unikalne_hosty=len(hosts), Paczki=len(batches), Hosty_z_historią=len(existing),
+               Hosty_bez_szablonu=skipped_without_job, Limit_hostów_na_paczkę=settings['BATCH_SIZE'])
     return (batches, existing, execution_column, skipped_without_job)
 
 def write_execution(sheet, column, entries, value):
@@ -1236,11 +1271,13 @@ def write_execution(sheet, column, entries, value):
 def lookup_credential(client, reference):
     """One cached name/ID lookup used by metadata merging and launching."""
     cache = client.credential_cache
+    LOGGER.debug('Poświadczenie %r: %s', reference,
+                 'korzystam z pamięci podręcznej' if reference in cache else 'wyszukuję nazwę lub ID w AWX')
     if reference not in cache:
         if re.fullmatch('[0-9]+', reference):
-            credential = client.get(f"credentials/{int(reference)}/", purpose=f"Resolve credential ID {reference}")
+            credential = client.get(f"credentials/{int(reference)}/", purpose=f"Odczyt poświadczenia o ID {reference}")
         else:
-            matches = list(client.items('credentials/', name=reference, order_by='id', purpose=f"Resolve credential named {reference!r}"))
+            matches = list(client.items('credentials/', name=reference, order_by='id', purpose=f"Wyszukanie poświadczenia o nazwie {reference!r}"))
             if not matches:
                 raise AWXError(f"Credential {reference!r} was not found or is not accessible.")
             if len(matches) != 1:
@@ -1312,15 +1349,23 @@ def resolve_credentials(client, batches, *, template_cache=None):
             identities[identity] = credential['id']
         batch['credentials'] = sorted(selected)
         batch['credential_types'] = {credential.get('credential_type') for credential in selected.values()}
+        debug_step('Poświadczenia', 'zakończono dobór dla paczki', Szablon_ID=batch.get('template_id', 'nie podano'),
+                   Hosty=batch.get('limit', 'nie podano'), Wybrane_ID=batch['credentials'],
+                   ID_odziedziczone_z_szablonu=sorted(inherited))
 
 def template_survey(client, template_id, cache):
+    LOGGER.debug('Szablon %s: %s', template_id,
+                 'korzystam z zapisanych ustawień i pytań ankiety' if template_id in cache else 'pobieram ustawienia uruchamiania i ankietę')
     if template_id not in cache:
-        details = client.get(f"job_templates/{template_id}/launch/", purpose=f"Check launch settings for template {template_id}")
+        details = client.get(f"job_templates/{template_id}/launch/", purpose=f"Sprawdzenie ustawień uruchamiania szablonu {template_id}")
         questions = []
         if details.get('survey_enabled'):
-            spec = client.get(f"job_templates/{template_id}/survey_spec/", purpose=f"Read survey for template {template_id}")
+            spec = client.get(f"job_templates/{template_id}/survey_spec/", purpose=f"Odczyt ankiety szablonu {template_id}")
             questions = survey.read_questions(spec, template_id)
         cache[template_id] = (details, questions, {})
+        debug_step('Ankieta', 'odczytano definicję szablonu', Szablon_ID=template_id,
+                   Ankieta_włączona=bool(details.get('survey_enabled')), Pytania=len(questions),
+                   Nazwy_zmiennych=', '.join(question['variable'] for question in questions) or 'brak')
     return cache[template_id]
 
 
@@ -1345,6 +1390,9 @@ def update_survey_columns(client, sheet, settings, *, job_url_override=None, cac
         template_survey(client, template_id, cache)
         template_rows.setdefault(template_id, []).append(row_number)
     added = survey_excel.populate_columns(sheet, template_rows, cache, settings, overwrite_configured=overwrite_configured)
+    debug_step('Ankiety w Excelu', 'uzupełniono kolumny odpowiedzi', Szablony=len(template_rows),
+               Wiersze=sum(map(len, template_rows.values())), Nowe_kolumny=', '.join(added) or 'brak',
+               Nadpisywanie_odpowiedzi_z_konfiguracji=overwrite_configured)
     if added:
         console.print_message('Added survey columns: ' + ', '.join(added), level='info')
     return cache
@@ -1356,6 +1404,11 @@ def validate_templates(client, batches, *, interactive=False, check_credentials=
     for batch in batches:
         template_id = batch['template_id']
         details, questions, prompted = template_survey(client, template_id, cache)
+        debug_step('Walidacja przed uruchomieniem', 'sprawdzam wymagania szablonu', Szablon_ID=template_id,
+                   Hosty=batch['limit'], Limit=bool(details.get('ask_limit_on_launch')),
+                   Poświadczenia=bool(details.get('ask_credential_on_launch')),
+                   Zmienne=bool(details.get('ask_variables_on_launch')), Ankieta=bool(details.get('survey_enabled')),
+                   Pytania_w_terminalu=interactive)
         if not details.get('ask_limit_on_launch'):
             raise AWXError(f"Template {template_id}: enable Prompt on launch for Limit to restrict each job to its batch.")
         if (details.get('defaults', {}).get('job_slice_count') or 1) > 1:
@@ -1394,12 +1447,14 @@ def validate_templates(client, batches, *, interactive=False, check_credentials=
         missing = [name for name in details.get('variables_needed_to_start', []) if name not in variables]
         if missing:
             raise AWXError(f"Template {template_id}: missing required Job_Variables: {', '.join(missing)}.")
+        LOGGER.debug('Szablon %s: walidacja paczki zakończona poprawnie\n  Nazwy zmiennych: %s\n  Wartości zmiennych pozostają ukryte.',
+                     template_id, ', '.join(map(str, batch['variables'])) or 'brak')
 
 
 def show_template_surveys(client, links):
     for template_id in links:
-        details = client.get(f"job_templates/{template_id}/launch/", purpose=f"Read survey state for template {template_id}")
-        spec = client.get(f"job_templates/{template_id}/survey_spec/", purpose=f"Read survey questions for template {template_id}")
+        details = client.get(f"job_templates/{template_id}/launch/", purpose=f"Odczyt stanu ankiety szablonu {template_id}")
+        spec = client.get(f"job_templates/{template_id}/survey_spec/", purpose=f"Odczyt pytań ankiety szablonu {template_id}")
         survey.display_questions(template_id, details.get('survey_enabled', False), survey.read_questions(spec or {'spec': []}, template_id))
 
 def resolve_execution_hostnames(client, batches, template_cache):
@@ -1419,7 +1474,7 @@ def resolve_execution_hostnames(client, batches, template_cache):
         names = common.unique_hostnames(entry['hostname'] for batch in inventory_batches for entry in batch['entries'])
         wanted = {common.hostname_key(name) for name in names}
         candidates = [host for host in client.items(f"inventories/{inventory_id}/hosts/",
-                                                   purpose=f"Resolve host spelling in template inventory {inventory_id}",
+                                                   purpose=f"Sprawdzenie dokładnej pisowni nazw hostów w inwentarzu szablonu {inventory_id}",
                                                    **host_name_filters(names))
                       if common.hostname_key(host['name']) in wanted]
         index = host_index(candidates)
@@ -1446,10 +1501,11 @@ def wait_for_job(client, job_id, settings, *, require_success=True):
     deadline = time.monotonic() + settings["JOB_WAIT_TIMEOUT"]
     last_status = None
     while True:
-        job = client.get(f"jobs/{job_id}/", purpose=f"Read status and metadata for job {job_id}")
+        job = client.get(f"jobs/{job_id}/", purpose=f"Odczyt statusu, metadanych i artefaktów zadania {job_id}")
         status = job.get("status")
         if status != last_status:
-            console.print_message(f"Job {job_id}: {status}", flush=True, level=console.job_status_level(status))
+            console.print_message(f"Zadanie {job_id}: {console.job_status_description(status)}.",
+                                  flush=True, level=console.job_status_level(status))
             last_status = status
         if status in ("successful", "failed", "error", "canceled"):
             if require_success and status != "successful":
@@ -1460,6 +1516,8 @@ def wait_for_job(client, job_id, settings, *, require_success=True):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise AWXError(f"Timed out waiting for job {job_id}; no further processing was performed.")
+        LOGGER.debug("Zadanie %s nadal trwa: kolejne sprawdzenie za %.3f s\n  Pozostały limit oczekiwania: %.3f s",
+                     job_id, min(settings["POLL_INTERVAL"], remaining), remaining)
         time.sleep(min(settings["POLL_INTERVAL"], remaining))
 
 def execute_plan(workbook, sheet, path, client, settings, batches, existing, execution_column):
@@ -1475,10 +1533,10 @@ def execute_plan(workbook, sheet, path, client, settings, batches, existing, exe
                 host_cell.value = entry['hostname']
                 host_cell.data_type = 's'
                 synchronise_full_credential(sheet, row_number, client=client)
-    excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=output_column)
+    excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=output_column, excel_columns=settings.get('EXCEL_COLUMNS'))
     for index, batch in enumerate(batches, start=1):
         template_id = batch['template_id']
-        console.print_message(f"Batch {index}/{len(batches)}: template={template_id}; job_type={batch['job_type'] or 'none'}; credentials={batch['credentials']}; hosts={batch['limit']}", flush=True, level="progress")
+        console.print_message(f"Batch {index}/{len(batches)}: template={template_id}\njob_type={batch['job_type'] or 'none'}\ncredentials={batch['credentials']}\nhosts={batch['limit']}", flush=True, level="progress")
         for entry in batch['entries']:
             for row_number in entry['rows']:
                 cell = sheet.cell(row_number, job_type_column)
@@ -1491,12 +1549,18 @@ def execute_plan(workbook, sheet, path, client, settings, batches, existing, exe
                     template_cell.data_type = 's'
                     template_cell.hyperlink = batch['link']
         marker = f"LAUNCH_PENDING template={template_id}; {datetime.now(timezone.utc).isoformat()}"
+        debug_step('Uruchamianie', 'zapisuję zamiar startu przed wysłaniem żądania', Paczka=f'{index}/{len(batches)}',
+                   Szablon_ID=template_id, Hosty=batch['limit'], Kolumna=settings['EXECUTION_COLUMN'],
+                   Znacznik='LAUNCH_PENDING — zabezpieczenie przed podwójnym uruchomieniem')
         write_execution(sheet, execution_column, batch['entries'], marker)
-        excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=output_column)
+        excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=output_column, excel_columns=settings.get('EXCEL_COLUMNS'))
         try:
             payload = {'limit': batch['limit'], 'extra_vars': batch['variables']}
             if batch['credentials']:
                 payload['credentials'] = batch['credentials']
+            debug_step('Uruchamianie', 'wysyłam żądanie startu zadania', Szablon_ID=template_id,
+                       Hosty=batch['limit'], ID_poświadczeń=batch.get('credentials', []),
+                       Nazwy_zmiennych=', '.join(map(str, batch['variables'])) or 'brak')
             result = client.post(f"job_templates/{template_id}/launch/", payload)
             job_id = result.get('job') or result.get('id')
             if type(job_id) is not int or job_id < 1:
@@ -1504,18 +1568,20 @@ def execute_plan(workbook, sheet, path, client, settings, batches, existing, exe
             link = job_url(batch['link'], client, job_id)
             console.print_message(f"Job {job_id}: {link}", flush=True, level="success")
             write_execution(sheet, execution_column, batch['entries'], link)
-            excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=output_column)
+            excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=output_column, excel_columns=settings.get('EXCEL_COLUMNS'))
+            debug_step('Uruchamianie', 'zapisano potwierdzony link zadania w Excelu', Zadanie_ID=job_id,
+                       Link=link, Plik=path, Oczekiwanie=settings['WAIT_FOR_COMPLETION'])
             if result.get('ignored_fields'):
                 raise AWXError(f"Job {job_id}: AWX ignored launch fields {', '.join(result['ignored_fields'])}; stopped further launches.")
             if settings['WAIT_FOR_COMPLETION']:
                 job = wait_for_job(client, job_id, settings, require_success=False)
                 write_job_artifacts(sheet, job, batch['entries'], client._resolve_url(f"jobs/{job_id}/"))
-                excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=output_column)
+                excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=output_column, excel_columns=settings.get('EXCEL_COLUMNS'))
                 if job['status'] != 'successful':
                     raise AWXError(f"Job {job_id} finished with status {job['status']}; remaining batches were not launched.")
             else:
                 write_job_artifacts(sheet, result, batch['entries'], client._resolve_url(f"jobs/{job_id}/"))
-                excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=output_column)
+                excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=output_column, excel_columns=settings.get('EXCEL_COLUMNS'))
         except BaseException:
             console.print_message('Stopped. Check the saved execution links/markers and AWX before retrying the affected batch.', file=sys.stderr, level="warning")
             raise
@@ -1526,6 +1592,8 @@ def add_selected_hosts(sheet, hostnames, client, connection, settings, *, job_ur
     existing = {common.hostname_key(sheet.cell(row, columns['hostname']).value)
                 for row in range(2, sheet.max_row + 1)}
     missing = [hostname for hostname in common.unique_hostnames(hostnames) if common.hostname_key(hostname) not in existing]
+    debug_step('Wybór hostów', 'porównano listę z arkuszem', Wybrane=len(hostnames),
+               Brakujące_w_Excelu=', '.join(missing) or 'brak')
     if not missing:
         return
     console.print_message(f"Fetching AWX metadata for {len(missing)} selected hosts missing from Excel.", flush=True, level="info")
@@ -1570,6 +1638,7 @@ def confirm_job_rerun(sheet, execution_column, entries):
 
 
 def execute_main(argv=None):
+    started = time.perf_counter()
     args = parse_execute_arguments(argv)
     if args.job_type is not None and (not args.job_type.strip()):
         raise AWXError('--job-type must be nonempty, e.g. install, reinstall, or update.')
@@ -1593,6 +1662,11 @@ def execute_main(argv=None):
     selected_hosts = common.normalize_hostnames(args.hosts, required=True) if args.hosts is not None else settings.get('HOSTS', [])
     selected_job_url = common.job_template_url(settings, override=args.job_url)
     path = workbook_path(args.input_file, connection, settings)
+    debug_step('Wykonanie', 'efektywne ustawienia uruchomienia', Plik=path,
+               Hosty=selected_hosts or 'wszystkie hosty arkusza', Szablon=selected_job_url or 'Job_Link z każdego wiersza',
+               Limit_hostów_na_paczkę=settings['BATCH_SIZE'], Tylko_podgląd=args.dry_run,
+               Oczekiwanie=settings['WAIT_FOR_COMPLETION'], Pytania_ankiety=interactive_survey,
+               Widoczne_kolumny=settings.get('EXCEL_COLUMNS') or 'wszystkie')
     client = AWXClient(connection['AWX_URL'], connection['AWX_TOKEN'].strip())
     template_cache = {}
     if selected_job_url:
@@ -1609,8 +1683,11 @@ def execute_main(argv=None):
         workbook = Workbook()
         sheet = workbook.active
         sheet.title = args.sheet or settings['SHEET_NAME']
+        LOGGER.debug('Wykonanie: plik nie istnieje — przygotowano nowy arkusz dla wybranych hostów.')
     try:
-        excel.prepare_sheet(sheet, settings['EXECUTION_COLUMN'], settings['OUTPUT_COLUMN'])
+        _, added = excel.prepare_sheet(sheet, settings['EXECUTION_COLUMN'], settings['OUTPUT_COLUMN'])
+        LOGGER.debug('Wykonanie: uzupełnione kolumny: %s\n  Hosty porządkuję według systemów: Windows, Linux, AIX.',
+                     ', '.join(added) or 'brak')
         if selected_hosts:
             add_selected_hosts(sheet, selected_hosts, client, connection, settings,
                                job_url_override=selected_job_url, template_cache=template_cache)
@@ -1622,8 +1699,10 @@ def execute_main(argv=None):
             links = {entry['template_id']: entry['link'] for entry in [*batches, *existing]}
             show_template_surveys(client, links)
             return 0
-        console.print_message(f"Input: {path}; batch size: {settings['BATCH_SIZE']}; batches: {len(batches)}; already recorded hosts: {len(existing)}; rows without job: {skipped}", flush=True, level="info")
+        console.print_message(f"Input: {path}\nbatch size: {settings['BATCH_SIZE']}\nbatches: {len(batches)}\nalready recorded hosts: {len(existing)}\nrows without job: {skipped}", flush=True, level="info")
         if args.dry_run:
+            LOGGER.debug('Podgląd wykonania: nie uruchamiam zadań i nie zapisuję pliku\n  Walidacja ankiety w AWX: %s',
+                         'włączona' if interactive_survey else 'wyłączona w zwykłym podglądzie')
             if interactive_survey:
                 rows = [row for batch in batches for entry in batch['entries'] for row in entry['rows']]
                 cache = update_survey_columns(client, sheet, settings, job_url_override=selected_job_url,
@@ -1635,13 +1714,14 @@ def execute_main(argv=None):
             for index, batch in enumerate(batches, start=1):
                 # No schema is fetched for an ordinary dry run, so mask all answer values.
                 preview = {key: '***' for key in batch['variables']}
-                console.print_message(f"Batch {index}: template={batch['template_id']}; limit={batch['limit']}; credentials={list(batch['credential_refs'])}; job_type={batch['job_type'] or 'none'}; extra_vars={json.dumps(preview, ensure_ascii=False)}", level="progress")
+                console.print_message(f"Batch {index}: template={batch['template_id']}\nlimit={batch['limit']}\ncredentials={list(batch['credential_refs'])}\njob_type={batch['job_type'] or 'none'}\nextra_vars={json.dumps(preview, ensure_ascii=False)}", level="progress")
             console.print_message('Dry run: no jobs launched and no workbook changes.', level="warning")
             return 0
         if any((entry['execution'].startswith('LAUNCH_PENDING') for entry in existing)):
             raise AWXError('An earlier launch has a LAUNCH_PENDING marker. Check AWX, then replace it with the job link or clear it only if no job was launched.')
         rerun_entries = []
         if not batches and existing:
+            LOGGER.debug('Wykonanie: wszystkie wybrane hosty mają historię\n  Ponowny start wymaga potwierdzenia w terminalu.')
             if not confirm_job_rerun(sheet, column, existing):
                 console.print_message('Ponowne uruchomienie anulowane.', level='warning')
                 return 0
@@ -1650,7 +1730,7 @@ def execute_main(argv=None):
                 sheet, client, settings, job_type_override=args.job_type, hostnames=selected_hosts or None,
                 job_url_override=selected_job_url or None, survey_overrides=survey_overrides)
         if not batches:
-            excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=settings['OUTPUT_COLUMN'])
+            excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=settings['OUTPUT_COLUMN'], excel_columns=settings.get('EXCEL_COLUMNS'))
             console.print_message('No new batches to launch.', level="warning")
             return 0
         rows = [row for batch in batches for entry in batch['entries'] for row in entry['rows']]
@@ -1662,6 +1742,7 @@ def execute_main(argv=None):
         resolve_credentials(client, batches, template_cache=cache)
         validate_templates(client, batches, interactive=interactive_survey, cache=cache)
         resolve_execution_hostnames(client, batches, cache)
+        LOGGER.debug('Wykonanie: przygotowanie zakończone — zweryfikowano szablony, poświadczenia, zmienne i nazwy hostów.')
         if settings['WAIT_FOR_COMPLETION']:
             recorded_jobs = {}
             previous = [(entry, True) for entry in existing] + [(entry, False) for entry in rerun_entries]
@@ -1678,6 +1759,8 @@ def execute_main(argv=None):
         return 0
     finally:
         workbook.close()
+        debug_step('Wykonanie', 'zamknięto plik Excel', Plik=path,
+                   Żądania_API=client.request_count, Czas_s=f'{time.perf_counter() - started:.3f}')
 
 
 # COLLECTOR WORKFLOW
@@ -1715,6 +1798,9 @@ def build_output_plan(sheet, client, settings):
         cell = sheet.cell(row_number, columns[execution_name])
         value = str(cell.value or '').strip()
         if value.casefold() in ('', 'none') or value.startswith('LAUNCH_PENDING'):
+            reason = ('zapisano zamiar uruchomienia (LAUNCH_PENDING), ale brak potwierdzonego linku\n  Sprawdź zadanie w AWX'
+                      if value.startswith('LAUNCH_PENDING') else 'brak linku do uruchomionego zadania')
+            LOGGER.debug('Pomijam wiersz %d: %s.', row_number, reason)
             skipped += 1
             continue
         if cell.data_type == 'f':
@@ -1742,10 +1828,10 @@ def job_inventory_name(client, job, cache):
         return 'unknown_inventory'
     if inventory_id not in cache:
         try:
-            details = client.get(f"inventories/{inventory_id}/", purpose=f"Read inventory name for ID {inventory_id}")
+            details = client.get(f"inventories/{inventory_id}/", purpose=f"Odczyt nazwy inwentarza o ID {inventory_id} do nazwy pliku TXT")
             cache[inventory_id] = str(details.get('name') or inventory_id)
         except AWXError:
-            LOGGER.debug('Inventory %s name is unavailable; using its ID in filenames', inventory_id)
+            LOGGER.debug('Nazwa inwentarza %s jest niedostępna\n  W nazwach plików używam jego ID.', inventory_id)
             cache[inventory_id] = str(inventory_id)
     return cache[inventory_id]
 
@@ -1834,19 +1920,47 @@ def write_output(sheet, column, row_number, content, text_path, *, label='Output
     cell.hyperlink = None
 
 def collect_outputs(workbook, sheet, path, output_directory, client, settings, jobs, column):
-    excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=settings['OUTPUT_COLUMN'])
+    started = time.perf_counter()
+    console.print_message('Przygotowuję i zapisuję arkusz przed pobieraniem wyników.', level='progress', flush=True)
+    excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=settings['OUTPUT_COLUMN'], excel_columns=settings.get('EXCEL_COLUMNS'))
     output_directory.mkdir(parents=True, exist_ok=True)
     inventory_names = {}
     failures = 0
     completed = 0
-    for job_id, entries in jobs.items():
+    saved_files = 0
+    updated_rows = 0
+    for index, (job_id, entries) in enumerate(jobs.items(), start=1):
         artifacts_written = False
+        log_written = False
+        stage = 'odczyt statusu i metadanych'
+        console.print_message(
+            f'[{index}/{len(jobs)}] Zadanie {job_id}: sprawdzam status i wyniki.\n'
+            f'Liczba powiązanych wierszy Excela: {len(entries)}.', level='progress', flush=True)
+        LOGGER.debug('Zadanie %s: wiersze arkusza do aktualizacji: %s', job_id,
+                     ', '.join(str(entry['row']) for entry in entries))
         try:
             job = read_job(client, job_id, settings)
+            if job.get('status') not in TERMINAL_STATUSES:
+                console.print_message(
+                    f'Zadanie {job_id} jeszcze się nie zakończyło. Pobieram log dostępny teraz.\n'
+                    'Ponowne uruchomienie skryptu uzupełni wynik.', level='warning')
+            elif job.get('status') != 'successful':
+                console.print_message(
+                    f'Zadanie {job_id} nie zakończyło się sukcesem. Pobieram jego log i artefakty do analizy.',
+                    level='warning')
+            stage = 'przygotowanie artefaktów i nazwy pliku'
             name = filename_part(job_inventory_name(client, job, inventory_names))
             write_job_artifacts(sheet, job, entries, client._resolve_url(f"jobs/{job_id}/"))
             artifacts_written = True
+            console.print_message(
+                f'Zadanie {job_id}: przygotowano Artifacts (JSON) i artifact filter '
+                f'(komunikaty message dopasowane do hostname).\nLiczba wierszy: {len(entries)}.', level='info')
+            stage = 'pobieranie pełnego logu z AWX'
+            console.print_message(f'Zadanie {job_id}: pobieram pełny log wykonania (stdout).', level='progress', flush=True)
             content = client.stdout(job_id)
+            console.print_message(f'Zadanie {job_id}: pobrano {len(content)} znaków logu.'
+                                  + (' AWX zwrócił pusty log.' if not content else ''), level='info')
+            stage = 'zapis pełnego logu do plików TXT'
             files = {}
             for entry in entries:
                 os_name = filename_part(entry['ostype'])
@@ -1854,17 +1968,45 @@ def collect_outputs(workbook, sheet, path, output_directory, client, settings, j
                     text_path = output_directory / f"{job_id}.{name}.{os_name}.txt"
                     save_text(text_path, content)
                     files[os_name] = text_path
-                    console.print_message(f"Job {job_id}: {text_path}", flush=True, level="success")
+                    saved_files += 1
+                    console.print_message(f'Zadanie {job_id}: zapisano pełny log TXT (UTF-8): {text_path}',
+                                          flush=True, level='success')
+            clean_length = len(ILLEGAL_CHARACTERS_RE.sub('', content))
+            if clean_length > EXCEL_CELL_LIMIT:
+                console.print_message(
+                    f'Zadanie {job_id}: log przekracza limit komórki Excela ({EXCEL_CELL_LIMIT} znaków). '
+                    'W Excelu zapisuję skrót z adresem pełnego pliku TXT.', level='warning')
+            if clean_length != len(content):
+                LOGGER.debug('Zadanie %s: usuwam %d znaków niedozwolonych w Excelu\n  Plik TXT zachowuje pełną treść.',
+                             job_id, len(content) - clean_length)
+            stage = 'wpisywanie logu do komórek Excela'
             for entry in entries:
                 write_output(sheet, column, entry['row'], content, files[filename_part(entry['ostype'])])
+                updated_rows += 1
+            log_written = True
             completed += 1
         except AWXError as exc:
             failures += 1
-            console.print_message(f"Error: {exc}", file=sys.stderr, level="error")
+            console.print_message(
+                f'Zadanie {job_id}: błąd pobierania wyników.\nEtap: {stage}.\n{exc}',
+                file=sys.stderr, level='error', flush=True)
         finally:
             if artifacts_written:
-                excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=settings['OUTPUT_COLUMN'])
-    console.print_message(f"Collected: {completed} jobs; errors: {failures}; workbook: {path}", flush=True, level="error" if failures else "success")
+                excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=settings['OUTPUT_COLUMN'], excel_columns=settings.get('EXCEL_COLUMNS'))
+                if log_written:
+                    console.print_message(
+                        f'Zadanie {job_id}: zapisano Excel — log w kolumnie {settings["OUTPUT_COLUMN"]!r}, '
+                        f'artefakty w Artifacts i artifact filter.\nLiczba wierszy: {len(entries)}.', level='success')
+                else:
+                    console.print_message(
+                        f'Zadanie {job_id}: zapisano artefakty w Excelu. Pobieranie logu nie zostało ukończone.\n'
+                        'Dotychczasowa zawartość kolumny logu pozostaje zachowana.', level='warning')
+    console.print_message(
+        f'Zakończono pobieranie.\nZadania z pobranymi logami: {completed}/{len(jobs)}\n'
+        f'Błędy pobierania: {failures}\nZaktualizowane wiersze logów: {updated_rows}\n'
+        f'Zapisane pliki TXT: {saved_files}\nCzas: {time.perf_counter() - started:.1f} s.',
+        flush=True, level='error' if failures else 'success')
+    console.print_message(f'Plik Excel z wynikami: {path}', level='info')
     return 1 if failures else 0
 
 def output_main(argv=None):
@@ -1877,15 +2019,42 @@ def output_main(argv=None):
     path = workbook_path(args.input_file, connection, settings, launch_settings)
     output_directory = Path(args.output_dir or settings['OUTPUT_DIRECTORY']).resolve()
     client = AWXClient(connection['AWX_URL'], connection['AWX_TOKEN'].strip())
+    console.print_message(f'Odczytuję plik Excel: {path}', level='info', flush=True)
     workbook, sheet = open_workbook_sheet(path, settings["SHEET_NAME"], args.sheet)
     try:
-        excel.prepare_sheet(sheet, settings['EXECUTION_COLUMN'], settings['OUTPUT_COLUMN'])
+        _, added = excel.prepare_sheet(sheet, settings['EXECUTION_COLUMN'], settings['OUTPUT_COLUMN'])
+        LOGGER.debug('Arkusz %r: uzupełnione brakujące kolumny: %s', sheet.title, ', '.join(added) or 'brak')
         excel.sort_host_rows(sheet)
         jobs, column, skipped = build_output_plan(sheet, client, settings)
-        console.print_message(f"Input: {path}; unique jobs: {len(jobs)}; rows without a job link: {skipped}", flush=True, level="info")
+        console.print_message(
+            f'Arkusz {sheet.title!r}\nWiersze danych: {max(0, sheet.max_row - 1)}\n'
+            f'Zadania do odczytu: {len(jobs)}\nPowiązane wiersze: {sum(map(len, jobs.values()))}\n'
+            f'Pominięte wiersze (brak linku lub LAUNCH_PENDING): {skipped}.', level='info')
+        console.print_message(
+            f'Linki do zadań odczytuję z kolumny {settings["EXECUTION_COLUMN"]!r}\n'
+            f'Logi zapisuję w {settings["OUTPUT_COLUMN"]!r}\nPełne pliki TXT: {output_directory}.', level='info')
+        console.print_message(
+            'Każde zadanie pobieram raz, a jego log kopiuję do wszystkich powiązanych wierszy. '
+            'Artifacts zawiera artefakty zadania w JSON, a artifact filter — komunikaty message dla hosta z danego wiersza.',
+            level='info')
+        if settings['WAIT_FOR_COMPLETION']:
+            console.print_message(
+                f'Oczekiwanie włączone: sprawdzam status co {settings["POLL_INTERVAL"]} s\n'
+                f'Limit oczekiwania na zadanie: {settings["JOB_WAIT_TIMEOUT"]} s.', level='info')
+        else:
+            console.print_message(
+                'Oczekiwanie wyłączone: pobieram aktualnie dostępne wyniki, również zadań jeszcze trwających.',
+                level='info')
+        if settings.get('EXCEL_COLUMNS'):
+            LOGGER.debug('Widoczne kolumny Excela: %s\n  Pozostałe dane pozostają w ukrytych kolumnach.',
+                         ', '.join(settings['EXCEL_COLUMNS']))
+        else:
+            LOGGER.debug('Widoczne kolumny Excela: wszystkie (EXCEL_COLUMNS jest puste).')
         if not jobs:
-            excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=settings['OUTPUT_COLUMN'])
-            console.print_message('No job output to collect.', level="warning")
+            excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=settings['OUTPUT_COLUMN'], excel_columns=settings.get('EXCEL_COLUMNS'))
+            console.print_message(
+                'Brak zadań z potwierdzonym linkiem do pobrania wyników. Zapisano układ arkusza.\n'
+                'Nie wysłano żądań pobrania logów do AWX.', level='warning')
             return 0
         return collect_outputs(workbook, sheet, path, output_directory, client, settings, jobs, column)
     finally:
@@ -1949,17 +2118,22 @@ def refresh_sheet(sheet, host_rows, columns, source_column, metadata, headers, e
             hostname = host_rows[row_number]
             values = {'hostname': hostname, **metadata.get(common.hostname_key(hostname), missing_values)}
         elif preserve_unidentified_rows:
+            LOGGER.debug('Odświeżanie: pozostawiam wiersz %d bez zmian — brak rozpoznanej kolumny hostów.', row_number)
             continue
         elif any((cell.value is not None and str(cell.value).strip() for cell in sheet[row_number])):
             values = {name: '' for name in ['hostname', *headers]}
             values['AWX_Status'] = 'no_hostname'
         else:
             continue
+        debug_step('Odświeżanie wiersza', 'aktualizuję metadane hosta', Wiersz=row_number,
+                   Host=values.get('hostname') or 'brak', AWX_Status=values.get('AWX_Status'),
+                   Chronione_dane='linki wykonań, logi, artefakty i kolumny użytkownika')
         for name, value in values.items():
             cell = sheet.cell(row_number, columns[name.casefold()])
             if (name == 'jumphost_for_hops' and row_number in host_rows and common.hostname_key(host_rows[row_number]) in metadata
                     and previous_context == (values.get('ApplicationID'), values.get('HOPS_COUNT'))
                     and cell.value is not None and str(cell.value).strip()):
+                LOGGER.debug('Wiersz %d: zachowuję wybrany jumphost — ApplicationID i HOPS_COUNT nie zmieniły się.', row_number)
                 continue
             cell.value = value
             numeric = name == 'HOPS_COUNT' and (value is None or type(value) is int)
@@ -1975,19 +2149,27 @@ def refresh_sheet(sheet, host_rows, columns, source_column, metadata, headers, e
         excel.sort_host_rows(sheet)
 
 def refresh_main(argv=None):
+    started = time.perf_counter()
     args = parse_refresh_arguments(argv)
     connection = load_connection(args.debug)
     settings = read_execution_settings()
     settings['OUTPUT_COLUMN'] = common.read_output_settings()['OUTPUT_COLUMN']
     path = workbook_path(args.input_file, connection, settings)
 
+    debug_step('Odświeżanie', 'ustawienia operacji', Plik=path, Inwentarz=connection['INVENTORY'],
+               Kolumna_hostów=args.host_column or 'automatyczne wykrywanie',
+               Kolumna_wykonań=settings['EXECUTION_COLUMN'], Kolumna_logów=settings['OUTPUT_COLUMN'],
+               Widoczne_kolumny=settings.get('EXCEL_COLUMNS') or 'wszystkie')
     workbook, sheet = open_workbook_sheet(path, settings["SHEET_NAME"], args.sheet)
     try:
         sheet_name = sheet.title
         had_host_column = any((str(cell.value or '').strip().casefold() in HOST_COLUMNS for cell in sheet[1])) or args.host_column is not None
         host_rows, columns, source_column = read_host_rows(sheet, args.host_column)
         hostnames = common.unique_hostnames(host_rows.values())
-        console.print_message(f"Input: {path}; worksheet: {sheet_name}; unique hosts: {len(hostnames)}", flush=True, level="info")
+        debug_step('Odświeżanie', 'odczytano hosty z arkusza', Arkusz=sheet_name,
+                   Kolumna_źródłowa=get_column_letter(source_column), Wiersze_z_hostami=len(host_rows),
+                   Unikalne_hosty=len(hostnames), Powtórzone_wiersze=len(host_rows) - len(hostnames))
+        console.print_message(f"Input: {path}\nworksheet: {sheet_name}\nunique hosts: {len(hostnames)}", flush=True, level="info")
         client = None
         template_cache = {}
         if hostnames:
@@ -1997,6 +2179,9 @@ def refresh_main(argv=None):
             console.print_message('No hostnames in Excel. Updating column headers without querying AWX.', flush=True, level="warning")
             report = {'hosts': [], 'host_count': 0, 'missing_hosts': []}
         metadata, headers = metadata_by_host(report, settings, client=client, template_cache=template_cache)
+        debug_step('Odświeżanie', 'porównano hosty z AWX', Znalezione=len(metadata),
+                   Brakujące=', '.join(report.get('missing_hosts', [])) or 'brak',
+                   Aktualizowane_kolumny=', '.join(headers))
         protected = {settings['EXECUTION_COLUMN'].casefold(), 'exceiute_job', settings['OUTPUT_COLUMN'].casefold()}
         managed = {name.casefold() for name in ['hostname', *headers]}
         if protected & managed or columns.get(settings['EXECUTION_COLUMN'].casefold()) == source_column or columns.get(settings['OUTPUT_COLUMN'].casefold()) == source_column:
@@ -2005,11 +2190,13 @@ def refresh_main(argv=None):
         if hostnames:
             update_survey_columns(client, sheet, settings, overwrite_configured=True, cache=template_cache)
             jumphosts.populate_choices(sheet, client, FULL_CREDENTIAL_SEPARATOR)
-        excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=settings['OUTPUT_COLUMN'])
+        excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=settings['OUTPUT_COLUMN'], excel_columns=settings.get('EXCEL_COLUMNS'))
         missing = report.get('missing_hosts', [])
         if missing:
             console.print_message(f"Not found in AWX ({len(missing)}): {', '.join(missing)}", file=sys.stderr, level="warning")
-        console.print_message(f"Refreshed: {report['host_count']} unique hosts; not found: {len(missing)}; saved: {path}", flush=True, level="warning" if missing else "success")
+        console.print_message(f"Refreshed: {report['host_count']} unique hosts\nnot found: {len(missing)}\nsaved: {path}", flush=True, level="warning" if missing else "success")
+        debug_step('Odświeżanie', 'zapisano wyniki', Plik=path, Arkusz=sheet_name,
+                   Żądania_API=client.request_count if client else 0, Czas_s=f'{time.perf_counter() - started:.3f}')
         return 0
     finally:
         workbook.close()

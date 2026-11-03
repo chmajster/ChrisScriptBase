@@ -44,7 +44,7 @@ def credential_options(client, application_id, hop_count, separator=', '):
     key = application_id.casefold()
     if key not in cache:
         cache[key] = list(client.items('credentials/', name__icontains=application_id, order_by='id',
-                                      purpose=f'Find jumphost credentials for ApplicationID {application_id!r}'))
+                                      purpose=f'Wyszukanie poświadczeń jumphostów dla ApplicationID {application_id!r}'))
     credentials = cache[key]
     names = Counter(credential['name'] for credential in credentials)
     application_pattern = re.compile(r'(?<![a-z0-9])' + re.escape(application_id) + r'(?![a-z0-9])', re.IGNORECASE)

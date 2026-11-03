@@ -37,11 +37,11 @@ INVENTORY_KEYS = (
 EXECUTION_KEYS = (
     "INPUT_FILE", "SHEET_NAME", "BATCH_SIZE", "EXECUTION_COLUMN", "JOB_TYPE", "JOB_TYPE_VARIABLE",
     "WAIT_FOR_COMPLETION", "POLL_INTERVAL", "JOB_WAIT_TIMEOUT", "HOSTS", "JOB_URL",
-    "SURVEY_ANSWERS", "SURVEY_INTERACTIVE", "SURVEY_EXCEL_DEFAULTS",
+    "SURVEY_ANSWERS", "SURVEY_INTERACTIVE", "SURVEY_EXCEL_DEFAULTS", "EXCEL_COLUMNS",
 )
 OUTPUT_KEYS = (
     "INPUT_FILE", "SHEET_NAME", "EXECUTION_COLUMN", "OUTPUT_COLUMN", "OUTPUT_DIRECTORY",
-    "WAIT_FOR_COMPLETION", "POLL_INTERVAL", "JOB_WAIT_TIMEOUT",
+    "WAIT_FOR_COMPLETION", "POLL_INTERVAL", "JOB_WAIT_TIMEOUT", "EXCEL_COLUMNS",
 )
 RUNTIME_KEYS = ("DEBUG", "DRY_RUN", "HOST_COLUMN", "COLOR")
 SETTING_NAMES = frozenset((*INVENTORY_KEYS, *EXECUTION_KEYS, *OUTPUT_KEYS, *RUNTIME_KEYS))
@@ -411,10 +411,30 @@ def read_inventory_settings(settings_file=None):
     return group_settings(INVENTORY_KEYS, settings_file, "inventory")
 
 
+def normalize_excel_columns(value):
+    """Sprawdź listę widocznych kolumn; None i [] oznaczają wszystkie kolumny."""
+    if value is None:
+        return []
+    if not isinstance(value, (list, tuple)):
+        raise AWXError("EXCEL_COLUMNS musi być listą nazw kolumn; [] oznacza wszystkie kolumny.")
+    names = []
+    seen = set()
+    for name in value:
+        if not isinstance(name, str) or not name.strip():
+            raise AWXError("EXCEL_COLUMNS musi zawierać niepuste nazwy kolumn.")
+        name = name.strip()
+        if name.casefold() in seen:
+            raise AWXError(f"Powtórzona nazwa kolumny w EXCEL_COLUMNS: {name!r}.")
+        seen.add(name.casefold())
+        names.append(name)
+    return names
+
+
 def read_execution_settings(settings_file=None):
     from .awx_survey import answer_mapping
 
     settings = group_settings(EXECUTION_KEYS, settings_file, "execute")
+    settings["EXCEL_COLUMNS"] = normalize_excel_columns(settings["EXCEL_COLUMNS"])
     settings["SURVEY_ANSWERS"] = answer_mapping(settings["SURVEY_ANSWERS"])
     settings["SURVEY_EXCEL_DEFAULTS"] = answer_mapping(settings["SURVEY_EXCEL_DEFAULTS"], "SURVEY_EXCEL_DEFAULTS")
     if type(settings["SURVEY_INTERACTIVE"]) is not bool:
@@ -455,6 +475,7 @@ def read_execution_settings(settings_file=None):
 
 def read_output_settings(settings_file=None):
     settings = group_settings(OUTPUT_KEYS, settings_file, "output")
+    settings["EXCEL_COLUMNS"] = normalize_excel_columns(settings["EXCEL_COLUMNS"])
     for name in ("INPUT_FILE", "SHEET_NAME", "EXECUTION_COLUMN", "OUTPUT_COLUMN", "OUTPUT_DIRECTORY"):
         value = settings[name]
         if value is None and name in ("INPUT_FILE", "SHEET_NAME", "EXECUTION_COLUMN"):

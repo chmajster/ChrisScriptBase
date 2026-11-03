@@ -27,6 +27,10 @@ Full_Credential pomija credentiale Machine już przypisane do szablonu joba.
 AWX_Status: found = znaleziony, not_found = brak w AWX, no_hostname = pusty host.
 Przy pustej liście przygotowuje nagłówki bez pobierania hostów z AWX.
 
+Tryb -d pokazuje rozpoznaną kolumnę hostów, powtórzenia i dopasowania do AWX.
+Opisuje aktualizację każdego wiersza, zachowanie historii i wyboru jumphosta,
+synchronizację odpowiedzi ankiet oraz zapis pliku z liczbą żądań i czasem operacji.
+
 Domyślne ustawienia: awx_variable. Nadpisania tego launchera: VARIABLES poniżej.
 Argumenty komendy mają pierwszeństwo. Implementacja znajduje się w lib/.
 """
@@ -43,6 +47,8 @@ from lib.awx import run
 # Kolejność: argumenty komendy > VARIABLES > REFRESH_OVERRIDES w awx_variable
 # > wspólne ustawienia z awx_variable. Pozostałe zmienne można dopisać tymi samymi nazwami.
 VARIABLES = {
+    # Widoczne kolumny; [] pokazuje wszystkie. Pozostałe są ukrywane z zachowaniem danych.
+    # "EXCEL_COLUMNS": ['hostname', 'ostype', 'AWX_Status', 'Uwagi'],
     # Plik .xlsx aktualizowany w miejscu. None wybiera EXCEL_OUTPUT_FILE.
     # "INPUT_FILE": 'hosts.xlsx',
     # Inventory, w którym wyszukiwane są hosty: nazwa lub numeryczne ID.

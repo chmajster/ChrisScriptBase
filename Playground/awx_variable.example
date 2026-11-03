@@ -1,3 +1,7 @@
+# Widoczne kolumny w Excelu; [] pokazuje wszystkie.
+# Pozostałe kolumny są ukrywane z zachowaniem danych; własne kolumny dodawane jako puste.
+EXCEL_COLUMNS = ['hostname', 'ostype', 'AWX_Status', 'exceiute_job', 'output', 'Uwagi']
+
 # Przyklad sekcji survey do wklejenia do istniejacego awx_variable.
 # SURVEY_EXCEL_DEFAULTS wypelnia nowe/puste komorki wykrytych kolumn Survey_...
 # Refresh nadpisuje tez wypelnione komorki odpowiedziami ustawionymi w konfiguracji.

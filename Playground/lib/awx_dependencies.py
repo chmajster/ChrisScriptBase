@@ -37,7 +37,7 @@ def ensure_virtual_environment():
 
     try:
         if not environment.exists():
-            print_message(f"Creating virtual environment: {environment}",
+            print_message(f"Tworzę środowisko Python z zależnościami skryptów AWX: {environment}",
                           level="info", file=sys.stderr, flush=True)
             venv.EnvBuilder(with_pip=True).create(environment)
         if not (environment / "pyvenv.cfg").is_file() or not interpreter.is_file():
@@ -52,7 +52,7 @@ def ensure_virtual_environment():
             main_spec = getattr(sys.modules["__main__"], "__spec__", None)
             arguments = (["-m", main_spec.name, *sys.argv[1:]]
                          if main_spec is not None else list(sys.argv))
-        print_message(f"Restarting with virtual environment: {interpreter}",
+        print_message(f"Uruchamiam skrypt ponownie w środowisku Python projektu: {interpreter}",
                       level="info", file=sys.stderr, flush=True)
         sys.stdout.flush()
         sys.stderr.flush()
