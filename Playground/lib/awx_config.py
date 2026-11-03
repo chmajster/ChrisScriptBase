@@ -26,10 +26,19 @@ VARIABLES_FILE = PROJECT_ROOT / "awx_variable"
 EXECUTION_SETTINGS_FILE = VARIABLES_FILE
 OUTPUT_SETTINGS_FILE = VARIABLES_FILE
 METADATA_COLUMNS = (
-    "hostname", "INVENTORY", "ApplicationID", "ostype", "Job_Link", "Job_Credentials", "Job_Variables", "HOPS", "HOPS_COUNT", "jumphost_for_hops", "Extra_Credentials",
+    "hostname", "INVENTORY", "ApplicationID", "ostype", "template_job_name", "Job_Link", "Job_Credentials", "Job_Variables", "HOPS", "HOPS_COUNT", "jumphost_for_hops", "Extra_Credentials",
     "OS Credential", "Full_Credential", "Job_Type", "AWX_Status",
 )
 ARTIFACT_COLUMNS = ("Artifacts", "artifact filter")
+CONNECTION_KEYS = ("AWX_URL", "AWX_TOKEN", "TIMEOUT", "PAGE_SIZE")
+TEMPLATE_KEYS = ("JOB_TEMPLATE_AUTO_DISCOVERY", "JOB_TEMPLATE_ORGANIZATION",
+                 "JOB_TEMPLATE_NAME_PATTERN", "JOB_TEMPLATE_OS_NAMES")
+TEMPLATE_DEFAULTS = {
+    "JOB_TEMPLATE_AUTO_DISCOVERY": False,
+    "JOB_TEMPLATE_ORGANIZATION": "",
+    "JOB_TEMPLATE_NAME_PATTERN": "*zabbix*it2*{os_name}*",
+    "JOB_TEMPLATE_OS_NAMES": {"linux": "unix", "aix": "unix", "windows": "window"},
+}
 INVENTORY_KEYS = (
     "AWX_URL", "AWX_TOKEN", "INVENTORY", "CREDENTIAL_VARIABLES", "EXTRA_CREDENTIAL_VARIABLES",
     "FULL_CREDENTIAL_SEPARATOR", "OUTPUT_FILE", "EXCEL_OUTPUT_FILE", "TIMEOUT", "PAGE_SIZE", "OS_JOBS",
@@ -38,7 +47,7 @@ EXECUTION_KEYS = (
     "INPUT_FILE", "SHEET_NAME", "BATCH_SIZE", "EXECUTION_COLUMN", "JOB_TYPE", "JOB_TYPE_VARIABLE",
     "WAIT_FOR_COMPLETION", "POLL_INTERVAL", "JOB_WAIT_TIMEOUT", "HOSTS", "JOB_URL",
     "SURVEY_ANSWERS", "SURVEY_INTERACTIVE", "SURVEY_EXCEL_DEFAULTS", "EXCEL_COLUMNS",
-    "REFRESH_INVENTORY_PATTERN",
+    "REFRESH_INVENTORY_PATTERN", *TEMPLATE_KEYS,
 )
 OUTPUT_KEYS = (
     "INPUT_FILE", "SHEET_NAME", "EXECUTION_COLUMN", "OUTPUT_COLUMN", "OUTPUT_DIRECTORY",
@@ -51,6 +60,7 @@ OPERATION_SCOPES = {
     "refresh": "REFRESH_OVERRIDES",
     "execute": "EXECUTE_OVERRIDES",
     "output": "OUTPUT_OVERRIDES",
+    "templates": "TEMPLATES_OVERRIDES",
 }
 _ACTIVE = ContextVar("awx_launcher_configuration", default=None)
 HOSTNAME_PATTERN = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*\Z")
@@ -431,10 +441,45 @@ def normalize_excel_columns(value):
     return names
 
 
+def normalize_template_settings(settings, *, require_organization=False):
+    for name, default in TEMPLATE_DEFAULTS.items():
+        if settings.get(name) is None:
+            settings[name] = deepcopy(default)
+    if type(settings['JOB_TEMPLATE_AUTO_DISCOVERY']) is not bool:
+        raise AWXError('JOB_TEMPLATE_AUTO_DISCOVERY must be True or False.')
+    organization = settings['JOB_TEMPLATE_ORGANIZATION']
+    if isinstance(organization, str):
+        organization = organization.strip()
+        settings['JOB_TEMPLATE_ORGANIZATION'] = organization
+    if not (isinstance(organization, str) or type(organization) is int and organization > 0):
+        raise AWXError('JOB_TEMPLATE_ORGANIZATION must be an organization name or a positive ID.')
+    if (require_organization or settings['JOB_TEMPLATE_AUTO_DISCOVERY']) and not organization:
+        raise AWXError('Set JOB_TEMPLATE_ORGANIZATION to an organization name/ID, or use --organization.')
+    pattern = settings['JOB_TEMPLATE_NAME_PATTERN']
+    if not isinstance(pattern, str) or not pattern.strip():
+        raise AWXError('JOB_TEMPLATE_NAME_PATTERN must be a nonempty template name pattern.')
+    settings['JOB_TEMPLATE_NAME_PATTERN'] = pattern.strip()
+    names = settings['JOB_TEMPLATE_OS_NAMES']
+    if not isinstance(names, dict) or not names or any(
+        not isinstance(key, str) or not key.strip() or not isinstance(value, str) or not value.strip()
+        for key, value in names.items()
+    ):
+        raise AWXError('JOB_TEMPLATE_OS_NAMES must map operating systems to nonempty name fragments.')
+    settings['JOB_TEMPLATE_OS_NAMES'] = {key.strip().casefold(): value.strip() for key, value in names.items()}
+    return settings
+
+
+def read_template_settings():
+    settings = group_settings((*CONNECTION_KEYS, *TEMPLATE_KEYS, 'REFRESH_INVENTORY_PATTERN'), None, 'templates')
+    settings['REFRESH_INVENTORY_PATTERN'] = settings['REFRESH_INVENTORY_PATTERN'] or '*_mirror_inventory'
+    return settings
+
+
 def read_execution_settings(settings_file=None):
     from .awx_survey import answer_mapping
 
     settings = group_settings(EXECUTION_KEYS, settings_file, "execute")
+    normalize_template_settings(settings)
     pattern = settings["REFRESH_INVENTORY_PATTERN"]
     if pattern is None:
         pattern = "*_mirror_inventory"

@@ -39,6 +39,7 @@ class FullCredentialTests(unittest.TestCase):
         self.client = awx.AWXClient('https://awx.example.test', 'test-token')
         self.client.get = Mock(side_effect=AssertionError('Unexpected AWX request'))
         self.client.items = Mock(side_effect=AssertionError('Unexpected AWX request'))
+        self.client.template_detail_cache[7] = {'id': 7, 'name': 'template-job'}
         for credential_id, name, kind, credential_type in credentials:
             credential = {'id': credential_id, 'name': name, 'kind': kind,
                           'credential_type': credential_type, 'inputs': {}}

@@ -9,12 +9,22 @@ Uruchomienie:
 Źródłem wyszukiwania są nazwy hostów, po jednej w komórce. Automatycznie
 rozpoznawane kolumny: hostname, host_limit, host, hosts. Własną nazwę można
 podać przez HOST_COLUMN lub --host-column.
+Przecinki z nazw hostów są usuwane przed wyszukiwaniem i zapisem do Excela,
+np. server1, staje się server1. Komórka zawierająca same przecinki jest pusta.
 Refresh ignoruje INVENTORY z konfiguracji oraz poprzednie INVENTORY/ApplicationID
 w Excelu. Wyszukuje hosty w inventory pasujących do REFRESH_INVENTORY_PATTERN
 z awx_variable (domyślnie *_mirror_inventory). * oznacza dowolny ciąg, ? jeden znak.
 ApplicationID jest dynamiczne, pobierane z nazwy znalezionego inventory.
 Jeden plik może zawierać hosty z wielu inventory. Kilka dopasowań tej samej nazwy
 hosta powoduje błąd z nazwami inventory, bez zapisu Excela.
+
+JOB_TEMPLATE_AUTO_DISCOVERY=True dobiera szablon po JOB_TEMPLATE_ORGANIZATION
+i JOB_TEMPLATE_NAME_PATTERN, zamiast JOB_URL / url z OS_JOBS. Wzorzec obsługuje
+{hostname}, {application_id}, {ostype} i {os_name}. Domyślnie Linux/AIX -> unix,
+Windows -> window; mapowanie określa JOB_TEMPLATE_OS_NAMES. Nazwa szablonu trafia
+do template_job_name, a link do Job_Link. Zmienne szablonu uzupełniają Job_Variables;
+OS_JOBS[system]['variables'] i JOB_TYPE zachowują pierwszeństwo. Brak lub kilka
+pasujących szablonów dla hosta powoduje błąd przed zapisem Excela.
 
 Skrypt zapisuje ten sam plik. Odświeża INVENTORY, ApplicationID, ostype,
 credentiale, szablon joba, jego zmienne i akcję. ApplicationID po INVENTORY
@@ -61,6 +71,11 @@ VARIABLES = {
     # Wzorzec nazw inventory do wyszukiwania hostów. INVENTORY jest ignorowane.
     # * oznacza dynamiczny prefiks ApplicationID; ? dopasowuje jeden znak.
     # "REFRESH_INVENTORY_PATTERN": '*_mirror_inventory',
+    # True: dobór Job_Link po danych hosta i wzorcu; template_job_name = nazwa z AWX.
+    # "JOB_TEMPLATE_AUTO_DISCOVERY": True,
+    # "JOB_TEMPLATE_ORGANIZATION": 'IT2',
+    # "JOB_TEMPLATE_NAME_PATTERN": '*zabbix*it2*{os_name}*',
+    # "JOB_TEMPLATE_OS_NAMES": {'linux': 'unix', 'aix': 'unix', 'windows': 'window'},
     # Bez --sheet: użyty zostanie ten arkusz, a jeśli go brak — aktywny arkusz.
     # "SHEET_NAME": 'Results',
     # None włącza automatyczne rozpoznawanie kolumny. Jedna nazwa hosta na wiersz.
@@ -84,7 +99,7 @@ VARIABLES = {
     # },
     # Wspólne odpowiedzi survey; {} nie dodaje nadpisań.
     # "SURVEY_ANSWERS": {},
-    # Job_Link: JOB_URL ma pierwszeństwo przed OS_JOBS[ostype]['url'].
+    # Przy JOB_TEMPLATE_AUTO_DISCOVERY=False: JOB_URL ma pierwszeństwo przed OS_JOBS[ostype]['url'].
     # Pusty JOB_URL zachowuje dobór szablonów osobno dla systemów hostów.
     # "JOB_URL": 'https://awx.example.com/#/templates/job_template/7/details',
     # Zmiany OS_JOBS i credentiali można tu ustawić tak samo jak w awx_variable.

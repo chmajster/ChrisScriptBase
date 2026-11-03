@@ -1,6 +1,8 @@
 """Refresh discovery and workbook regressions using an offline AWX fixture."""
 
 import io
+import json
+import re
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -60,12 +62,23 @@ class RefreshTests(unittest.TestCase):
         self.client = awx.AWXClient(self.settings['AWX_URL'], self.settings['AWX_TOKEN'])
         self.client.items = Mock(side_effect=self.items)
         self.client.get = Mock(side_effect=self.get)
+        self.client.post = Mock(side_effect=AssertionError('Unexpected launch request'))
+        self.organizations = [{'id': 13, 'name': 'Operations'}]
+        self.job_templates = [
+            {'id': 7, 'name': 'Zabbix IT2 Unix install', 'extra_vars': '{"from_awx": true, "action": "update"}'},
+            {'id': 8, 'name': 'Zabbix IT2 Window install', 'extra_vars': '{"from_awx": true}'},
+            {'id': 9, 'name': 'Unrelated template', 'extra_vars': '{}'},
+        ]
 
     def host(self, number, name, inventory):
         return {'id': number, 'name': name, 'inventory': inventory,
                 'summary_fields': {'inventory': {'name': self.inventories[inventory]}}}
 
     def items(self, path, **filters):
+        if path == 'organizations/':
+            return list(self.organizations)
+        if path == 'organizations/13/job_templates/':
+            return list(self.job_templates)
         if path == 'hosts/':
             # Deliberately return extra results to check local exact-name/pattern validation.
             return list(self.candidates)
@@ -85,6 +98,12 @@ class RefreshTests(unittest.TestCase):
         raise AssertionError(f'Unexpected AWX list request: {path}')
 
     def get(self, path, **options):
+        if path.startswith('organizations/'):
+            number = int(path.split('/')[1])
+            return next(item for item in self.organizations if item['id'] == number)
+        if re.fullmatch(r'job_templates/[0-9]+/', path):
+            number = int(path.split('/')[1])
+            return next(item for item in self.job_templates if item['id'] == number)
         if path.endswith('/script/?all=1&hostvars=1'):
             number = int(path.split('/')[1])
             self.assertIn(number, (10, 20))
@@ -176,7 +195,7 @@ class RefreshTests(unittest.TestCase):
 
     def test_refresh_populates_all_metadata_and_preserves_history(self):
         self.write_config()
-        self.write_workbook(['linux1', 'WIN1', 'missing', 'LINUX1'])
+        self.write_workbook([' ,linux1,, ', ' WIN1, ', 'missing,', 'LINUX1'])
         code, output, _ = self.refresh()
         self.assertEqual(code, 0, output)
         book = load_workbook(self.path)
@@ -208,6 +227,8 @@ class RefreshTests(unittest.TestCase):
             self.assertEqual(row['survey_mode'], 'install')
             self.assertEqual(row['awx_status'], 'found')
             self.assertIn('job_template/', row['job_link'])
+            self.assertEqual(row['template_job_name'], 'Zabbix IT2 Window install' if app == 'B42'
+                             else 'Zabbix IT2 Unix install')
             self.assertEqual(row['job_variables'], '{"action": "install"}')
         self.assertEqual(book['Notes']['A1'].value, 'keep other sheet')
 
@@ -244,6 +265,117 @@ class RefreshTests(unittest.TestCase):
         self.addCleanup(book.close)
         columns = awx.excel.read_columns(book.active)
         self.assertTrue(all(name.casefold() in columns for name in awx.excel.METADATA_COLUMNS))
+
+    def test_auto_template_refresh_uses_window_and_writes_name_link_and_defaults(self):
+        self.write_config(JOB_TEMPLATE_AUTO_DISCOVERY=True, JOB_TEMPLATE_ORGANIZATION='Operations',
+                          JOB_URL='https://awx.example.test/api/v2/job_templates/999/')
+        self.write_workbook(['linux1,', 'Linux2', 'WIN1,'])
+        code, output, _ = self.refresh()
+        self.assertEqual(code, 0, output)
+        book = load_workbook(self.path)
+        self.addCleanup(book.close)
+        columns = awx.excel.read_columns(book.active)
+        self.assertLess(columns['template_job_name'], columns['job_link'])
+        for number in range(2, book.active.max_row + 1):
+            os = book.active.cell(number, columns['ostype']).value
+            template_id = 8 if os == 'windows' else 7
+            self.assertEqual(book.active.cell(number, columns['template_job_name']).value,
+                             self.job_templates[template_id - 7]['name'])
+            self.assertEqual(book.active.cell(number, columns['job_link']).value,
+                             f'https://awx.example.test/api/v2/job_templates/{template_id}/')
+            variables = json.loads(book.active.cell(number, columns['job_variables']).value)
+            self.assertTrue(variables['from_awx'])
+            self.assertEqual(variables['action'], 'install')
+            self.assertEqual(book.active.cell(number, columns['output']).value, 'previous output')
+            self.assertEqual(book.active.cell(number, columns['survey_mode']).value, 'install')
+        searches = [call for call in self.client.items.call_args_list
+                    if call.args[0] == 'organizations/13/job_templates/']
+        self.assertEqual(len(searches), 2)
+        self.assertTrue(any('window' in call.kwargs['name__iregex'] for call in searches))
+        self.assertFalse(any('windows' in call.kwargs['name__iregex'] for call in searches))
+        self.assertFalse(any('999' in call.args[0] for call in self.client.get.call_args_list))
+        self.client.post.assert_not_called()
+
+    def test_auto_template_missing_or_ambiguous_does_not_save(self):
+        for ambiguous in (False, True):
+            with self.subTest(ambiguous=ambiguous):
+                if ambiguous:
+                    self.job_templates.append({'id': 17, 'name': 'Zabbix IT2 Unix other'})
+                else:
+                    self.job_templates = [item for item in self.job_templates if item['id'] != 7]
+                self.client.template_search_cache.clear()
+                self.write_config(JOB_TEMPLATE_AUTO_DISCOVERY=True, JOB_TEMPLATE_ORGANIZATION=13)
+                self.write_workbook(['Linux1'])
+                original = self.path.read_bytes()
+                code, output, _ = self.refresh()
+                self.assertEqual(code, 1, output)
+                self.assertIn('no job template' if not ambiguous else 'ambiguous job templates', output)
+                self.assertEqual(self.path.read_bytes(), original)
+                if not ambiguous:
+                    self.job_templates.insert(0, {'id': 7, 'name': 'Zabbix IT2 Unix install'})
+
+    def test_template_console_only_displays_matching_jobs(self):
+        self.write_config()
+        before = set(Path(self.directory.name).iterdir())
+        captured = io.StringIO()
+        with patch.object(awx, 'AWXClient', return_value=self.client):
+            with redirect_stdout(captured), redirect_stderr(captured):
+                code = awx.run('templates', ['--organization', 'operations'], variables_file=self.config_path)
+        self.assertEqual(code, 0, captured.getvalue())
+        self.assertIn('Zabbix IT2 Unix install', captured.getvalue())
+        self.assertIn('Zabbix IT2 Window install', captured.getvalue())
+        self.assertNotIn('Unrelated template', captured.getvalue())
+        self.assertEqual(set(Path(self.directory.name).iterdir()), before)
+        self.client.get.assert_not_called()
+        self.client.post.assert_not_called()
+
+    def test_template_console_cli_overrides_scoped_pattern_and_organization(self):
+        self.write_config(TEMPLATES_OVERRIDES={'JOB_TEMPLATE_NAME_PATTERN': '*unix*',
+                                              'JOB_TEMPLATE_ORGANIZATION': 'wrong-organization'})
+        captured = io.StringIO()
+        with patch.object(awx, 'AWXClient', return_value=self.client):
+            with redirect_stdout(captured), redirect_stderr(captured):
+                code = awx.run('templates', ['--organization', '13', '--name-pattern', '*window*'],
+                               variables_file=self.config_path)
+        self.assertEqual(code, 0, captured.getvalue())
+        self.assertIn('Zabbix IT2 Window install', captured.getvalue())
+        self.assertNotIn('Zabbix IT2 Unix install', captured.getvalue())
+
+    def test_template_console_can_derive_window_from_hostname(self):
+        self.write_config(JOB_TEMPLATE_ORGANIZATION='Operations')
+        captured = io.StringIO()
+        with patch.object(awx, 'AWXClient', return_value=self.client):
+            with redirect_stdout(captured), redirect_stderr(captured):
+                code = awx.run('templates', ['--hostname', 'WIN1'], variables_file=self.config_path)
+        self.assertEqual(code, 0, captured.getvalue())
+        self.assertIn('Zabbix IT2 Window install', captured.getvalue())
+        self.assertNotIn('Zabbix IT2 Unix install', captured.getvalue())
+        self.client.post.assert_not_called()
+
+    def test_template_placeholders_are_literal_and_reject_unknown_values(self):
+        settings = awx.common.normalize_template_settings({
+            'JOB_TEMPLATE_NAME_PATTERN': '*{hostname}*{application_id}*{os_name}*',
+        })
+        expression, = awx.templates.name_regexes(settings, {'name': 'win.1', 'INVENTORY': 'app+1_mirror_inventory',
+                                                          'ostype': 'windows'})
+        self.assertIsNotNone(re.fullmatch(expression, 'job win.1 app+1 window'))
+        self.assertIsNone(re.fullmatch(expression, 'job winX1 app+1 window'))
+        settings['JOB_TEMPLATE_NAME_PATTERN'] = '*{unsupported}*'
+        with self.assertRaisesRegex(awx.AWXError, 'supports only'):
+            awx.templates.name_regexes(settings)
+        settings['JOB_TEMPLATE_NAME_PATTERN'] = '*{os_name}*'
+        with self.assertRaisesRegex(awx.AWXError, 'Cannot expand'):
+            awx.templates.name_regexes(settings, {'name': 'server1', 'ostype': 'unknown'})
+
+    def test_auto_template_requires_organization_before_querying_awx(self):
+        self.write_config(JOB_TEMPLATE_AUTO_DISCOVERY=True)
+        self.write_workbook(['Linux1'])
+        original = self.path.read_bytes()
+        code, output, factory = self.refresh()
+        self.assertEqual(code, 1, output)
+        self.assertIn('JOB_TEMPLATE_ORGANIZATION', output)
+        factory.assert_not_called()
+        self.assertEqual(self.path.read_bytes(), original)
 
 
 if __name__ == '__main__':

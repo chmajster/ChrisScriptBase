@@ -83,6 +83,18 @@ EXCEL_COLUMNS = []
 # ApplicationID jest wyznaczane z nazwy znalezionego inventory przed pierwszym _.
 REFRESH_INVENTORY_PATTERN = '*_mirror_inventory'
 
+# Wyszukiwanie szablonów: python awx_find_templates.py --organization 'nazwa organizacji'.
+# True: refresh dobiera Job_Link automatycznie zamiast JOB_URL / url z OS_JOBS.
+# False: refresh używa dotychczasowego wyboru szablonu.
+JOB_TEMPLATE_AUTO_DISCOVERY = False
+# Dokładna nazwa organizacji AWX albo jej ID jako liczba. Wymagane przy auto/search.
+JOB_TEMPLATE_ORGANIZATION = ''
+# Wzorzec całej nazwy: * dowolny ciąg, ? jeden znak; wielkość liter bez znaczenia.
+# Zmienne: {os_name}, {ostype}, {hostname}, {application_id}.
+JOB_TEMPLATE_NAME_PATTERN = '*zabbix*it2*{os_name}*'
+# Nazwa systemu używana w szukanej nazwie szablonu. Windows -> window.
+JOB_TEMPLATE_OS_NAMES = {'linux': 'unix', 'aix': 'unix', 'windows': 'window'}
+
 # Nagłówek kolumny hostów przy odświeżaniu; None włącza automatyczne wykrywanie.
 HOST_COLUMN = None
 # Wykonanie: [] wybiera wszystkie hosty z Excela; można podać listę nazw
@@ -163,3 +175,5 @@ REFRESH_OVERRIDES = {}
 EXECUTE_OVERRIDES = {}
 # Pobieranie logów: awx_job_output.py.
 OUTPUT_OVERRIDES = {}
+# Wyszukiwanie szablonów w konsoli: awx_find_templates.py.
+TEMPLATES_OVERRIDES = {}

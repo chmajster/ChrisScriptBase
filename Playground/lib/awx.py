@@ -34,6 +34,7 @@ from . import awx_excel as excel
 from . import awx_jumphosts as jumphosts
 from . import awx_survey as survey
 from . import awx_survey_excel as survey_excel
+from . import awx_templates as templates
 from .awx_config import AWXError, apply_job_type
 from .awx_excel import ensure_columns
 from openpyxl import Workbook, load_workbook
@@ -88,8 +89,21 @@ def debug_step(operation, stage, **details):
         lines.extend(f'  {name.replace("_", " ")}: {value}' for name, value in details.items())
         LOGGER.debug('\n'.join(lines))
 
+def validate_connection_settings(settings):
+    for name in ('AWX_URL', 'AWX_TOKEN'):
+        if not isinstance(settings[name], str) or not settings[name].strip():
+            raise AWXError(f"{name} must be a nonempty string.")
+    timeout = settings['TIMEOUT']
+    if type(timeout) not in (int, float) or timeout <= 0 or not math.isfinite(timeout):
+        raise AWXError('TIMEOUT must be a positive number of seconds.')
+    if type(settings['PAGE_SIZE']) is not int or settings['PAGE_SIZE'] <= 0:
+        raise AWXError('PAGE_SIZE must be a positive integer.')
+    return settings
+
+
 def validate_inventory_settings(settings, *, require_inventory=True):
     """Validate setting types and prepare output file paths."""
+    validate_connection_settings(settings)
     jobs = settings['OS_JOBS']
     if not isinstance(jobs, dict) or any((os not in ('windows', 'linux', 'aix') for os in jobs)):
         raise AWXError('OS_JOBS must be a dictionary with windows, linux, or aix keys.')
@@ -105,9 +119,6 @@ def validate_inventory_settings(settings, *, require_inventory=True):
             json.dumps(job.get('variables', {}), allow_nan=False)
         except (TypeError, ValueError):
             raise AWXError(f"OS_JOBS[{os!r}].variables must contain valid JSON values.") from None
-    for name in ('AWX_URL', 'AWX_TOKEN'):
-        if not isinstance(settings[name], str) or not settings[name].strip():
-            raise AWXError(f"{name} must be a nonempty string.")
     inventory = settings['INVENTORY']
     if require_inventory and not (isinstance(inventory, str) and inventory.strip() or (type(inventory) is int and inventory > 0)):
         raise AWXError('INVENTORY must be a name or a positive numeric ID.')
@@ -124,11 +135,6 @@ def validate_inventory_settings(settings, *, require_inventory=True):
         if not isinstance(value, (str, Path)) or not str(value).strip():
             raise AWXError(f"{name} must be a file path.")
         settings[name] = Path(value)
-    timeout = settings['TIMEOUT']
-    if type(timeout) not in (int, float) or timeout <= 0 or (isinstance(timeout, float) and (not math.isfinite(timeout))):
-        raise AWXError('TIMEOUT must be a positive number of seconds.')
-    if type(settings['PAGE_SIZE']) is not int or settings['PAGE_SIZE'] <= 0:
-        raise AWXError('PAGE_SIZE must be a positive integer.')
     return settings
 
 def read_inventory_settings(variables_file=None, *, require_inventory=True):
@@ -139,6 +145,10 @@ def read_inventory_settings(variables_file=None, *, require_inventory=True):
 def apply_settings(settings):
     """Make validated settings available to the rest of the script."""
     globals().update({name: settings[name] for name in INVENTORY_DEFAULTS})
+
+
+def apply_connection_settings(settings):
+    globals().update({name: settings[name] for name in common.CONNECTION_KEYS})
 
 
 def load_connection(debug=False, *, require_inventory=True):
@@ -216,6 +226,12 @@ Przykłady:
   ApplicationID jest dynamiczne: pierwszy człon nazwy znalezionego inventory przed _.
   Hosty w jednym pliku mogą pochodzić z różnych pasujących inventory.
   Kilka dopasowań tej samej nazwy hosta powoduje błąd przed zapisem pliku.
+  JOB_TEMPLATE_AUTO_DISCOVERY=True dobiera Job_Link po organizacji i wzorcu nazwy,
+  zamiast JOB_URL / url z OS_JOBS. template_job_name pokazuje nazwę szablonu.
+  {os_name}: Linux/AIX -> unix, Windows -> window (JOB_TEMPLATE_OS_NAMES).
+  Wzorzec obsługuje też {hostname}, {application_id} i {ostype}.
+  Job_Variables: zmienne znalezionego szablonu, nadpisane przez OS_JOBS i JOB_TYPE.
+  Brak lub kilka szablonów dla hosta powoduje błąd przed zapisem pliku.
   Odświeża INVENTORY, ApplicationID, ostype, credentiale, szablon, zmienne i akcję joba.
   Job_Link: JOB_URL, jeśli ustawiony; w przeciwnym razie url z OS_JOBS dla ostype.
   Job_Credentials pokazuje aktualne credentiale szablonu, niezależnie od Extra_Credentials.
@@ -235,12 +251,27 @@ Przykłady:
 
 Wejście i statusy:
   Jedna nazwa hosta w komórce. Automatyczne kolumny: hostname, host_limit, host, hosts.
+  Przecinki są usuwane z nazw hostów przed wyszukiwaniem i zapisem do Excela.
   --host-column wskazuje własną nazwę kolumny. Pusta lista przygotowuje nagłówki.
   AWX_Status: found = znaleziony, not_found = brak w AWX, no_hostname = pusty host.
 
 Przykłady:
   python .\awx_refresh_excel.py -file .\awx_inventory_hosts.xlsx -d
   python .\awx_refresh_excel.py -file .\hosty.xlsx --sheet Results --host-column host_limit""",
+    "templates": r"""Działanie:
+  Wyświetla nazwy, ID i linki szablonów z JOB_TEMPLATE_ORGANIZATION (nazwa lub ID).
+  JOB_TEMPLATE_NAME_PATTERN dopasowuje całą nazwę bez rozróżniania wielkich liter.
+  * oznacza dowolny ciąg, ? jeden znak. Domyślnie: *zabbix*it2*{os_name}*.
+  {os_name} pochodzi z JOB_TEMPLATE_OS_NAMES: Linux/AIX -> unix, Windows -> window.
+  Bez --hostname wyszukuje warianty dla wszystkich systemów z tego słownika.
+  Z --hostname pobiera ostype i ApplicationID hosta z REFRESH_INVENTORY_PATTERN.
+  Wzorzec może korzystać z {hostname}, {application_id}, {ostype}, {os_name}.
+  Ustawienia można nadpisać w VARIABLES launchera i TEMPLATES_OVERRIDES.
+
+Przykłady:
+  python .\awx_find_templates.py --organization IT2
+  python .\awx_find_templates.py --organization IT2 --name-pattern '*zabbix*it2*window*'
+  python .\awx_find_templates.py --organization IT2 --hostname server1""",
     "execute": r"""Działanie:
   Czyta hostname, Job_Link, Job_Variables i Full_Credential z Excela.
   Łączy hosty o wspólnym szablonie, zmiennych i credentialach w paczki BATCH_SIZE.
@@ -360,12 +391,13 @@ CONFIGURATION_HELP = """Ustawienia:
   Wspólna implementacja wszystkich launcherów: katalog lib/."""
 
 
-def operation_parser(description, *, with_sheet=True, operation=None):
+def operation_parser(description, *, with_sheet=True, with_file=True, operation=None):
     detail = OPERATION_HELP.get(operation, "")
     parser = argparse.ArgumentParser(description=description, formatter_class=argparse.RawDescriptionHelpFormatter,
                                      epilog=(detail + "\n\n" if detail else "") + CONFIGURATION_HELP)
     file_help = "Filtr hostów z kolumny host_limit; wynik zapisuje pod EXCEL_OUTPUT_FILE." if operation == "inventory" else "Plik .xlsx aktualizowany w miejscu; nadpisuje INPUT_FILE."
-    parser.add_argument("-file", "--file", dest="input_file", type=Path, help=file_help)
+    if with_file:
+        parser.add_argument("-file", "--file", dest="input_file", type=Path, help=file_help)
     if with_sheet:
         parser.add_argument("--sheet", help="Nazwa arkusza; domyślnie SHEET_NAME lub aktywny arkusz.")
     parser.add_argument("-d", "-debug", "--debug", action="store_true", default=None, help="Szczegóły zapytań API; token jest maskowany.")
@@ -464,6 +496,9 @@ class AWXClient:
         self.sensitive_values = {token} if token else set()
         self.credential_cache = {}
         self.jumphost_credential_cache = {}
+        self.organization_cache = {}
+        self.template_search_cache = {}
+        self.template_detail_cache = {}
         self.opener = build_opener(NoRedirect())
         self.request_count = 0
         LOGGER.debug('Połączenie z AWX: bazowy adres API dla żądań: %s', self.base_url)
@@ -951,7 +986,8 @@ def host_hops(host):
     return host_hop_details(host)[0]
 
 
-def build_inventory_rows(report, settings=None, output_column=None, *, client=None, template_cache=None, job_url_override=None):
+def build_inventory_rows(report, settings=None, output_column=None, *, client=None, template_cache=None, job_url_override=None,
+                         auto_find_template=False):
     """Build shared output rows and add extra and full credentials to JSON host records."""
     settings = common.read_execution_settings() if settings is None else settings
     output_column = common.read_output_settings()['OUTPUT_COLUMN'] if output_column is None else output_column
@@ -966,18 +1002,32 @@ def build_inventory_rows(report, settings=None, output_column=None, *, client=No
         ostype = host.get('ostype')
         ostype_text = 'none' if ostype is None else ostype if isinstance(ostype, str) else json.dumps(ostype, ensure_ascii=False)
         job = OS_JOBS.get(ostype.strip().casefold(), {}) if isinstance(ostype, str) else {}
+        host['INVENTORY'] = host.get('INVENTORY') or report.get('inventory', {}).get('name') or 'none'
+        host['ApplicationID'] = host['INVENTORY'].split('_', 1)[0].strip() or 'none'
         job_link = common.job_template_url(settings, job.get('url', ''), override=job_url_override)
+        selected_template = None
         try:
+            if auto_find_template and not job_url_override:
+                if client is None:
+                    raise AWXError('Automatic template discovery requires an AWX connection.')
+                selected_template = templates.template_for_host(client, settings, host)
+                job_link = client._resolve_url(f"job_templates/{selected_template['id']}/")
+            elif client is not None and job_link:
+                selected_template = templates.template_details(client, template_id_from_link(job_link, client))
+            host['template_job_name'] = selected_template['name'] if selected_template else 'none'
             template_credentials = template_credential_entries(client, job_link, template_cache)
             template_machines = template_machine_entries(client, template_credentials)
         except AWXError as exc:
-            if common.job_template_url(settings, override=job_url_override):
+            if auto_find_template and not job_url_override:
+                source = 'JOB_TEMPLATE_ORGANIZATION / JOB_TEMPLATE_NAME_PATTERN'
+            elif common.job_template_url(settings, override=job_url_override):
                 source = 'JOB_URL / --job-url'
             elif isinstance(ostype, str):
                 source = f"OS_JOBS[{ostype.strip().casefold()!r}]['url']"
             else:
                 source = 'OS_JOBS'
-            raise AWXError(client.redact(f'Host {host["name"]!r}, ostype={ostype!r}, source: {source}: {exc}')) from None
+            message = f'Host {host["name"]!r}, ostype={ostype!r}, source: {source}: {exc}'
+            raise AWXError(client.redact(message) if client is not None else message) from None
         inherited = template_credentials if not configured_extras else []
         host['Job_Credentials'] = [reference for reference, _ in template_credentials]
         extra_credentials = configured_extras or [reference for reference, _ in inherited]
@@ -1006,11 +1056,10 @@ def build_inventory_rows(report, settings=None, output_column=None, *, client=No
         host['Extra_Credentials'] = list(extra_credentials)
         LOGGER.debug('Host %s: dodatkowe poświadczenia: %d\n  Źródło: %s', host['name'], len(extra_credentials),
                      'EXTRA_CREDENTIAL_VARIABLES' if configured_extras else 'szablon zadania')
-        job_variables = deepcopy(job.get('variables', {}))
+        job_variables = templates.template_variables(selected_template) if auto_find_template and selected_template else {}
+        job_variables.update(deepcopy(job.get('variables', {})))
         host['Job_Link'] = job_link
         host['Job_Variables'] = job_variables
-        host['INVENTORY'] = host.get('INVENTORY') or report.get('inventory', {}).get('name') or 'none'
-        host['ApplicationID'] = host['INVENTORY'].split('_', 1)[0].strip() or 'none'
         credentials = list(dict.fromkeys((value for variable in primary_variables for value in values_by_variable.get(variable, []))))
         job_type = common.apply_job_type(job_variables, None, settings)
         host['Job_Type'] = job_type
@@ -1027,7 +1076,7 @@ def build_inventory_rows(report, settings=None, output_column=None, *, client=No
                    Szablon=job_link or 'brak', Akcja=job_type or 'zachowana w zmiennych',
                    Nazwy_zmiennych=', '.join(map(str, job_variables)) or 'brak', HOPS=host['HOPS'],
                    Wybrany_jumphost=host['jumphost_for_hops'], Full_Credential=full_credential)
-        values = {'hostname': host['name'], 'INVENTORY': host['INVENTORY'], 'ApplicationID': host['ApplicationID'], 'ostype': ostype_text, 'Job_Link': job_link or 'none', 'Job_Credentials': FULL_CREDENTIAL_SEPARATOR.join(host['Job_Credentials']) or 'none', 'Job_Variables': json.dumps(job_variables, ensure_ascii=False), 'HOPS': host['HOPS'], 'HOPS_COUNT': host['HOPS_COUNT'], 'jumphost_for_hops': host['jumphost_for_hops'], 'Extra_Credentials': extra_text, 'OS Credential': FULL_CREDENTIAL_SEPARATOR.join(credentials) or 'none', 'Full_Credential': full_credential, 'Job_Type': job_type, 'AWX_Status': 'found'}
+        values = {'hostname': host['name'], 'INVENTORY': host['INVENTORY'], 'ApplicationID': host['ApplicationID'], 'ostype': ostype_text, 'template_job_name': host['template_job_name'], 'Job_Link': job_link or 'none', 'Job_Credentials': FULL_CREDENTIAL_SEPARATOR.join(host['Job_Credentials']) or 'none', 'Job_Variables': json.dumps(job_variables, ensure_ascii=False), 'HOPS': host['HOPS'], 'HOPS_COUNT': host['HOPS_COUNT'], 'jumphost_for_hops': host['jumphost_for_hops'], 'Extra_Credentials': extra_text, 'OS Credential': FULL_CREDENTIAL_SEPARATOR.join(credentials) or 'none', 'Full_Credential': full_credential, 'Job_Type': job_type, 'AWX_Status': 'found'}
         rows.append([values.get(name, '') for name in headers])
     return (headers, rows)
 
@@ -2132,16 +2181,18 @@ def read_host_rows(sheet, host_column=None):
         cell = sheet.cell(row_number, columns[selected])
         if cell.value is None or not str(cell.value).strip():
             continue
-        hostname = str(cell.value).strip()
-        if cell.data_type == 'f' or not HOSTNAME_PATTERN.fullmatch(hostname):
+        hostname = str(cell.value).replace(',', '').strip()
+        if cell.data_type == 'f' or (hostname and not HOSTNAME_PATTERN.fullmatch(hostname)):
             raise AWXError(f"Row {row_number}: the host column must contain one literal hostname per cell.")
-        rows[row_number] = hostname
+        if hostname:
+            rows[row_number] = hostname
     return (rows, columns, columns[selected])
 
 def metadata_by_host(report, settings, *, client=None, template_cache=None):
     """Use exactly the same host records as the inventory generator."""
     headers, rows = build_inventory_rows(report, settings, settings.get('OUTPUT_COLUMN', 'output'),
-                                        client=client, template_cache=template_cache)
+                                        client=client, template_cache=template_cache,
+                                        auto_find_template=settings.get('JOB_TEMPLATE_AUTO_DISCOVERY', False))
     metadata = {}
     for row in rows:
         record = dict(zip(headers, row))
@@ -2233,7 +2284,8 @@ def refresh_main(argv=None):
             raise AWXError('The host or metadata column conflicts with a job history column.')
         refresh_sheet(sheet, host_rows, columns, source_column, metadata, headers, execution_column=settings['EXECUTION_COLUMN'], preserve_unidentified_rows=not had_host_column, output_column=settings['OUTPUT_COLUMN'])
         if hostnames:
-            update_survey_columns(client, sheet, settings, overwrite_configured=True, cache=template_cache)
+            update_survey_columns(client, sheet, settings, overwrite_configured=True, cache=template_cache,
+                                  job_url_override='' if settings['JOB_TEMPLATE_AUTO_DISCOVERY'] else None)
             jumphosts.populate_choices(sheet, client, FULL_CREDENTIAL_SEPARATOR)
         excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=settings['OUTPUT_COLUMN'], excel_columns=settings.get('EXCEL_COLUMNS'))
         missing = report.get('missing_hosts', [])
@@ -2252,6 +2304,7 @@ OPERATIONS = {
     "refresh": refresh_main,
     "execute": execute_main,
     "output": output_main,
+    "templates": templates.main,
 }
 
 
@@ -2271,7 +2324,7 @@ def run(operation=None, argv=None, *, variables=None, variables_file=None):
                 description="AWX: eksport hostów, odświeżanie Excela, uruchamianie jobów i pobieranie logów.",
                 epilog="Pomoc operacji: python -m lib.awx refresh --help. Ustawienia domyślne: awx_variable.")
             parser.add_argument("operation", choices=OPERATIONS,
-                                help="inventory: nowy eksport; refresh: aktualizacja; execute: joby; output: logi.")
+                                help="inventory: nowy eksport; refresh: aktualizacja; execute: joby; output: logi; templates: wyszukiwanie szablonów.")
             arguments = list(sys.argv[1:] if argv is None else argv)
             selected = parser.parse_args(arguments[:1] if arguments and arguments[0] in OPERATIONS else arguments)
             operation = selected.operation

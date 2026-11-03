@@ -6,6 +6,14 @@ EXCEL_COLUMNS = ['hostname', 'ostype', 'AWX_Status', 'exceiute_job', 'output', '
 # Ignoruje INVENTORY. * to dowolny ciąg znaków (dynamiczne ApplicationID), ? jeden znak.
 REFRESH_INVENTORY_PATTERN = '*_mirror_inventory'
 
+# True włącza dobór Job_Link przy refresh po organizacji i nazwie szablonu.
+JOB_TEMPLATE_AUTO_DISCOVERY = False
+JOB_TEMPLATE_ORGANIZATION = ''  # Dokładna nazwa organizacji lub numeryczne ID.
+JOB_TEMPLATE_NAME_PATTERN = '*zabbix*it2*{os_name}*'
+JOB_TEMPLATE_OS_NAMES = {'linux': 'unix', 'aix': 'unix', 'windows': 'window'}
+# Opcjonalne nadpisania dla awx_find_templates.py.
+TEMPLATES_OVERRIDES = {}
+
 # Przyklad sekcji survey do wklejenia do istniejacego awx_variable.
 # SURVEY_EXCEL_DEFAULTS wypelnia nowe/puste komorki wykrytych kolumn Survey_...
 # Refresh nadpisuje tez wypelnione komorki odpowiedziami ustawionymi w konfiguracji.
