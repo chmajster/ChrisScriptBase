@@ -28,6 +28,9 @@ W Full_Credential credential hosta zastępuje domyślny credential szablonu
 tego samego typu (poza Vault). Jawne dodatki z konfiguracji są zachowywane.
 Hosty z takim samym szablonem, zmiennymi i zestawem credentiali
 trafiają do wspólnych paczek. Powtórzenia tego samego hosta są rozpoznawane.
+Limit każdego joba zaczyna się od localhost, np. localhost,host1,host2.
+Jeśli localhost już występuje w paczce, jest przenoszony na początek bez powtórzeń.
+Automatycznie dodany localhost nie zużywa miejsca w BATCH_SIZE.
 
 Survey używa Answer Variable Name pytania z AWX jako klucza extra_vars.
 Odpowiedzi: --survey-answers JSON > kolumna Survey_<nazwa_zmiennej>

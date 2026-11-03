@@ -294,6 +294,8 @@ Przykłady:
     "execute": r"""Działanie:
   Czyta hostname, Job_Link, Job_Variables i Full_Credential z Excela.
   Łączy hosty o wspólnym szablonie, zmiennych i credentialach w paczki BATCH_SIZE.
+  Limit każdej paczki zaczyna się od localhost, np. localhost,host1,host2.
+  localhost występuje raz; dodany automatycznie nie zużywa miejsca w BATCH_SIZE.
   Full_Credential zawiera nazwy/ID oddzielone FULL_CREDENTIAL_SEPARATOR.
   Full_Credential jest uzupełniane wyłącznie o wybór z jumphost_for_hops.
   Zmiana wyboru zastępuje wcześniej dołączone jumphosty przy odświeżeniu/startowaniu.
@@ -1281,6 +1283,13 @@ def synchronise_full_credential(sheet, row_number, *, previous_jumps=None, clien
         jumphosts.remember_full_selection(full_cell, selected)
     return base_refs, selected
 
+def batch_host_limit(hostnames):
+    """Put localhost first exactly once without adding a synthetic Excel entry."""
+    names = common.unique_hostnames(hostnames)
+    return ','.join(['localhost', *(name for name in names
+                                   if common.hostname_key(name) not in ('', 'localhost'))])
+
+
 def build_execution_plan(sheet, client, settings, job_type_override=None, hostnames=None, job_url_override=None, survey_overrides=None, survey_cache=None):
     """Validate the whole sheet, deduplicate hosts, and batch equal launch payloads."""
     columns = excel.read_columns(sheet)
@@ -1366,7 +1375,7 @@ def build_execution_plan(sheet, client, settings, job_type_override=None, hostna
     for group in groups.values():
         for start in range(0, len(group), settings['BATCH_SIZE']):
             entries = group[start:start + settings['BATCH_SIZE']]
-            batches.append({'template_id': entries[0]['template_id'], 'link': entries[0]['link'], 'variables': entries[0]['variables'], 'entries': entries, 'credential_refs': entries[0]['credential_refs'], 'preserve_template_credentials': entries[0]['preserve_template_credentials'], 'job_type': entries[0]['job_type'], 'limit': ','.join((host['hostname'] for host in entries)), 'job_url_overridden': bool(selected_job_url)})
+            batches.append({'template_id': entries[0]['template_id'], 'link': entries[0]['link'], 'variables': entries[0]['variables'], 'entries': entries, 'credential_refs': entries[0]['credential_refs'], 'preserve_template_credentials': entries[0]['preserve_template_credentials'], 'job_type': entries[0]['job_type'], 'limit': batch_host_limit(host['hostname'] for host in entries), 'job_url_overridden': bool(selected_job_url)})
     debug_step('Plan wykonania', 'utworzono paczki według szablonu, zmiennych i poświadczeń',
                Unikalne_hosty=len(hosts), Paczki=len(batches), Hosty_z_historią=len(existing),
                Hosty_bez_szablonu=skipped_without_job, Limit_hostów_na_paczkę=settings['BATCH_SIZE'])
@@ -1576,6 +1585,7 @@ def resolve_execution_hostnames(client, batches, template_cache):
     """Use actual template inventory names for Ansible's case-sensitive limits."""
     inventories = {}
     for batch in batches:
+        batch['limit'] = batch_host_limit(entry['hostname'] for entry in batch['entries'])
         details, _, _ = template_survey(client, batch['template_id'], template_cache)
         defaults = details.get('defaults', {})
         if 'inventory' not in defaults:
@@ -1586,20 +1596,22 @@ def resolve_execution_hostnames(client, batches, template_cache):
             raise AWXError(f"Template {batch['template_id']}: configure its required inventory in AWX.")
         inventories.setdefault(inventory_id, []).append(batch)
     for inventory_id, inventory_batches in inventories.items():
-        names = common.unique_hostnames(entry['hostname'] for batch in inventory_batches for entry in batch['entries'])
+        names = common.unique_hostnames(entry['hostname'] for batch in inventory_batches for entry in batch['entries']
+                                        if common.hostname_key(entry['hostname']) != 'localhost')
         wanted = {common.hostname_key(name) for name in names}
         candidates = [host for host in client.items(f"inventories/{inventory_id}/hosts/",
                                                    purpose=f"Sprawdzenie dokładnej pisowni nazw hostów w inwentarzu szablonu {inventory_id}",
                                                    **host_name_filters(names))
-                      if common.hostname_key(host['name']) in wanted]
+                      if common.hostname_key(host['name']) in wanted] if names else []
         index = host_index(candidates)
         missing = [name for name in names if common.hostname_key(name) not in index]
         if missing:
             raise AWXError(f"Hosts not found in template inventory {inventory_id}: {', '.join(missing)}")
         for batch in inventory_batches:
             for entry in batch['entries']:
-                entry['hostname'] = index[common.hostname_key(entry['hostname'])]['name']
-            batch['limit'] = ','.join(entry['hostname'] for entry in batch['entries'])
+                key = common.hostname_key(entry['hostname'])
+                entry['hostname'] = 'localhost' if key == 'localhost' else index[key]['name']
+            batch['limit'] = batch_host_limit(entry['hostname'] for entry in batch['entries'])
 
 
 def job_url(template_link, client, job_id):
@@ -1642,6 +1654,7 @@ def execute_plan(workbook, sheet, path, client, settings, batches, existing, exe
     for entry in existing:
         write_execution(sheet, execution_column, [entry], entry['execution'])
     for batch in batches:
+        batch['limit'] = batch_host_limit(entry['hostname'] for entry in batch['entries'])
         for entry in batch['entries']:
             for row_number in entry['rows']:
                 host_cell = sheet.cell(row_number, columns['hostname'])

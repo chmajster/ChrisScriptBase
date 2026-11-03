@@ -75,6 +75,7 @@ HOSTS = []
 # === 5. Uruchamianie zadań i akcja playbooka ===
 # Maksymalna liczba unikalnych hostów w jednym zadaniu (liczba całkowita > 0).
 # Osobne paczki tworzone są dla różnych szablonów, zmiennych i poświadczeń.
+# Limit joba zawsze zaczyna się od localhost; automatyczny dodatek nie zużywa BATCH_SIZE.
 BATCH_SIZE = 10
 # Kolumna z linkami do uruchomień. Istniejące wpisy zapobiegają ponownemu startowi;
 # ponowienie wymaga potwierdzenia w terminalu. Tej samej kolumny używa pobieranie logów.
