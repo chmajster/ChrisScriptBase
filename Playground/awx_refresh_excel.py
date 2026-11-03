@@ -9,6 +9,12 @@ Uruchomienie:
 Źródłem wyszukiwania są nazwy hostów, po jednej w komórce. Automatycznie
 rozpoznawane kolumny: hostname, host_limit, host, hosts. Własną nazwę można
 podać przez HOST_COLUMN lub --host-column.
+Refresh ignoruje INVENTORY z konfiguracji oraz poprzednie INVENTORY/ApplicationID
+w Excelu. Wyszukuje hosty w inventory pasujących do REFRESH_INVENTORY_PATTERN
+z awx_variable (domyślnie *_mirror_inventory). * oznacza dowolny ciąg, ? jeden znak.
+ApplicationID jest dynamiczne, pobierane z nazwy znalezionego inventory.
+Jeden plik może zawierać hosty z wielu inventory. Kilka dopasowań tej samej nazwy
+hosta powoduje błąd z nazwami inventory, bez zapisu Excela.
 
 Skrypt zapisuje ten sam plik. Odświeża INVENTORY, ApplicationID, ostype,
 credentiale, szablon joba, jego zmienne i akcję. ApplicationID po INVENTORY
@@ -23,7 +29,8 @@ Full_Credential jest synchronizowane z wybranymi jumphostami bez powtórzeń.
 Odtwarza brakujące kolumny i porządkuje układ tak
 jak generator. Istniejące linki wykonania, output oraz inne arkusze zostają.
 Job_Credentials po Job_Link odświeża listę credentiali przypisanych do szablonu w AWX.
-Full_Credential pomija credentiale Machine już przypisane do szablonu joba.
+Full_Credential pomija Machine odziedziczone wyłącznie z szablonu joba.
+Credentiale z OS Credential i jawne EXTRA_CREDENTIAL_VARIABLES są zachowywane.
 AWX_Status: found = znaleziony, not_found = brak w AWX, no_hostname = pusty host.
 Przy pustej liście przygotowuje nagłówki bez pobierania hostów z AWX.
 
@@ -51,8 +58,9 @@ VARIABLES = {
     # "EXCEL_COLUMNS": ['hostname', 'ostype', 'AWX_Status', 'Uwagi'],
     # Plik .xlsx aktualizowany w miejscu. None wybiera EXCEL_OUTPUT_FILE.
     # "INPUT_FILE": 'hosts.xlsx',
-    # Inventory, w którym wyszukiwane są hosty: nazwa lub numeryczne ID.
-    # "INVENTORY": 'inventory-name',
+    # Wzorzec nazw inventory do wyszukiwania hostów. INVENTORY jest ignorowane.
+    # * oznacza dynamiczny prefiks ApplicationID; ? dopasowuje jeden znak.
+    # "REFRESH_INVENTORY_PATTERN": '*_mirror_inventory',
     # Bez --sheet: użyty zostanie ten arkusz, a jeśli go brak — aktywny arkusz.
     # "SHEET_NAME": 'Results',
     # None włącza automatyczne rozpoznawanie kolumny. Jedna nazwa hosta na wiersz.

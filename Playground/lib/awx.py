@@ -88,7 +88,7 @@ def debug_step(operation, stage, **details):
         lines.extend(f'  {name.replace("_", " ")}: {value}' for name, value in details.items())
         LOGGER.debug('\n'.join(lines))
 
-def validate_inventory_settings(settings):
+def validate_inventory_settings(settings, *, require_inventory=True):
     """Validate setting types and prepare output file paths."""
     jobs = settings['OS_JOBS']
     if not isinstance(jobs, dict) or any((os not in ('windows', 'linux', 'aix') for os in jobs)):
@@ -109,7 +109,7 @@ def validate_inventory_settings(settings):
         if not isinstance(settings[name], str) or not settings[name].strip():
             raise AWXError(f"{name} must be a nonempty string.")
     inventory = settings['INVENTORY']
-    if not (isinstance(inventory, str) and inventory.strip() or (type(inventory) is int and inventory > 0)):
+    if require_inventory and not (isinstance(inventory, str) and inventory.strip() or (type(inventory) is int and inventory > 0)):
         raise AWXError('INVENTORY must be a name or a positive numeric ID.')
     variables = settings['CREDENTIAL_VARIABLES']
     if not isinstance(variables, (list, tuple)) or any((not isinstance(name, str) or not name.strip() for name in variables)):
@@ -131,20 +131,20 @@ def validate_inventory_settings(settings):
         raise AWXError('PAGE_SIZE must be a positive integer.')
     return settings
 
-def read_inventory_settings(variables_file=None):
+def read_inventory_settings(variables_file=None, *, require_inventory=True):
     """Read shared variables and launcher overrides, then validate inventory fields."""
     LOGGER.debug("Konfiguracja: odczytuję ustawienia z %s", variables_file or common.current_variables_file())
-    return validate_inventory_settings(common.read_inventory_settings(variables_file))
+    return validate_inventory_settings(common.read_inventory_settings(variables_file), require_inventory=require_inventory)
 
 def apply_settings(settings):
     """Make validated settings available to the rest of the script."""
     globals().update({name: settings[name] for name in INVENTORY_DEFAULTS})
 
 
-def load_connection(debug=False):
+def load_connection(debug=False, *, require_inventory=True):
     """Load the same AWX settings and redact debug logging for every operation."""
     configure_debug(debug, AWX_TOKEN if isinstance(AWX_TOKEN, str) else "")
-    connection = read_inventory_settings()
+    connection = read_inventory_settings(require_inventory=require_inventory)
     apply_settings(connection)
     configure_debug(debug, connection["AWX_TOKEN"].strip())
     return connection
@@ -210,7 +210,13 @@ Przykłady:
   python .\awx_inventory_hosts.py --file .\lista_hostow.xlsx -d""",
     "refresh": r"""Działanie:
   Aktualizuje ten sam plik Excel, używając nazw hostów jako źródła wyszukiwania.
-  Odświeża INVENTORY, ostype, credentiale, szablon, zmienne i akcję joba.
+  Ignoruje INVENTORY z konfiguracji i dotychczasowe INVENTORY/ApplicationID w Excelu.
+  Szuka nazw hostów w inventory pasujących do REFRESH_INVENTORY_PATTERN.
+  Domyślnie: *_mirror_inventory; * oznacza dowolny ciąg, ? jeden znak.
+  ApplicationID jest dynamiczne: pierwszy człon nazwy znalezionego inventory przed _.
+  Hosty w jednym pliku mogą pochodzić z różnych pasujących inventory.
+  Kilka dopasowań tej samej nazwy hosta powoduje błąd przed zapisem pliku.
+  Odświeża INVENTORY, ApplicationID, ostype, credentiale, szablon, zmienne i akcję joba.
   Job_Link: JOB_URL, jeśli ustawiony; w przeciwnym razie url z OS_JOBS dla ostype.
   Job_Credentials pokazuje aktualne credentiale szablonu, niezależnie od Extra_Credentials.
   Extra_Credentials: EXTRA_CREDENTIAL_VARIABLES, a przy [] credentiale szablonu.
@@ -344,8 +350,9 @@ CONFIGURATION_HELP = """Ustawienia:
   Zachowaj wcięcia YAML. Dotychczasowe słowniki Pythona również działają.
   Nazwy hostów są dopasowywane bez rozróżniania wielkich i małych liter.
   Job używa pisowni hosta z inventory AWX; niejednoznaczne nazwy powodują błąd.
-  Full_Credential pomija credentiale Machine już przypisane do szablonu.
+  Full_Credential pomija Machine odziedziczone wyłącznie z szablonu.
   Pozostają w Job_Credentials i są zachowywane przy starcie, jeśli nie wybrano zamiennika Machine.
+  Credentiale z OS Credential i jawne EXTRA_CREDENTIAL_VARIABLES są zachowywane.
   Zamknij aktualizowany plik w Excelu przed zapisem.
   Poza venv skrypt tworzy/używa .venv obok launcherów i restartuje się w nim.
   Brakujące openpyxl instaluje się automatycznie w venv używanego Pythona.
@@ -720,31 +727,81 @@ def host_name_filters(hostnames):
 
 
 def fetch_report(client, selector, hostnames=None, *, allow_empty=False):
-    credential_variables = credential_variable_names()
-    extra_credentials = extra_credential_values()
-    debug_variables('Dodatkowe nazwy lub ID poświadczeń z konfiguracji', extra_credentials)
     inventory = find_inventory(client, selector)
     LOGGER.debug('Wybrano inwentarz: ID=%s\n  Nazwa=%r\n  Typ=%s', inventory['id'], inventory['name'], inventory.get('kind') or 'standard')
-    debug_variables('Nazwy zmiennych poświadczeń do wyszukania', credential_variables)
     requested = common.unique_hostnames(hostnames) if hostnames is not None else None
     requested_names = {common.hostname_key(name) for name in requested} if requested is not None else None
     host_filters = host_name_filters(requested)
     debug_variables('Filtry hostów wysyłane do AWX', host_filters)
-    hosts = []
-    group_indexes = {}
-    host_variables = {}
-    inventory_names = {inventory['id']: inventory['name']}
     host_purpose = f"Pobranie hostów z inwentarza ID {inventory['id']} (nazwa: {inventory['name']!r})"
     if requested is not None:
         host_purpose += f" dla {len(requested)} nazw z pliku wejściowego"
-    candidates = [host for host in client.items(f"inventories/{inventory['id']}/hosts/", purpose=host_purpose, **host_filters)
+    candidates = [{**host, 'inventory': host.get('inventory') or inventory['id']}
+                  for host in client.items(f"inventories/{inventory['id']}/hosts/", purpose=host_purpose, **host_filters)
                   if requested_names is None or common.hostname_key(host['name']) in requested_names]
+    if requested is not None and not candidates and not allow_empty:
+        raise AWXError(f"None of the hosts listed in the file exist in inventory {inventory['name']!r}.")
+    report = build_host_report(client, candidates, requested, inventory_names={inventory['id']: inventory['name']})
+    return {'inventory': {'id': inventory['id'], 'name': inventory['name']}, **report}
+
+
+def host_inventory_name(client, host, inventory_names):
+    """Resolve each source inventory name once, preferring the host's API summary."""
+    source_id = host['inventory']
+    if source_id not in inventory_names:
+        summary = (host.get('summary_fields') or {}).get('inventory') or {}
+        inventory_names[source_id] = summary.get('name') or client.get(
+            f"inventories/{source_id}/", purpose=f"Odczyt nazwy inwentarza źródłowego ID {source_id}"
+        ).get('name') or str(source_id)
+    return inventory_names[source_id]
+
+
+def fetch_refresh_report(client, hostnames, inventory_pattern):
+    """Find Excel hostnames across inventories matching the editable wildcard."""
+    requested = common.unique_hostnames(hostnames)
+    requested_names = {common.hostname_key(name) for name in requested}
+    regex = '^' + ''.join('.*' if char == '*' else '.' if char == '?' else re.escape(char)
+                         for char in inventory_pattern) + '$'
+    filters = {**host_name_filters(requested), 'inventory__name__iregex': regex}
+    debug_variables('Filtry wyszukiwania hostów z Excela w AWX', filters)
+    candidates = []
+    inventory_names = {}
+    matched = {}
+    if requested:
+        for host in client.items('hosts/', purpose=f"Wyszukanie {len(requested)} hostów w inventory pasujących do {inventory_pattern!r}", **filters):
+            key = common.hostname_key(host['name'])
+            if key not in requested_names:
+                continue
+            inventory_name = host_inventory_name(client, host, inventory_names)
+            if re.fullmatch(regex, inventory_name, re.IGNORECASE) is None:
+                continue
+            if key in matched and matched[key]['id'] != host['id']:
+                previous = matched[key]
+                raise AWXError(
+                    f"Ambiguous hostname {host['name']!r}: found in inventories "
+                    f"{inventory_names[previous['inventory']]!r} (ID {previous['inventory']}) and "
+                    f"{inventory_name!r} (ID {host['inventory']}). "
+                    "Narrow REFRESH_INVENTORY_PATTERN to select one host. Excel was not saved."
+                )
+            if key not in matched:
+                matched[key] = host
+                candidates.append(host)
+    return build_host_report(client, candidates, requested, inventory_names=inventory_names)
+
+
+def build_host_report(client, candidates, requested=None, *, inventory_names=None):
+    """Load complete metadata once per source inventory for the selected hosts."""
+    credential_variables = credential_variable_names()
+    debug_variables('Dodatkowe nazwy lub ID poświadczeń z konfiguracji', extra_credential_values())
+    debug_variables('Nazwy zmiennych poświadczeń do wyszukania', credential_variables)
+    inventory_names = {} if inventory_names is None else dict(inventory_names)
+    hosts = []
+    group_indexes = {}
+    host_variables = {}
     host_index(candidates)
     for host in candidates:
-        source_id = host.get('inventory') or inventory['id']
-        if source_id not in inventory_names:
-            summary = (host.get('summary_fields') or {}).get('inventory') or {}
-            inventory_names[source_id] = summary.get('name') or client.get(f"inventories/{source_id}/", purpose=f"Odczyt nazwy inwentarza źródłowego ID {source_id}").get('name') or str(source_id)
+        source_id = host['inventory']
+        host_inventory_name(client, host, inventory_names)
         if source_id not in group_indexes:
             LOGGER.debug('Buduję indeks grup dla inwentarza źródłowego ID %s.', source_id)
             groups = list(client.items(f"inventories/{source_id}/groups/", order_by='name', purpose=f"Pobranie nazw i ID grup z inwentarza źródłowego ID {source_id}"))
@@ -756,10 +813,8 @@ def fetch_report(client, selector, hostnames=None, *, allow_empty=False):
         else:
             LOGGER.debug('Host %s: korzystam z gotowego indeksu grup inwentarza ID %s, bez ponownego pobierania.', host['name'], source_id)
         hosts.append({'id': host['id'], 'name': host['name'], 'INVENTORY': inventory_names[source_id], 'ostype': host_variables[source_id].get(common.hostname_key(host['name']), {}).get('ostype'), 'enabled': host.get('enabled', True), **group_indexes[source_id].for_host(host['name'])})
-    report = {'inventory': {'id': inventory['id'], 'name': inventory['name']}, 'host_count': len(hosts), 'hosts': hosts}
+    report = {'host_count': len(hosts), 'hosts': hosts}
     if requested is not None:
-        if not hosts and (not allow_empty):
-            raise AWXError(f"None of the hosts listed in the file exist in inventory {inventory['name']!r}.")
         order = {common.hostname_key(name): index for index, name in enumerate(requested)}
         hosts.sort(key=lambda host: order[common.hostname_key(host['name'])])
         found_names = {common.hostname_key(host['name']) for host in hosts}
@@ -813,20 +868,6 @@ def template_machine_entries(client, entries):
             credential = lookup_credential(client, str(credential['id']))
         if credential_kind(credential) == 'ssh':
             result.append((reference, credential))
-    return result
-
-
-def without_template_machines(references, machines, client):
-    """Keep template Machine credentials out of the generated Full_Credential."""
-    ids = {credential['id'] for _, credential in machines}
-    names = {reference for reference, _ in machines}
-    result = []
-    for reference in references:
-        credential = client.credential_cache.get(reference) if client is not None else None
-        credential_id = credential['id'] if credential is not None else (
-            int(reference) if reference.isascii() and reference.isdigit() else None)
-        if reference not in names and credential_id not in ids:
-            result.append(reference)
     return result
 
 
@@ -956,8 +997,12 @@ def build_inventory_rows(report, settings=None, output_column=None, *, client=No
                 if credential not in full_values:
                     full_values.append(credential)
         host_values = [value for variable in primary_variables for value in full_values_by_variable.get(variable, [])]
-        full_parts = merge_full_credentials(client, extra_credentials, host_values, inherited)
-        full_parts = without_template_machines(full_parts, template_machines, client)
+        # Filter template defaults before merging so explicit host/config choices survive.
+        machine_ids = {credential['id'] for _, credential in template_machines}
+        full_inherited = [(reference, credential) for reference, credential in inherited
+                          if credential['id'] not in machine_ids]
+        full_extras = configured_extras or [reference for reference, _ in full_inherited]
+        full_parts = merge_full_credentials(client, full_extras, host_values, full_inherited)
         host['Extra_Credentials'] = list(extra_credentials)
         LOGGER.debug('Host %s: dodatkowe poświadczenia: %d\n  Źródło: %s', host['name'], len(extra_credentials),
                      'EXTRA_CREDENTIAL_VARIABLES' if configured_extras else 'szablon zadania')
@@ -1327,7 +1372,7 @@ def resolve_credentials(client, batches, *, template_cache=None):
                 inherited = {credential['id']: lookup_credential(client, str(credential['id']))
                              for _, credential in defaults}
             else:
-                # Full_Credential omits template Machine credentials. Preserve
+                # Full_Credential omits inherited-only Machine credentials. Preserve
                 # them in the API payload unless an explicit Machine replaces them.
                 explicit_types = {credential.get('credential_type') for credential in selected.values()}
                 candidates = [(reference, credential) for reference, credential in defaults
@@ -2151,12 +2196,12 @@ def refresh_sheet(sheet, host_rows, columns, source_column, metadata, headers, e
 def refresh_main(argv=None):
     started = time.perf_counter()
     args = parse_refresh_arguments(argv)
-    connection = load_connection(args.debug)
+    connection = load_connection(args.debug, require_inventory=False)
     settings = read_execution_settings()
     settings['OUTPUT_COLUMN'] = common.read_output_settings()['OUTPUT_COLUMN']
     path = workbook_path(args.input_file, connection, settings)
 
-    debug_step('Odświeżanie', 'ustawienia operacji', Plik=path, Inwentarz=connection['INVENTORY'],
+    debug_step('Odświeżanie', 'ustawienia operacji', Plik=path, Wzorzec_inventory=settings['REFRESH_INVENTORY_PATTERN'],
                Kolumna_hostów=args.host_column or 'automatyczne wykrywanie',
                Kolumna_wykonań=settings['EXECUTION_COLUMN'], Kolumna_logów=settings['OUTPUT_COLUMN'],
                Widoczne_kolumny=settings.get('EXCEL_COLUMNS') or 'wszystkie')
@@ -2174,7 +2219,7 @@ def refresh_main(argv=None):
         template_cache = {}
         if hostnames:
             client = AWXClient(connection['AWX_URL'], connection['AWX_TOKEN'].strip())
-            report = fetch_report(client, connection['INVENTORY'], hostnames=hostnames, allow_empty=True)
+            report = fetch_refresh_report(client, hostnames, settings['REFRESH_INVENTORY_PATTERN'])
         else:
             console.print_message('No hostnames in Excel. Updating column headers without querying AWX.', flush=True, level="warning")
             report = {'hosts': [], 'host_count': 0, 'missing_hosts': []}

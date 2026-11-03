@@ -2,6 +2,10 @@
 # Pozostałe kolumny są ukrywane z zachowaniem danych; własne kolumny dodawane jako puste.
 EXCEL_COLUMNS = ['hostname', 'ostype', 'AWX_Status', 'exceiute_job', 'output', 'Uwagi']
 
+# Refresh szuka nazw hostów z Excela w inventory pasujących do tego wzorca.
+# Ignoruje INVENTORY. * to dowolny ciąg znaków (dynamiczne ApplicationID), ? jeden znak.
+REFRESH_INVENTORY_PATTERN = '*_mirror_inventory'
+
 # Przyklad sekcji survey do wklejenia do istniejacego awx_variable.
 # SURVEY_EXCEL_DEFAULTS wypelnia nowe/puste komorki wykrytych kolumn Survey_...
 # Refresh nadpisuje tez wypelnione komorki odpowiedziami ustawionymi w konfiguracji.

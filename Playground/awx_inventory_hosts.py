@@ -22,7 +22,8 @@ Wartości zmiennych grup i zadań nie są wypisywane w diagnostyce.
 Logika, konfiguracja i zapis Excela są wspólne i znajdują się w lib/.
 ApplicationID po INVENTORY to pierwszy człon nazwy inventory przed znakiem _.
 Job_Credentials po Job_Link pokazuje credentiale przypisane do szablonu w AWX.
-Credentiale Machine już przypisane do szablonu nie są kopiowane do Full_Credential.
+Machine odziedziczone wyłącznie z szablonu nie są kopiowane do Full_Credential.
+Credentiale z OS Credential i jawne EXTRA_CREDENTIAL_VARIABLES są zachowywane.
 Pozostałe typy, np. Vault, są dodawane zgodnie z dotychczasowymi ustawieniami.
 HOPS przed Extra_Credentials zawiera grupy hosta (także nadrzędne) z nazwami
 <liczba>_hop lub <liczba>hop oraz wyciągnięte liczby. Brak dopasowania: none.
@@ -30,7 +31,7 @@ HOPS_COUNT po HOPS to sama liczba całkowita; brak jednoznacznej liczby: puste.
 jumphost_for_hops po HOPS_COUNT wyszukuje credentiale z ApplicationID i dokładnie
 tym numerem hopa. Domyślnie wybiera najniższe ID; Excel oferuje listę alternatyw.
 Kilka nazw/ID można wpisać po FULL_CREDENTIAL_SEPARATOR (domyślnie przecinek).
-Full_Credential zawiera tylko wybrane jumphosty, bez powtórzeń.
+Full_Credential łączy OS Credential, dodatki i wybrane jumphosty, bez powtórzeń.
 Poza venv skrypt tworzy/używa .venv obok launcherów i restartuje się w nim.
 Brakujące openpyxl instaluje się automatycznie w używanym venv.
 """

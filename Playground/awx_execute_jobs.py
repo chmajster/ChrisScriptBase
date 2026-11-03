@@ -14,8 +14,9 @@ Wejście: hostname, Job_Link, Job_Variables i Full_Credential. Zmienne joba
 muszą być obiektem JSON, np. {"action": "install"}. Credentiale joba są rozwiązywane
 z nazw lub ID obiektów zapisanych w AWX. API jest uwierzytelniane przez AWX_TOKEN.
 Full_Credential wskazuje credentiale używane przez playbook uruchamianego joba.
-Machine przypisane do szablonu nie jest kopiowane do Full_Credential; przy starcie
-pozostaje używane, chyba że wybrano zamiennik tego samego typu.
+Machine odziedziczone wyłącznie z szablonu nie jest kopiowane do Full_Credential;
+przy starcie pozostaje używane, chyba że wybrano zamiennik tego samego typu.
+Credentiale z OS Credential i jawne EXTRA_CREDENTIAL_VARIABLES są zachowywane.
 jumphost_for_hops uzupełnia Full_Credential wyłącznie o wybrane credentiale jumphosta.
 Przed startem zmiana wyboru usuwa wcześniej dołączone jumphosty. Nazwy/ID można
 wybrać z listy w Excelu lub wpisać kilka po FULL_CREDENTIAL_SEPARATOR.

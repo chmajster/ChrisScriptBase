@@ -38,6 +38,7 @@ EXECUTION_KEYS = (
     "INPUT_FILE", "SHEET_NAME", "BATCH_SIZE", "EXECUTION_COLUMN", "JOB_TYPE", "JOB_TYPE_VARIABLE",
     "WAIT_FOR_COMPLETION", "POLL_INTERVAL", "JOB_WAIT_TIMEOUT", "HOSTS", "JOB_URL",
     "SURVEY_ANSWERS", "SURVEY_INTERACTIVE", "SURVEY_EXCEL_DEFAULTS", "EXCEL_COLUMNS",
+    "REFRESH_INVENTORY_PATTERN",
 )
 OUTPUT_KEYS = (
     "INPUT_FILE", "SHEET_NAME", "EXECUTION_COLUMN", "OUTPUT_COLUMN", "OUTPUT_DIRECTORY",
@@ -434,6 +435,12 @@ def read_execution_settings(settings_file=None):
     from .awx_survey import answer_mapping
 
     settings = group_settings(EXECUTION_KEYS, settings_file, "execute")
+    pattern = settings["REFRESH_INVENTORY_PATTERN"]
+    if pattern is None:
+        pattern = "*_mirror_inventory"
+    if not isinstance(pattern, str) or not pattern.strip():
+        raise AWXError("REFRESH_INVENTORY_PATTERN must be a nonempty inventory name pattern, e.g. '*_mirror_inventory'.")
+    settings["REFRESH_INVENTORY_PATTERN"] = pattern.strip()
     settings["EXCEL_COLUMNS"] = normalize_excel_columns(settings["EXCEL_COLUMNS"])
     settings["SURVEY_ANSWERS"] = answer_mapping(settings["SURVEY_ANSWERS"])
     settings["SURVEY_EXCEL_DEFAULTS"] = answer_mapping(settings["SURVEY_EXCEL_DEFAULTS"], "SURVEY_EXCEL_DEFAULTS")

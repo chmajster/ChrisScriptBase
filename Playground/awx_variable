@@ -78,6 +78,11 @@ SHEET_NAME = 'Results'
 # Układ kolumn pozostaje standardowy. Ustawienie działa przy eksporcie,
 # odświeżaniu, wykonaniu zadań i pobieraniu logów; [] przywraca widoczność wszystkich.
 EXCEL_COLUMNS = []
+# Refresh ignoruje INVENTORY i szuka nazw hostów w inventory pasujących do wzorca.
+# * oznacza dowolny ciąg znaków (dynamiczne ApplicationID), ? jeden znak.
+# ApplicationID jest wyznaczane z nazwy znalezionego inventory przed pierwszym _.
+REFRESH_INVENTORY_PATTERN = '*_mirror_inventory'
+
 # Nagłówek kolumny hostów przy odświeżaniu; None włącza automatyczne wykrywanie.
 HOST_COLUMN = None
 # Wykonanie: [] wybiera wszystkie hosty z Excela; można podać listę nazw
