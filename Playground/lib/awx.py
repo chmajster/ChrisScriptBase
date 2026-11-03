@@ -201,7 +201,8 @@ OPERATION_HELP = {
   Full_Credential łączy Extra_Credentials, OS Credential i wybrane jumphost_for_hops bez powtórzeń.
   Credential hosta zastępuje odziedziczony credential szablonu tego samego typu.
   Credentiale Vault są zachowywane; podczas startu sprawdzane są ich Vault IDs.
-  OS_JOBS dobiera szablon i Job_Variables; JOB_TYPE ustawia akcję playbooka.
+  Job_Variables pobiera extra_vars wybranego szablonu (JSON/YAML).
+  OS_JOBS[system]['variables'] nadpisuje zmienne szablonu; JOB_TYPE ustawia akcję playbooka.
   Zapisuje nowy JSON i Excel pod OUTPUT_FILE oraz EXCEL_OUTPUT_FILE.
   W Excelu wykrywa włączony survey szablonów i dodaje Survey_<nazwa_zmiennej>.
   Komórki można edytować; wartości początkowe: Job_Variables > SURVEY_EXCEL_DEFAULTS
@@ -228,9 +229,11 @@ Przykłady:
   Kilka dopasowań tej samej nazwy hosta powoduje błąd przed zapisem pliku.
   JOB_TEMPLATE_AUTO_DISCOVERY=True dobiera Job_Link po organizacji i wzorcu nazwy,
   zamiast JOB_URL / url z OS_JOBS. template_job_name pokazuje nazwę szablonu.
-  {os_name}: Linux/AIX -> unix, Windows -> window (JOB_TEMPLATE_OS_NAMES).
+  {os_name}: Linux -> unix, AIX -> aix, Windows/window -> window (JOB_TEMPLATE_OS_NAMES).
+  Wszystkie fragmenty oddzielone * lub spacjami muszą wystąpić w nazwie; kolejność dowolna.
   Wzorzec obsługuje też {hostname}, {application_id} i {ostype}.
-  Job_Variables: zmienne znalezionego szablonu, nadpisane przez OS_JOBS i JOB_TYPE.
+  Job_Variables: extra_vars wybranego szablonu (JSON/YAML), nadpisane przez OS_JOBS i JOB_TYPE.
+  Zmienne są pobierane także przy szablonie wskazanym przez JOB_URL / OS_JOBS.
   Brak lub kilka szablonów dla hosta powoduje błąd przed zapisem pliku.
   Odświeża INVENTORY, ApplicationID, ostype, credentiale, szablon, zmienne i akcję joba.
   Job_Link: JOB_URL, jeśli ustawiony; w przeciwnym razie url z OS_JOBS dla ostype.
@@ -260,9 +263,10 @@ Przykłady:
   python .\awx_refresh_excel.py -file .\hosty.xlsx --sheet Results --host-column host_limit""",
     "templates": r"""Działanie:
   Wyświetla nazwy, ID i linki szablonów z JOB_TEMPLATE_ORGANIZATION (nazwa lub ID).
-  JOB_TEMPLATE_NAME_PATTERN dopasowuje całą nazwę bez rozróżniania wielkich liter.
-  * oznacza dowolny ciąg, ? jeden znak. Domyślnie: *zabbix*it2*{os_name}*.
-  {os_name} pochodzi z JOB_TEMPLATE_OS_NAMES: Linux/AIX -> unix, Windows -> window.
+  JOB_TEMPLATE_NAME_PATTERN wymaga wszystkich fragmentów, w dowolnej kolejności.
+  Fragmenty oddzielaj * lub spacjami; ? dopasowuje jeden znak. Wielkość liter bez znaczenia.
+  Domyślnie: *zabbix*install*{os_name}*.
+  {os_name}: Linux -> unix, AIX -> aix, Windows/window -> window (JOB_TEMPLATE_OS_NAMES).
   Bez --hostname wyszukuje warianty dla wszystkich systemów z tego słownika.
   Z --hostname pobiera ostype i ApplicationID hosta z REFRESH_INVENTORY_PATTERN.
   Wzorzec może korzystać z {hostname}, {application_id}, {ostype}, {os_name}.
@@ -270,7 +274,7 @@ Przykłady:
 
 Przykłady:
   python .\awx_find_templates.py --organization IT2
-  python .\awx_find_templates.py --organization IT2 --name-pattern '*zabbix*it2*window*'
+  python .\awx_find_templates.py --organization IT2 --name-pattern '*zabbix*install*windows'
   python .\awx_find_templates.py --organization IT2 --hostname server1""",
     "execute": r"""Działanie:
   Czyta hostname, Job_Link, Job_Variables i Full_Credential z Excela.
@@ -847,7 +851,8 @@ def build_host_report(client, candidates, requested=None, *, inventory_names=Non
             LOGGER.debug('Indeks inwentarza ID %s gotowy\n  Grupy: %d\n  Hosty z przypisanymi grupami: %d\n  Poświadczenia wyszukuję lokalnie w pobranych danych.', source_id, len(groups), len(group_indexes[source_id].direct_by_host))
         else:
             LOGGER.debug('Host %s: korzystam z gotowego indeksu grup inwentarza ID %s, bez ponownego pobierania.', host['name'], source_id)
-        hosts.append({'id': host['id'], 'name': host['name'], 'INVENTORY': inventory_names[source_id], 'ostype': host_variables[source_id].get(common.hostname_key(host['name']), {}).get('ostype'), 'enabled': host.get('enabled', True), **group_indexes[source_id].for_host(host['name'])})
+        ostype = common.normalize_ostype(host_variables[source_id].get(common.hostname_key(host['name']), {}).get('ostype'))
+        hosts.append({'id': host['id'], 'name': host['name'], 'INVENTORY': inventory_names[source_id], 'ostype': ostype, 'enabled': host.get('enabled', True), **group_indexes[source_id].for_host(host['name'])})
     report = {'host_count': len(hosts), 'hosts': hosts}
     if requested is not None:
         order = {common.hostname_key(name): index for index, name in enumerate(requested)}
@@ -999,7 +1004,8 @@ def build_inventory_rows(report, settings=None, output_column=None, *, client=No
     headers = excel.headers(settings['EXECUTION_COLUMN'], output_column)
     rows = []
     for host in report['hosts']:
-        ostype = host.get('ostype')
+        ostype = common.normalize_ostype(host.get('ostype'))
+        host['ostype'] = ostype
         ostype_text = 'none' if ostype is None else ostype if isinstance(ostype, str) else json.dumps(ostype, ensure_ascii=False)
         job = OS_JOBS.get(ostype.strip().casefold(), {}) if isinstance(ostype, str) else {}
         host['INVENTORY'] = host.get('INVENTORY') or report.get('inventory', {}).get('name') or 'none'
@@ -1056,7 +1062,7 @@ def build_inventory_rows(report, settings=None, output_column=None, *, client=No
         host['Extra_Credentials'] = list(extra_credentials)
         LOGGER.debug('Host %s: dodatkowe poświadczenia: %d\n  Źródło: %s', host['name'], len(extra_credentials),
                      'EXTRA_CREDENTIAL_VARIABLES' if configured_extras else 'szablon zadania')
-        job_variables = templates.template_variables(selected_template) if auto_find_template and selected_template else {}
+        job_variables = templates.template_variables(selected_template) if selected_template else {}
         job_variables.update(deepcopy(job.get('variables', {})))
         host['Job_Link'] = job_link
         host['Job_Variables'] = job_variables

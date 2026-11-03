@@ -89,11 +89,12 @@ REFRESH_INVENTORY_PATTERN = '*_mirror_inventory'
 JOB_TEMPLATE_AUTO_DISCOVERY = False
 # Dokładna nazwa organizacji AWX albo jej ID jako liczba. Wymagane przy auto/search.
 JOB_TEMPLATE_ORGANIZATION = ''
-# Wzorzec całej nazwy: * dowolny ciąg, ? jeden znak; wielkość liter bez znaczenia.
+# Wszystkie fragmenty muszą wystąpić w nazwie; kolejność i wielkość liter bez znaczenia.
+# Fragmenty oddzielaj * lub spacjami; ? dopasowuje jeden znak.
 # Zmienne: {os_name}, {ostype}, {hostname}, {application_id}.
-JOB_TEMPLATE_NAME_PATTERN = '*zabbix*it2*{os_name}*'
-# Nazwa systemu używana w szukanej nazwie szablonu. Windows -> window.
-JOB_TEMPLATE_OS_NAMES = {'linux': 'unix', 'aix': 'unix', 'windows': 'window'}
+JOB_TEMPLATE_NAME_PATTERN = '*zabbix*install*{os_name}*'
+# Nazwa systemu w nazwie szablonu. window/windows -> window; AIX -> aix.
+JOB_TEMPLATE_OS_NAMES = {'linux': 'unix', 'aix': 'aix', 'windows': 'window'}
 
 # Nagłówek kolumny hostów przy odświeżaniu; None włącza automatyczne wykrywanie.
 HOST_COLUMN = None

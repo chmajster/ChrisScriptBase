@@ -9,8 +9,11 @@ REFRESH_INVENTORY_PATTERN = '*_mirror_inventory'
 # True włącza dobór Job_Link przy refresh po organizacji i nazwie szablonu.
 JOB_TEMPLATE_AUTO_DISCOVERY = False
 JOB_TEMPLATE_ORGANIZATION = ''  # Dokładna nazwa organizacji lub numeryczne ID.
-JOB_TEMPLATE_NAME_PATTERN = '*zabbix*it2*{os_name}*'
-JOB_TEMPLATE_OS_NAMES = {'linux': 'unix', 'aix': 'unix', 'windows': 'window'}
+# Wszystkie fragmenty oddzielone * lub spacjami; kolejność bez znaczenia.
+JOB_TEMPLATE_NAME_PATTERN = '*zabbix*install*{os_name}*'
+JOB_TEMPLATE_OS_NAMES = {'linux': 'unix', 'aix': 'aix', 'windows': 'window'}
+# Refresh pobiera extra_vars wybranego szablonu do Job_Variables także bez autodiscovery.
+# OS_JOBS[system]['variables'] i JOB_TYPE nadpisują pobrane wartości.
 # Opcjonalne nadpisania dla awx_find_templates.py.
 TEMPLATES_OVERRIDES = {}
 

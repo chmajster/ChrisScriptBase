@@ -31,20 +31,21 @@ def find_organization(client, selector):
     return client.organization_cache[key]
 
 
-def name_regexes(settings, host=None):
-    """Escape literal values while expanding wildcards and documented placeholders."""
+def name_match_groups(settings, host=None):
+    """Require all name fragments in any order; each OS variant forms a group."""
     pattern = settings['JOB_TEMPLATE_NAME_PATTERN']
     try:
-        parts = list(Formatter().parse(pattern))
+        terms = [list(Formatter().parse(term)) for term in re.split(r'[\s*]+', pattern) if term]
     except ValueError as exc:
         raise AWXError(f'Invalid JOB_TEMPLATE_NAME_PATTERN: {exc}') from None
+    parts = [part for term in terms for part in term]
     fields = {field for _, field, _, _ in parts if field is not None}
     allowed = {'hostname', 'application_id', 'ostype', 'os_name'}
     if fields - allowed or any(spec or conversion for _, _, spec, conversion in parts):
         raise AWXError('JOB_TEMPLATE_NAME_PATTERN supports only {hostname}, {application_id}, {ostype}, and {os_name}.')
     names = settings['JOB_TEMPLATE_OS_NAMES']
     if host is not None:
-        ostype = str(host.get('ostype') or '').strip().casefold()
+        ostype = common.normalize_ostype(str(host.get('ostype') or ''))
         contexts = [{'hostname': host['name'], 'application_id': host.get('ApplicationID') or
                      host.get('INVENTORY', '').split('_', 1)[0],
                      'ostype': ostype, 'os_name': names.get(ostype)}]
@@ -52,35 +53,47 @@ def name_regexes(settings, host=None):
         raise AWXError('This JOB_TEMPLATE_NAME_PATTERN requires a host; use --hostname or Excel refresh.')
     else:
         contexts = [{'ostype': ostype, 'os_name': name} for ostype, name in names.items()]
-    regexes = []
+    groups = []
     for context in contexts:
-        chunks = ['^']
-        for literal, field, _, _ in parts:
-            chunks.append(''.join('.*' if char == '*' else '.' if char == '?' else re.escape(char)
-                                  for char in literal))
-            if field is not None:
-                if not context.get(field):
-                    label = host['name'] if host is not None else 'search'
-                    raise AWXError(f'Cannot expand {{{field}}} for {label!r}. Check ostype and JOB_TEMPLATE_OS_NAMES.')
-                chunks.append(re.escape(str(context[field])))
-        chunks.append('$')
-        regex = ''.join(chunks)
-        if regex not in regexes:
-            regexes.append(regex)
-    return regexes
+        expressions = []
+        for term in terms:
+            chunks = []
+            for literal, field, _, _ in term:
+                chunks.append(''.join('.' if char == '?' else re.escape(char) for char in literal))
+                if field is not None:
+                    if not context.get(field):
+                        label = host['name'] if host is not None else 'search'
+                        raise AWXError(f'Cannot expand {{{field}}} for {label!r}. Check ostype and JOB_TEMPLATE_OS_NAMES.')
+                    chunks.append(re.escape(str(context[field])))
+            expressions.append(''.join(chunks))
+        group = tuple(dict.fromkeys(expressions))
+        if group not in groups:
+            groups.append(group)
+    return groups
+
+
+def name_regexes(settings, host=None):
+    """Equivalent Python regexes, kept for callers checking a complete name."""
+    return ['(?s)^' + ''.join(f'(?=.*{term})' for term in group) + '.*$'
+            for group in name_match_groups(settings, host)]
 
 
 def find_templates(client, settings, host=None):
     organization = find_organization(client, settings['JOB_TEMPLATE_ORGANIZATION'])
-    regexes = name_regexes(settings, host)
-    key = (organization['id'], tuple(regexes))
+    groups = name_match_groups(settings, host)
+    key = (organization['id'], tuple(groups))
     if key not in client.template_search_cache:
-        regex = '(' + '|'.join(regexes) + ')'
+        filters = {'order_by': 'id'}
+        # Use a simple API prefilter; require every fragment locally. The API
+        # receives no Python lookaheads and cannot impose a word order.
+        if all(groups):
+            filters['name__iregex'] = '(' + '|'.join(dict.fromkeys(group[-1] for group in groups)) + ')'
         matches = {}
         for template in client.items(f"organizations/{organization['id']}/job_templates/",
-                                     name__iregex=regex, order_by='id',
+                                     **filters,
                                      purpose=f"Wyszukanie szablonów jobów w organizacji {organization.get('name', organization['id'])!r}"):
-            if any(re.fullmatch(expression, template.get('name', ''), re.IGNORECASE) for expression in regexes):
+            if any(all(re.search(term, template.get('name', ''), re.IGNORECASE) for term in group)
+                   for group in groups):
                 if type(template.get('id')) is not int or template['id'] < 1:
                     raise AWXError('Invalid job template response from AWX.')
                 matches[template['id']] = template
@@ -101,7 +114,8 @@ def template_for_host(client, settings, host):
     _, matches = find_templates(client, settings, host)
     label = f"Host {host['name']!r}, ostype={host.get('ostype')!r}"
     if not matches:
-        raise AWXError(f'{label}: no job template matches JOB_TEMPLATE_NAME_PATTERN in JOB_TEMPLATE_ORGANIZATION.')
+        raise AWXError(f"{label}: no job template matches words {settings['JOB_TEMPLATE_NAME_PATTERN']!r} "
+                       f"in organization {settings['JOB_TEMPLATE_ORGANIZATION']!r}.")
     if len(matches) != 1:
         found = ', '.join(f"{item['id']}: {item['name']}" for item in matches)
         raise AWXError(f'{label}: ambiguous job templates ({found}). Narrow JOB_TEMPLATE_NAME_PATTERN.')

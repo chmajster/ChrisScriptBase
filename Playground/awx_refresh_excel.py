@@ -20,10 +20,15 @@ hosta powoduje błąd z nazwami inventory, bez zapisu Excela.
 
 JOB_TEMPLATE_AUTO_DISCOVERY=True dobiera szablon po JOB_TEMPLATE_ORGANIZATION
 i JOB_TEMPLATE_NAME_PATTERN, zamiast JOB_URL / url z OS_JOBS. Wzorzec obsługuje
-{hostname}, {application_id}, {ostype} i {os_name}. Domyślnie Linux/AIX -> unix,
-Windows -> window; mapowanie określa JOB_TEMPLATE_OS_NAMES. Nazwa szablonu trafia
-do template_job_name, a link do Job_Link. Zmienne szablonu uzupełniają Job_Variables;
-OS_JOBS[system]['variables'] i JOB_TYPE zachowują pierwszeństwo. Brak lub kilka
+{hostname}, {application_id}, {ostype} i {os_name}. Domyślnie Linux -> unix,
+AIX -> aix, Windows/window -> window; mapowanie określa JOB_TEMPLATE_OS_NAMES.
+Wszystkie fragmenty oddzielone * lub spacjami muszą wystąpić w nazwie szablonu,
+w dowolnej kolejności. Nazwa szablonu trafia
+do template_job_name, a link do Job_Link. Zmienne extra_vars szablonu (JSON/YAML)
+trafiają od razu do Job_Variables, również przy JOB_TEMPLATE_AUTO_DISCOVERY=False
+i szablonie wskazanym przez JOB_URL / OS_JOBS. Refresh zastępuje poprzednią
+zawartość Job_Variables świeżymi danymi. OS_JOBS[system]['variables'] i JOB_TYPE
+zachowują pierwszeństwo. Brak lub kilka
 pasujących szablonów dla hosta powoduje błąd przed zapisem Excela.
 
 Skrypt zapisuje ten sam plik. Odświeża INVENTORY, ApplicationID, ostype,
@@ -74,8 +79,8 @@ VARIABLES = {
     # True: dobór Job_Link po danych hosta i wzorcu; template_job_name = nazwa z AWX.
     # "JOB_TEMPLATE_AUTO_DISCOVERY": True,
     # "JOB_TEMPLATE_ORGANIZATION": 'IT2',
-    # "JOB_TEMPLATE_NAME_PATTERN": '*zabbix*it2*{os_name}*',
-    # "JOB_TEMPLATE_OS_NAMES": {'linux': 'unix', 'aix': 'unix', 'windows': 'window'},
+    # "JOB_TEMPLATE_NAME_PATTERN": '*zabbix*install*{os_name}*',
+    # "JOB_TEMPLATE_OS_NAMES": {'linux': 'unix', 'aix': 'aix', 'windows': 'window'},
     # Bez --sheet: użyty zostanie ten arkusz, a jeśli go brak — aktywny arkusz.
     # "SHEET_NAME": 'Results',
     # None włącza automatyczne rozpoznawanie kolumny. Jedna nazwa hosta na wiersz.

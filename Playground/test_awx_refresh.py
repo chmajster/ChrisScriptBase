@@ -44,6 +44,7 @@ class RefreshTests(unittest.TestCase):
         self.addCleanup(overrides.stop)
         self.inventories = {10: 'app1_mirror_inventory', 20: 'B42_mirror_inventory',
                             30: 'app1_inventory', 40: 'app1_mirror_inventory_backup'}
+        self.ostypes = {10: 'linux', 20: 'windows'}
         self.candidates = [self.host(1, 'Linux1', 10), self.host(2, 'win1', 20),
                            self.host(3, 'Linux2', 10), self.host(4, 'Linux1', 30),
                            self.host(5, 'prefixLinux1', 10), self.host(6, 'Linux1', 40),
@@ -89,7 +90,7 @@ class RefreshTests(unittest.TestCase):
                          or filters['name__icontains'].casefold() in credential['name'].casefold())]
         if path.endswith('/groups/'):
             number = int(path.split('/')[1])
-            self.assertIn(number, (10, 20))
+            self.assertIn(number, (10, 20, 50))
             return [{'id': number * 10, 'name': '1_hop'},
                     {'id': number * 10 + 1, 'name': 'credential_parent'}]
         if path.endswith('/hosts/'):
@@ -106,14 +107,14 @@ class RefreshTests(unittest.TestCase):
             return next(item for item in self.job_templates if item['id'] == number)
         if path.endswith('/script/?all=1&hostvars=1'):
             number = int(path.split('/')[1])
-            self.assertIn(number, (10, 20))
+            self.assertIn(number, (10, 20, 50))
             names = [host['name'] for host in self.candidates if host['inventory'] == number]
-            os = 'linux' if number == 10 else 'windows'
+            os = self.ostypes[number]
             app = self.inventories[number].split('_', 1)[0]
             return {'_meta': {'hostvars': {name: {'ostype': os} for name in names}},
                     '1_hop': {'hosts': names},
                     'credential_parent': {'children': ['1_hop'], 'vars': {'os_credential': f'{app}-os'}}}
-        if path in ('job_templates/7/launch/', 'job_templates/8/launch/'):
+        if path in ('job_templates/7/launch/', 'job_templates/8/launch/', 'job_templates/10/launch/'):
             return {'defaults': {'credentials': self.credentials[:2]}, 'survey_enabled': True}
         if path.endswith('/survey_spec/'):
             return {'spec': [{'variable': 'mode', 'type': 'multiplechoice',
@@ -229,7 +230,7 @@ class RefreshTests(unittest.TestCase):
             self.assertIn('job_template/', row['job_link'])
             self.assertEqual(row['template_job_name'], 'Zabbix IT2 Window install' if app == 'B42'
                              else 'Zabbix IT2 Unix install')
-            self.assertEqual(row['job_variables'], '{"action": "install"}')
+            self.assertEqual(json.loads(row['job_variables']), {'from_awx': True, 'action': 'install'})
         self.assertEqual(book['Notes']['A1'].value, 'keep other sheet')
 
     def test_pattern_override_restricts_discovery(self):
@@ -300,7 +301,7 @@ class RefreshTests(unittest.TestCase):
         for ambiguous in (False, True):
             with self.subTest(ambiguous=ambiguous):
                 if ambiguous:
-                    self.job_templates.append({'id': 17, 'name': 'Zabbix IT2 Unix other'})
+                    self.job_templates.append({'id': 17, 'name': 'Zabbix IT2 Unix install other'})
                 else:
                     self.job_templates = [item for item in self.job_templates if item['id'] != 7]
                 self.client.template_search_cache.clear()
@@ -376,6 +377,91 @@ class RefreshTests(unittest.TestCase):
         self.assertIn('JOB_TEMPLATE_ORGANIZATION', output)
         factory.assert_not_called()
         self.assertEqual(self.path.read_bytes(), original)
+
+    def test_manual_template_variables_are_refreshed_into_excel(self):
+        template_values = {
+            'action': 'from-template', 'server_config': {'port': 10050, 'enabled': True},
+            'packages': ['agent', 'extra'], 'label': 'Łódź',
+        }
+        self.job_templates[0]['extra_vars'] = json.dumps(template_values, ensure_ascii=False)
+        self.write_config(JOB_TEMPLATE_AUTO_DISCOVERY=False,
+                          JOB_URL='https://awx.example.test/api/v2/job_templates/7/', JOB_TYPE='reinstall',
+                          OS_JOBS={'linux': {'variables': {'action': 'install', 'package': 'custom'}}})
+        self.write_workbook(['Linux1'])
+        book = load_workbook(self.path)
+        book.active.cell(1, book.active.max_column + 1).value = 'Job_Variables'
+        book.active.cell(2, book.active.max_column).value = '{"obsolete": true}'
+        book.save(self.path)
+        book.close()
+        code, output, _ = self.refresh()
+        self.assertEqual(code, 0, output)
+        book = load_workbook(self.path)
+        self.addCleanup(book.close)
+        columns = awx.excel.read_columns(book.active)
+        variables = json.loads(book.active.cell(2, columns['job_variables']).value)
+        self.assertEqual(variables, {**template_values, 'action': 'reinstall', 'package': 'custom'})
+        self.assertEqual(book.active.cell(2, columns['template_job_name']).value, self.job_templates[0]['name'])
+        self.assertEqual(book.active.cell(2, columns['output']).value, 'previous output')
+        self.assertEqual(sum(call.args[0] == 'job_templates/7/'
+                             for call in self.client.get.call_args_list), 1)
+
+    def test_template_words_match_in_any_order(self):
+        for pattern in ('*zabbix*install*windows', 'zabbix install windows'):
+            with self.subTest(pattern=pattern):
+                settings = awx.common.normalize_template_settings({'JOB_TEMPLATE_NAME_PATTERN': pattern})
+                expression, = awx.templates.name_regexes(settings)
+                for name in ('Zabbix Windows Agent Install', 'Install Zabbix Agent Windows',
+                             'WINDOWS Agent INSTALL for ZABBIX servers'):
+                    self.assertIsNotNone(re.fullmatch(expression, name, re.IGNORECASE), name)
+                for name in ('Zabbix Install Linux', 'Zabbix Windows', 'Install Windows'):
+                    self.assertIsNone(re.fullmatch(expression, name, re.IGNORECASE), name)
+
+    def test_template_search_checks_every_word_after_api_prefilter(self):
+        self.job_templates[1]['name'] = 'Zabbix Windows Agent Install'
+        self.job_templates.append({'id': 17, 'name': 'Windows install other agent'})
+        settings = awx.common.normalize_template_settings({
+            'JOB_TEMPLATE_ORGANIZATION': 'Operations',
+            'JOB_TEMPLATE_NAME_PATTERN': '*zabbix*install*windows',
+        })
+        _, matches = awx.templates.find_templates(self.client, settings)
+        self.assertEqual([item['id'] for item in matches], [8])
+
+    def test_auto_template_refresh_matches_window_windows_and_aix_in_any_order(self):
+        self.inventories[50] = 'aixapp_mirror_inventory'
+        self.ostypes[50] = 'aix'
+        self.candidates.append(self.host(51, 'AIX1', 50))
+        self.credentials.extend([
+            {'id': 150, 'name': 'aixapp-os', 'kind': 'ssh', 'credential_type': 11},
+            {'id': 250, 'name': 'aixapp_1hop', 'kind': 'cloud', 'credential_type': 33},
+        ])
+        self.job_templates[0]['name'] = 'Install Agent Zabbix Unix'
+        self.job_templates[1]['name'] = 'Zabbix Windows Agent Install'
+        self.job_templates.append({'id': 10, 'name': 'AIX Zabbix Agent Install', 'extra_vars': '{}'})
+        for value in ('window', 'windows', ' WINDOWS '):
+            with self.subTest(ostype=value):
+                self.ostypes[20] = value
+                self.write_config(JOB_TEMPLATE_AUTO_DISCOVERY=True, JOB_TEMPLATE_ORGANIZATION='Operations',
+                                  JOB_TEMPLATE_NAME_PATTERN='*zabbix*install*{os_name}*')
+                self.write_workbook(['WIN1,', 'AIX1', 'Linux1'])
+                code, output, _ = self.refresh()
+                self.assertEqual(code, 0, output)
+                book = load_workbook(self.path)
+                try:
+                    sheet = book.active
+                    columns = awx.excel.read_columns(sheet)
+                    expected = {'win1': ('windows', 8), 'AIX1': ('aix', 10), 'Linux1': ('linux', 7)}
+                    for number in range(2, sheet.max_row + 1):
+                        hostname = sheet.cell(number, columns['hostname']).value
+                        os, template_id = expected[hostname]
+                        template = next(item for item in self.job_templates if item['id'] == template_id)
+                        self.assertEqual(sheet.cell(number, columns['ostype']).value, os)
+                        self.assertEqual(sheet.cell(number, columns['template_job_name']).value, template['name'])
+                        self.assertEqual(sheet.cell(number, columns['job_link']).value,
+                                         f'https://awx.example.test/api/v2/job_templates/{template_id}/')
+                        self.assertEqual(sheet.cell(number, columns['output']).value, 'previous output')
+                finally:
+                    book.close()
+        self.client.post.assert_not_called()
 
 
 if __name__ == '__main__':

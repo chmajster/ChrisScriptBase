@@ -36,8 +36,8 @@ TEMPLATE_KEYS = ("JOB_TEMPLATE_AUTO_DISCOVERY", "JOB_TEMPLATE_ORGANIZATION",
 TEMPLATE_DEFAULTS = {
     "JOB_TEMPLATE_AUTO_DISCOVERY": False,
     "JOB_TEMPLATE_ORGANIZATION": "",
-    "JOB_TEMPLATE_NAME_PATTERN": "*zabbix*it2*{os_name}*",
-    "JOB_TEMPLATE_OS_NAMES": {"linux": "unix", "aix": "unix", "windows": "window"},
+    "JOB_TEMPLATE_NAME_PATTERN": "*zabbix*install*{os_name}*",
+    "JOB_TEMPLATE_OS_NAMES": {"linux": "unix", "aix": "aix", "windows": "window"},
 }
 INVENTORY_KEYS = (
     "AWX_URL", "AWX_TOKEN", "INVENTORY", "CREDENTIAL_VARIABLES", "EXTRA_CREDENTIAL_VARIABLES",
@@ -64,6 +64,14 @@ OPERATION_SCOPES = {
 }
 _ACTIVE = ContextVar("awx_launcher_configuration", default=None)
 HOSTNAME_PATTERN = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*\Z")
+
+
+def normalize_ostype(value):
+    """Use a canonical system name while accepting AWX's singular 'window'."""
+    if not isinstance(value, str):
+        return value
+    value = value.strip().casefold()
+    return 'windows' if value == 'window' else value
 
 
 def hostname_key(value):
@@ -465,7 +473,7 @@ def normalize_template_settings(settings, *, require_organization=False):
         for key, value in names.items()
     ):
         raise AWXError('JOB_TEMPLATE_OS_NAMES must map operating systems to nonempty name fragments.')
-    settings['JOB_TEMPLATE_OS_NAMES'] = {key.strip().casefold(): value.strip() for key, value in names.items()}
+    settings['JOB_TEMPLATE_OS_NAMES'] = {normalize_ostype(key): value.strip() for key, value in names.items()}
     return settings
 
 
