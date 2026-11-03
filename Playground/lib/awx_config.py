@@ -47,7 +47,7 @@ EXECUTION_KEYS = (
     "INPUT_FILE", "SHEET_NAME", "BATCH_SIZE", "EXECUTION_COLUMN", "JOB_TYPE", "JOB_TYPE_VARIABLE",
     "WAIT_FOR_COMPLETION", "POLL_INTERVAL", "JOB_WAIT_TIMEOUT", "HOSTS", "JOB_URL",
     "SURVEY_ANSWERS", "SURVEY_INTERACTIVE", "SURVEY_EXCEL_DEFAULTS", "EXCEL_COLUMNS",
-    "REFRESH_INVENTORY_PATTERN", *TEMPLATE_KEYS,
+    "REFRESH_INVENTORY_PATTERN", "JOB_VARIABLE_OVERRIDES_BY_OS", *TEMPLATE_KEYS,
 )
 OUTPUT_KEYS = (
     "INPUT_FILE", "SHEET_NAME", "EXECUTION_COLUMN", "OUTPUT_COLUMN", "OUTPUT_DIRECTORY",
@@ -190,8 +190,10 @@ def prepare_multiline_url_literals(content):
 
 
 def normalize_url_values(value, name=None):
-    """Normalize configured connection/template URLs, keeping extra_vars intact."""
+    """Normalize configured URLs and per-OS override keys, preserving variable values."""
     name = name.upper() if isinstance(name, str) else name
+    if name == 'JOB_VARIABLE_OVERRIDES_BY_OS':
+        return normalize_job_variable_overrides(value)
     if isinstance(value, str) and name in ("AWX_URL", "JOB_URL") and ("\n" in value or "\r" in value):
         return "".join(line.strip() for line in value.splitlines())
     if isinstance(value, dict) and name in OPERATION_SCOPES.values():
@@ -356,10 +358,31 @@ def normalize_overrides(values):
 
 
 def merge_values(base, overrides):
-    """Merge nested OS_JOBS overrides while keeping independent launcher settings."""
+    """Merge nested settings or variable objects without changing either input."""
     result = deepcopy(base)
     for name, value in overrides.items():
         result[name] = merge_values(result[name], value) if isinstance(result.get(name), dict) and isinstance(value, dict) else deepcopy(value)
+    return result
+
+
+def normalize_job_variable_overrides(value):
+    """Validate JSON values and canonicalize OS keys before scope merging."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise AWXError('JOB_VARIABLE_OVERRIDES_BY_OS must map OS names to variable objects.')
+    result = {}
+    for os_name, variables in value.items():
+        if not isinstance(os_name, str) or not os_name.strip() or not isinstance(variables, dict):
+            raise AWXError('JOB_VARIABLE_OVERRIDES_BY_OS must map nonempty OS names to variable objects.')
+        if any(not isinstance(name, str) or not name.strip() for name in variables):
+            raise AWXError('JOB_VARIABLE_OVERRIDES_BY_OS variable names must be nonempty strings.')
+        try:
+            json.dumps(variables, allow_nan=False)
+        except (TypeError, ValueError):
+            raise AWXError('JOB_VARIABLE_OVERRIDES_BY_OS values must be valid JSON values.') from None
+        os_key = normalize_ostype(os_name)
+        result[os_key] = merge_values(result.get(os_key, {}), variables)
     return result
 
 
@@ -478,9 +501,10 @@ def normalize_template_settings(settings, *, require_organization=False):
 
 
 def normalize_refresh_settings(settings):
-    """Refresh always derives the template organization and variables from AWX."""
+    """Refresh derives its template from AWX and validates explicit per-OS overrides."""
     settings.update(JOB_TEMPLATE_AUTO_DISCOVERY=True, JOB_TEMPLATE_ORGANIZATION='',
                     JOB_URL='', JOB_TYPE='')
+    settings['JOB_VARIABLE_OVERRIDES_BY_OS'] = normalize_job_variable_overrides(settings.get('JOB_VARIABLE_OVERRIDES_BY_OS'))
     return normalize_template_settings(settings)
 
 

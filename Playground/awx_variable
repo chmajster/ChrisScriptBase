@@ -30,6 +30,16 @@ FULL_CREDENTIAL_SEPARATOR = ', '
 # Organizacja jest ustalana z hosta: nazwa organizacji == ApplicationID.
 # Job_Link, template_job_name i Job_Variables są pobierane z AWX.
 
+# Opcjonalne nadpisania Job_Variables po pobraniu zmiennych z AWX, osobno dla ostype.
+# Przykład: 'linux': {'action': 'install'}, 'windows': {'action': 'reinstall'}.
+# Pozostałe zmienne są zachowywane; obiekty łączone, listy zastępowane. {} nic nie zmienia.
+# window i windows oznaczają Windows. Nazwy zmiennych rozróżniają wielkość liter.
+JOB_VARIABLE_OVERRIDES_BY_OS = {
+    'windows': {},
+    'linux': {},
+    'aix': {},
+}
+
 # === 4. Pliki JSON i Excel oraz wybór hostów ===
 # Ścieżki względne są liczone od bieżącego katalogu uruchomienia skryptu.
 # Plik JSON tworzony przez eksport inwentarza.
@@ -56,7 +66,7 @@ EXCEL_COLUMNS = []
 REFRESH_INVENTORY_PATTERN = '*_mirror_inventory'
 
 # Refresh zawsze szuka szablonu w organizacji o nazwie równej ApplicationID hosta.
-# Nazwa, link i zmienne pochodzą z AWX. Nie podawaj ich ręcznie w konfiguracji.
+# Nazwa, link i zmienne bazowe pochodzą z AWX; wyjątki określa JOB_VARIABLE_OVERRIDES_BY_OS.
 # Podgląd: python awx_find_templates.py --hostname 'nazwa_hosta'.
 # Wszystkie fragmenty muszą wystąpić w nazwie; kolejność i wielkość liter bez znaczenia.
 # Fragmenty oddzielaj * lub spacjami; ? dopasowuje jeden znak.

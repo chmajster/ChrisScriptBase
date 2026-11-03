@@ -460,6 +460,81 @@ class RefreshTests(unittest.TestCase):
         self.assertIn('Organizacja (ApplicationID): app1', output)
         self.assertIn(self.job_templates[0]['name'], output)
 
+    def test_refresh_applies_job_variable_overrides_by_os(self):
+        self.inventories[50] = 'aixapp_mirror_inventory'
+        self.ostypes.update({20: 'window', 50: 'aix'})
+        self.candidates.append(self.host(51, 'AIX1', 50))
+        self.credentials.extend([
+            {'id': 150, 'name': 'aixapp-os', 'kind': 'ssh', 'credential_type': 11},
+            {'id': 250, 'name': 'aixapp_1hop', 'kind': 'cloud', 'credential_type': 33},
+        ])
+        self.job_templates.append({'id': 10, 'name': 'Zabbix AIX install'})
+        base = {'action': 'from-template', 'from_awx': True, 'untouched': {'value': 1},
+                'server_config': {'port': 10050, 'enabled': True}, 'packages': ['base']}
+        source = json.dumps(base)
+        for template in self.job_templates:
+            template['extra_vars'] = source
+        self.write_config(JOB_VARIABLE_OVERRIDES_BY_OS={
+            'windows': {'action': 'install', 'server_config': {'port': 10051},
+                        'packages': ['windows-agent'], 'flag': False, 'nullable': None},
+            'linux': {'action': 'update', 'server_config': {'enabled': False}, 'version': 7},
+            'aix': {'action': 'reinstall', 'packages': ['aix-agent']},
+        })
+        self.write_workbook(['Linux1', 'WIN1', 'AIX1'])
+        code, output, _ = self.refresh()
+        self.assertEqual(code, 0, output)
+        book = load_workbook(self.path)
+        self.addCleanup(book.close)
+        columns = awx.excel.read_columns(book.active)
+        for number in range(2, book.active.max_row + 1):
+            os = book.active.cell(number, columns['ostype']).value
+            variables = json.loads(book.active.cell(number, columns['job_variables']).value)
+            action = {'windows': 'install', 'linux': 'update', 'aix': 'reinstall'}[os]
+            self.assertEqual(variables['action'], action)
+            self.assertEqual(book.active.cell(number, columns['job_type']).value, action)
+            self.assertIs(variables['from_awx'], True)
+            self.assertEqual(variables['untouched'], {'value': 1})
+            self.assertEqual(variables['server_config'], {'port': 10051 if os == 'windows' else 10050,
+                                                        'enabled': os != 'linux'})
+            self.assertEqual(variables['packages'], {'windows': ['windows-agent'],
+                                                    'linux': ['base'], 'aix': ['aix-agent']}[os])
+            if os == 'windows':
+                self.assertIs(variables['flag'], False)
+                self.assertIsNone(variables['nullable'])
+            elif os == 'linux':
+                self.assertEqual(variables['version'], 7)
+            self.assertEqual(book.active.cell(number, columns['output']).value, 'previous output')
+        self.assertTrue(all(template['extra_vars'] == source for template in self.job_templates))
+        self.client.post.assert_not_called()
+
+    def test_job_variable_override_priority_and_window_alias(self):
+        self.write_config(
+            JOB_VARIABLE_OVERRIDES_BY_OS={'windows': {'version': 1, 'server_config': {'port': 10051}}},
+            REFRESH_OVERRIDES={'JOB_VARIABLE_OVERRIDES_BY_OS':
+                               {'window': {'version': 2, 'server_config': {'enabled': False}}}},
+        )
+        self.write_workbook(['WIN1', 'Linux1'])
+        code, output, _ = self.refresh({'JOB_VARIABLE_OVERRIDES_BY_OS': {' WINDOWS ': {'version': 3}}})
+        self.assertEqual(code, 0, output)
+        book = load_workbook(self.path)
+        self.addCleanup(book.close)
+        columns = awx.excel.read_columns(book.active)
+        for number in range(2, book.active.max_row + 1):
+            variables = json.loads(book.active.cell(number, columns['job_variables']).value)
+            if book.active.cell(number, columns['ostype']).value == 'windows':
+                self.assertEqual(variables['version'], 3)
+                self.assertEqual(variables['server_config'], {'port': 10051, 'enabled': False})
+            else:
+                self.assertNotIn('version', variables)
+                self.assertNotIn('server_config', variables)
+
+    def test_invalid_job_variable_overrides_are_rejected(self):
+        for overrides in ([], {'linux': []}, {1: {}}, {'linux': {'': 1}},
+                          {'linux': {'invalid': {1, 2}}}, {'linux': {'invalid': float('nan')}}):
+            with self.subTest(overrides=overrides):
+                with self.assertRaisesRegex(awx.AWXError, 'JOB_VARIABLE_OVERRIDES_BY_OS'):
+                    awx.common.normalize_refresh_settings({'JOB_VARIABLE_OVERRIDES_BY_OS': overrides})
+
     def test_template_words_match_in_any_order(self):
         for pattern in ('*zabbix*install*windows', 'zabbix install windows'):
             with self.subTest(pattern=pattern):

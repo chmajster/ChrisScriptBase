@@ -148,6 +148,12 @@ def template_variables(template):
     return deepcopy(value)
 
 
+def apply_job_variable_overrides(variables, ostype, overrides):
+    """Preserve unlisted AWX values, merge objects, and replace lists/scalars."""
+    selected = overrides.get(common.normalize_ostype(ostype), {})
+    return common.merge_values(variables, selected)
+
+
 def main(argv=None):
     from . import awx
 

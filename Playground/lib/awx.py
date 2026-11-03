@@ -242,12 +242,14 @@ Przykłady:
   Kilka dopasowań tej samej nazwy hosta powoduje błąd przed zapisem pliku.
   Zawsze wyszukuje szablon według JOB_TEMPLATE_NAME_PATTERN w organizacji AWX
   o nazwie równej ApplicationID hosta. template_job_name pokazuje znalezioną nazwę.
-  Ignoruje ręczny Job_Link, zmienne i organizację z konfiguracji oraz stare dane w Excelu.
+  Ignoruje ręczny Job_Link, stałą organizację z konfiguracji oraz stare dane w Excelu.
   {os_name}: Linux -> unix, AIX -> aix, Windows/window -> window (JOB_TEMPLATE_OS_NAMES).
   Wszystkie fragmenty oddzielone * lub spacjami muszą wystąpić w nazwie; kolejność dowolna.
   Wzorzec obsługuje też {hostname}, {application_id} i {ostype}.
-  Job_Variables: świeże extra_vars szablonu z AWX (JSON/YAML), bez ręcznych nadpisań.
-  Job_Type odczytuje ze zmiennych szablonu, pod kluczem JOB_TYPE_VARIABLE.
+  Job_Variables: świeże extra_vars szablonu z AWX (JSON/YAML), następnie nadpisania
+  dla ostype z JOB_VARIABLE_OVERRIDES_BY_OS. Puste {} pozostawia dane AWX.
+  Pozostałe zmienne są zachowywane, zagnieżdżone obiekty łączone, listy zastępowane.
+  Job_Type odczytuje z końcowych zmiennych, pod kluczem JOB_TYPE_VARIABLE.
   Brak lub kilka szablonów dla hosta powoduje błąd przed zapisem pliku.
   Odświeża INVENTORY, ApplicationID, ostype, credentiale, szablon, zmienne i akcję joba.
   Znalezioną nazwę, organizację i link pokazuje również w konsoli.
@@ -1081,6 +1083,9 @@ def build_inventory_rows(report, settings=None, output_column=None, *, client=No
                      'EXTRA_CREDENTIAL_VARIABLES' if configured_extras else 'szablon zadania')
         job_variables = templates.template_variables(selected_template) if selected_template else {}
         job_variables.update(deepcopy(job.get('variables', {})))
+        if auto_find_template:
+            job_variables = templates.apply_job_variable_overrides(
+                job_variables, ostype, settings.get('JOB_VARIABLE_OVERRIDES_BY_OS') or {})
         host['Job_Link'] = job_link
         host['Job_Variables'] = job_variables
         credentials = list(dict.fromkeys((value for variable in primary_variables for value in values_by_variable.get(variable, []))))

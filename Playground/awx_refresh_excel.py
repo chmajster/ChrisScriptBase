@@ -26,8 +26,11 @@ Wszystkie fragmenty oddzielone * lub spacjami muszą wystąpić w nazwie szablon
 w dowolnej kolejności. Nazwa szablonu trafia
 do template_job_name, a link do Job_Link. Zmienne extra_vars szablonu (JSON/YAML)
 trafiają od razu do Job_Variables. Refresh zastępuje poprzedni Job_Link,
-template_job_name i Job_Variables świeżymi danymi z AWX. Ignoruje ręczny dobór
-szablonu i zmiennych z konfiguracji; akcję Job_Type odczytuje ze zmiennych AWX.
+template_job_name i Job_Variables świeżymi danymi z AWX. Następnie stosuje
+JOB_VARIABLE_OVERRIDES_BY_OS[ostype]: nadpisuje wymienione wartości i dodaje nowe,
+zachowując pozostałe dane AWX. Obiekty są łączone rekurencyjnie, listy zastępowane.
+Puste {} wyłącza nadpisania. window/windows oznaczają ten sam typ OS.
+Akcję Job_Type odczytuje z końcowych zmiennych; ręczny wybór szablonu jest ignorowany.
 Znaleziony szablon pokazuje również w konsoli. Brak lub kilka pasujących szablonów
 dla hosta powoduje błąd przed zapisem Excela.
 
@@ -79,6 +82,12 @@ VARIABLES = {
     # Szablon zawsze wyszukiwany w organizacji o nazwie równej ApplicationID hosta.
     # "JOB_TEMPLATE_NAME_PATTERN": '*zabbix*install*{os_name}*',
     # "JOB_TEMPLATE_OS_NAMES": {'linux': 'unix', 'aix': 'aix', 'windows': 'window'},
+    # Nadpisania Job_Variables po odczycie z AWX, osobno dla ostype. {} zachowuje dane AWX.
+    # "JOB_VARIABLE_OVERRIDES_BY_OS": {
+    #     'windows': {'action': 'install'},
+    #     'linux': {'action': 'install'},
+    #     'aix': {'action': 'reinstall'},
+    # },
     # Bez --sheet: użyty zostanie ten arkusz, a jeśli go brak — aktywny arkusz.
     # "SHEET_NAME": 'Results',
     # None włącza automatyczne rozpoznawanie kolumny. Jedna nazwa hosta na wiersz.

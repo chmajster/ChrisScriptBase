@@ -10,7 +10,13 @@ REFRESH_INVENTORY_PATTERN = '*_mirror_inventory'
 # Wszystkie fragmenty oddzielone * lub spacjami; kolejność bez znaczenia.
 JOB_TEMPLATE_NAME_PATTERN = '*zabbix*install*{os_name}*'
 JOB_TEMPLATE_OS_NAMES = {'linux': 'unix', 'aix': 'aix', 'windows': 'window'}
-# Refresh pobiera nazwę, link i extra_vars z AWX bez ręcznych nadpisań zmiennych joba.
+# Refresh pobiera nazwę, link i extra_vars z AWX; następnie stosuje nadpisania dla ostype.
+# Obiekty są łączone, listy zastępowane; niewymienione zmienne zachowują wartości z AWX.
+JOB_VARIABLE_OVERRIDES_BY_OS = {
+    'windows': {'action': 'install'},
+    'linux': {'action': 'install'},
+    'aix': {'action': 'reinstall'},
+}
 # Opcjonalne nadpisania dla awx_find_templates.py.
 TEMPLATES_OVERRIDES = {}
 
