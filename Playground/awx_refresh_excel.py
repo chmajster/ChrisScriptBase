@@ -18,18 +18,18 @@ ApplicationID jest dynamiczne, pobierane z nazwy znalezionego inventory.
 Jeden plik może zawierać hosty z wielu inventory. Kilka dopasowań tej samej nazwy
 hosta powoduje błąd z nazwami inventory, bez zapisu Excela.
 
-JOB_TEMPLATE_AUTO_DISCOVERY=True dobiera szablon po JOB_TEMPLATE_ORGANIZATION
-i JOB_TEMPLATE_NAME_PATTERN, zamiast JOB_URL / url z OS_JOBS. Wzorzec obsługuje
+Szablon jest zawsze wyszukiwany według JOB_TEMPLATE_NAME_PATTERN w organizacji
+AWX o nazwie równej ApplicationID hosta. Wzorzec obsługuje
 {hostname}, {application_id}, {ostype} i {os_name}. Domyślnie Linux -> unix,
 AIX -> aix, Windows/window -> window; mapowanie określa JOB_TEMPLATE_OS_NAMES.
 Wszystkie fragmenty oddzielone * lub spacjami muszą wystąpić w nazwie szablonu,
 w dowolnej kolejności. Nazwa szablonu trafia
 do template_job_name, a link do Job_Link. Zmienne extra_vars szablonu (JSON/YAML)
-trafiają od razu do Job_Variables, również przy JOB_TEMPLATE_AUTO_DISCOVERY=False
-i szablonie wskazanym przez JOB_URL / OS_JOBS. Refresh zastępuje poprzednią
-zawartość Job_Variables świeżymi danymi. OS_JOBS[system]['variables'] i JOB_TYPE
-zachowują pierwszeństwo. Brak lub kilka
-pasujących szablonów dla hosta powoduje błąd przed zapisem Excela.
+trafiają od razu do Job_Variables. Refresh zastępuje poprzedni Job_Link,
+template_job_name i Job_Variables świeżymi danymi z AWX. Ignoruje ręczny dobór
+szablonu i zmiennych z konfiguracji; akcję Job_Type odczytuje ze zmiennych AWX.
+Znaleziony szablon pokazuje również w konsoli. Brak lub kilka pasujących szablonów
+dla hosta powoduje błąd przed zapisem Excela.
 
 Skrypt zapisuje ten sam plik. Odświeża INVENTORY, ApplicationID, ostype,
 credentiale, szablon joba, jego zmienne i akcję. ApplicationID po INVENTORY
@@ -76,9 +76,7 @@ VARIABLES = {
     # Wzorzec nazw inventory do wyszukiwania hostów. INVENTORY jest ignorowane.
     # * oznacza dynamiczny prefiks ApplicationID; ? dopasowuje jeden znak.
     # "REFRESH_INVENTORY_PATTERN": '*_mirror_inventory',
-    # True: dobór Job_Link po danych hosta i wzorcu; template_job_name = nazwa z AWX.
-    # "JOB_TEMPLATE_AUTO_DISCOVERY": True,
-    # "JOB_TEMPLATE_ORGANIZATION": 'IT2',
+    # Szablon zawsze wyszukiwany w organizacji o nazwie równej ApplicationID hosta.
     # "JOB_TEMPLATE_NAME_PATTERN": '*zabbix*install*{os_name}*',
     # "JOB_TEMPLATE_OS_NAMES": {'linux': 'unix', 'aix': 'aix', 'windows': 'window'},
     # Bez --sheet: użyty zostanie ten arkusz, a jeśli go brak — aktywny arkusz.
@@ -86,10 +84,7 @@ VARIABLES = {
     # None włącza automatyczne rozpoznawanie kolumny. Jedna nazwa hosta na wiersz.
     # "HOST_COLUMN": 'hostname',
 
-    # Odświeżana akcja playbooka, np. install/reinstall/update lub własna wartość.
-    # Pusty tekst zachowuje akcję określoną w świeżych Job_Variables z OS_JOBS.
-    # "JOB_TYPE": 'install',
-    # Nazwa extra_var, pod którą playbook oczekuje powyższej akcji.
+    # Nazwa extra_var używana do odczytu Job_Type ze zmiennych znalezionego szablonu.
     # "JOB_TYPE_VARIABLE": 'action',
 
     # Artifacts i artifact filter są zachowywane razem z historią jobów.
@@ -104,11 +99,7 @@ VARIABLES = {
     # },
     # Wspólne odpowiedzi survey; {} nie dodaje nadpisań.
     # "SURVEY_ANSWERS": {},
-    # Przy JOB_TEMPLATE_AUTO_DISCOVERY=False: JOB_URL ma pierwszeństwo przed OS_JOBS[ostype]['url'].
-    # Pusty JOB_URL zachowuje dobór szablonów osobno dla systemów hostów.
-    # "JOB_URL": 'https://awx.example.com/#/templates/job_template/7/details',
-    # Zmiany OS_JOBS i credentiali można tu ustawić tak samo jak w awx_variable.
-    # Refresh przelicza je na podstawie danych AWX oraz aktualnych ustawień.
+    # Credentiale szablonu pochodzą z joba znalezionego w AWX.
     # Extra_Credentials: niepusta lista poniżej, a przy [] credentiale szablonu joba.
     # Full_Credential jest łączone z credentialami hosta bez powtórzeń.
     # Credential hosta zastępuje odziedziczony credential szablonu tego samego

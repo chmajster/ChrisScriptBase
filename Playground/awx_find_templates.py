@@ -16,8 +16,9 @@ Przykład: *zabbix*install*windows pasuje do Zabbix Windows Agent Install.
 Wzorzec obsługuje {hostname},
 {application_id}, {ostype} i {os_name}. Wyniki: nazwa, ID, organizacja, link.
 
-Te same ustawienia sterują doborem Job_Link przy odświeżaniu Excela po włączeniu
-JOB_TEMPLATE_AUTO_DISCOVERY. Nazwa trafia do kolumny template_job_name.
+Refresh zawsze dobiera Job_Link według wzorca w organizacji o nazwie równej
+ApplicationID hosta. Nazwa trafia do template_job_name. Podgląd dla hosta:
+python awx_find_templates.py --hostname server1 (organizacja ustalana z hosta).
 """
 
 from lib.awx_dependencies import ensure_virtual_environment

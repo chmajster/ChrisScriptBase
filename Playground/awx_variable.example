@@ -6,14 +6,11 @@ EXCEL_COLUMNS = ['hostname', 'ostype', 'AWX_Status', 'exceiute_job', 'output', '
 # Ignoruje INVENTORY. * to dowolny ciąg znaków (dynamiczne ApplicationID), ? jeden znak.
 REFRESH_INVENTORY_PATTERN = '*_mirror_inventory'
 
-# True włącza dobór Job_Link przy refresh po organizacji i nazwie szablonu.
-JOB_TEMPLATE_AUTO_DISCOVERY = False
-JOB_TEMPLATE_ORGANIZATION = ''  # Dokładna nazwa organizacji lub numeryczne ID.
+# Refresh zawsze szuka szablonu w organizacji o nazwie równej ApplicationID hosta.
 # Wszystkie fragmenty oddzielone * lub spacjami; kolejność bez znaczenia.
 JOB_TEMPLATE_NAME_PATTERN = '*zabbix*install*{os_name}*'
 JOB_TEMPLATE_OS_NAMES = {'linux': 'unix', 'aix': 'aix', 'windows': 'window'}
-# Refresh pobiera extra_vars wybranego szablonu do Job_Variables także bez autodiscovery.
-# OS_JOBS[system]['variables'] i JOB_TYPE nadpisują pobrane wartości.
+# Refresh pobiera nazwę, link i extra_vars z AWX bez ręcznych nadpisań zmiennych joba.
 # Opcjonalne nadpisania dla awx_find_templates.py.
 TEMPLATES_OVERRIDES = {}
 
@@ -32,15 +29,3 @@ SURVEY_ANSWERS = {
 # [] pobiera credentiale przypisane do szablonu joba.
 # Niepusta lista wybiera credentiale z konfiguracji, np. ['shared-vault'].
 EXTRA_CREDENTIAL_VARIABLES = []
-
-# W awx_variable sekcja OS_JOBS[system]['variables'] przyjmuje YAML bez przecinkow:
-# 'linux': {'url': 'https://awx.example/#/templates/job_template/7/details', 'variables': {
-#     action: install
-#     count: 123
-#     enabled: true
-#     packages:
-#       - curl
-#       - git
-# }}
-# Pozostaw klamry sekcji variables. Zachowaj wciecia we wklejonym YAML.
-# Dotychczasowy slownik Pythona {'action': 'install', 'count': 123} tez dziala.

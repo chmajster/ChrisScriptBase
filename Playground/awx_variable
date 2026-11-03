@@ -25,38 +25,10 @@ EXTRA_CREDENTIAL_VARIABLES = []
 # Separator nazw lub ID w Full_Credential oraz przy wyborze jumphostów w Excelu.
 FULL_CREDENTIAL_SEPARATOR = ', '
 
-# === 3. Szablony zadań i zmienne według systemu operacyjnego ===
-# Klucze windows/linux/aix odpowiadają wartościom ostype hosta.
-# url: adres szablonu zadania w interfejsie AWX lub API, na serwerze z AWX_URL.
-# Pusty url oznacza brak skonfigurowanego szablonu dla danego systemu.
-# variables: zmienne przekazywane do zadania jako extra_vars.
-# W klamrach variables można wkleić wcięty YAML bez przecinków albo słownik Pythona.
-# Adresy URL mogą zajmować kilka linii; parser usuwa z nich podziały i wcięcia.
-OS_JOBS = {
-    'windows': {
-        'url': 'http://10.0.0.204:30080/#/templates/job_template/15/details',
-        'variables': {
-        },
-    },
-    'linux': {
-        'url': 'http://10.0.0.204:30080/#/templates/job_template/16/details',
-        'variables': {
-            awd: 123
-            dasd: '1'
-        },
-    },
-    'aix': {
-        'url': '',
-        'variables': {
-        },
-    },
-}
-
-# Opcjonalny wspólny adres szablonu zadania; pusty tekst zachowuje wybór dla hosta.
-# Eksport i odświeżanie: JOB_URL ma pierwszeństwo przed url z OS_JOBS; ustala
-# Job_Link i szablon używany do wykrywania pytań ankiety AWX (survey).
-# Wykonanie: JOB_URL ma pierwszeństwo przed Job_Link z Excela.
-JOB_URL = ''
+# === 3. Dobór szablonu i zmiennych z AWX ===
+# Refresh zawsze wyszukuje szablon według JOB_TEMPLATE_NAME_PATTERN.
+# Organizacja jest ustalana z hosta: nazwa organizacji == ApplicationID.
+# Job_Link, template_job_name i Job_Variables są pobierane z AWX.
 
 # === 4. Pliki JSON i Excel oraz wybór hostów ===
 # Ścieżki względne są liczone od bieżącego katalogu uruchomienia skryptu.
@@ -83,12 +55,9 @@ EXCEL_COLUMNS = []
 # ApplicationID jest wyznaczane z nazwy znalezionego inventory przed pierwszym _.
 REFRESH_INVENTORY_PATTERN = '*_mirror_inventory'
 
-# Wyszukiwanie szablonów: python awx_find_templates.py --organization 'nazwa organizacji'.
-# True: refresh dobiera Job_Link automatycznie zamiast JOB_URL / url z OS_JOBS.
-# False: refresh używa dotychczasowego wyboru szablonu.
-JOB_TEMPLATE_AUTO_DISCOVERY = False
-# Dokładna nazwa organizacji AWX albo jej ID jako liczba. Wymagane przy auto/search.
-JOB_TEMPLATE_ORGANIZATION = ''
+# Refresh zawsze szuka szablonu w organizacji o nazwie równej ApplicationID hosta.
+# Nazwa, link i zmienne pochodzą z AWX. Nie podawaj ich ręcznie w konfiguracji.
+# Podgląd: python awx_find_templates.py --hostname 'nazwa_hosta'.
 # Wszystkie fragmenty muszą wystąpić w nazwie; kolejność i wielkość liter bez znaczenia.
 # Fragmenty oddzielaj * lub spacjami; ? dopasowuje jeden znak.
 # Zmienne: {os_name}, {ostype}, {hostname}, {application_id}.
@@ -166,7 +135,7 @@ COLOR = 'auto'
 
 # === 9. Opcjonalne nadpisania dla poszczególnych operacji ===
 # Klucze mają te same nazwy co powyżej; {} zachowuje wspólne wartości.
-# Zagnieżdżone słowniki są łączone, np. można zmienić sam url w OS_JOBS dla Linuxa.
+# Refresh zawsze ustala organizację i szablon na podstawie hosta oraz wzorca.
 # Przykład: EXECUTE_OVERRIDES = {'BATCH_SIZE': 5, 'WAIT_FOR_COMPLETION': True}.
 # Eksport inwentarza: awx_inventory_hosts.py.
 INVENTORY_OVERRIDES = {}

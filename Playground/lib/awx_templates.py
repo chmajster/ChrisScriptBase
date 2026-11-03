@@ -10,8 +10,8 @@ from .awx_config import AWXError
 from .awx_dependencies import ensure_yaml
 
 
-def find_organization(client, selector):
-    numeric = type(selector) is int or isinstance(selector, str) and re.fullmatch('[0-9]+', selector)
+def find_organization(client, selector, *, by_name=False):
+    numeric = not by_name and (type(selector) is int or isinstance(selector, str) and re.fullmatch('[0-9]+', selector))
     key = ('id', int(selector)) if numeric else ('name', selector.casefold())
     if key not in client.organization_cache:
         if numeric:
@@ -78,8 +78,9 @@ def name_regexes(settings, host=None):
             for group in name_match_groups(settings, host)]
 
 
-def find_templates(client, settings, host=None):
-    organization = find_organization(client, settings['JOB_TEMPLATE_ORGANIZATION'])
+def find_templates(client, settings, host=None, *, organization_name=None):
+    selector = settings['JOB_TEMPLATE_ORGANIZATION'] if organization_name is None else organization_name
+    organization = find_organization(client, selector, by_name=organization_name is not None)
     groups = name_match_groups(settings, host)
     key = (organization['id'], tuple(groups))
     if key not in client.template_search_cache:
@@ -111,11 +112,14 @@ def template_details(client, template_id):
 
 
 def template_for_host(client, settings, host):
-    _, matches = find_templates(client, settings, host)
+    application_id = str(host.get('ApplicationID') or host.get('INVENTORY', '').split('_', 1)[0]).strip()
+    if not application_id or application_id.casefold() == 'none':
+        raise AWXError(f"Host {host['name']!r}: ApplicationID is required to find its AWX organization.")
+    _, matches = find_templates(client, settings, host, organization_name=application_id)
     label = f"Host {host['name']!r}, ostype={host.get('ostype')!r}"
     if not matches:
         raise AWXError(f"{label}: no job template matches words {settings['JOB_TEMPLATE_NAME_PATTERN']!r} "
-                       f"in organization {settings['JOB_TEMPLATE_ORGANIZATION']!r}.")
+                       f"in organization {application_id!r} (ApplicationID).")
     if len(matches) != 1:
         found = ', '.join(f"{item['id']}: {item['name']}" for item in matches)
         raise AWXError(f'{label}: ambiguous job templates ({found}). Narrow JOB_TEMPLATE_NAME_PATTERN.')
@@ -158,7 +162,7 @@ def main(argv=None):
         settings['JOB_TEMPLATE_ORGANIZATION'] = args.organization
     if args.name_pattern is not None:
         settings['JOB_TEMPLATE_NAME_PATTERN'] = args.name_pattern
-    common.normalize_template_settings(settings, require_organization=True)
+    common.normalize_template_settings(settings, require_organization=args.hostname is None)
     awx.validate_connection_settings(settings)
     awx.configure_debug(args.debug, settings['AWX_TOKEN'].strip())
     awx.apply_connection_settings(settings)
@@ -172,7 +176,10 @@ def main(argv=None):
         if not report['hosts']:
             raise AWXError(f'Host {names[0]!r} was not found in inventories matching REFRESH_INVENTORY_PATTERN.')
         host = report['hosts'][0]
-    organization, matches = find_templates(client, settings, host)
+    organization_name = None
+    if host is not None and args.organization is None:
+        organization_name = host['INVENTORY'].split('_', 1)[0].strip()
+    organization, matches = find_templates(client, settings, host, organization_name=organization_name)
     for template in matches:
         link = client._resolve_url(f"job_templates/{template['id']}/")
         awx.console.print_message(client.redact(

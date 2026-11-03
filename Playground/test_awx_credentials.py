@@ -102,6 +102,10 @@ class FullCredentialTests(unittest.TestCase):
                              'shared-vault, template-machine, app_1hop')
 
     def test_refresh_restores_os_credential_and_preserves_jump_and_history(self):
+        settings = awx.common.normalize_refresh_settings(dict(self.settings))
+        self.client.organization_cache[('name', 'app')] = {'id': 1, 'name': 'app'}
+        groups = awx.templates.name_match_groups(settings, {'name': 'server1', 'INVENTORY': 'app_inventory', 'ostype': 'linux'})
+        self.client.template_search_cache[(1, tuple(groups))] = [{'id': 7, 'name': 'Zabbix Unix Install'}]
         headers, rows, _ = self.build(['template-machine'], with_jumps=True)
         book = awx.excel.create_workbook(headers, rows)
         self.addCleanup(book.close)

@@ -461,7 +461,7 @@ def normalize_template_settings(settings, *, require_organization=False):
         settings['JOB_TEMPLATE_ORGANIZATION'] = organization
     if not (isinstance(organization, str) or type(organization) is int and organization > 0):
         raise AWXError('JOB_TEMPLATE_ORGANIZATION must be an organization name or a positive ID.')
-    if (require_organization or settings['JOB_TEMPLATE_AUTO_DISCOVERY']) and not organization:
+    if require_organization and not organization:
         raise AWXError('Set JOB_TEMPLATE_ORGANIZATION to an organization name/ID, or use --organization.')
     pattern = settings['JOB_TEMPLATE_NAME_PATTERN']
     if not isinstance(pattern, str) or not pattern.strip():
@@ -477,17 +477,27 @@ def normalize_template_settings(settings, *, require_organization=False):
     return settings
 
 
+def normalize_refresh_settings(settings):
+    """Refresh always derives the template organization and variables from AWX."""
+    settings.update(JOB_TEMPLATE_AUTO_DISCOVERY=True, JOB_TEMPLATE_ORGANIZATION='',
+                    JOB_URL='', JOB_TYPE='')
+    return normalize_template_settings(settings)
+
+
 def read_template_settings():
     settings = group_settings((*CONNECTION_KEYS, *TEMPLATE_KEYS, 'REFRESH_INVENTORY_PATTERN'), None, 'templates')
     settings['REFRESH_INVENTORY_PATTERN'] = settings['REFRESH_INVENTORY_PATTERN'] or '*_mirror_inventory'
     return settings
 
 
-def read_execution_settings(settings_file=None):
+def read_execution_settings(settings_file=None, *, refresh=False):
     from .awx_survey import answer_mapping
 
     settings = group_settings(EXECUTION_KEYS, settings_file, "execute")
-    normalize_template_settings(settings)
+    if refresh:
+        normalize_refresh_settings(settings)
+    else:
+        normalize_template_settings(settings)
     pattern = settings["REFRESH_INVENTORY_PATTERN"]
     if pattern is None:
         pattern = "*_mirror_inventory"
