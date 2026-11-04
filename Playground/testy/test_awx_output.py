@@ -90,6 +90,45 @@ class OutputPlanTests(unittest.TestCase):
         self.client.get.assert_not_called()
         self.client.post.assert_not_called()
 
+    def test_singular_and_plural_job_links_with_or_without_scheme_share_one_job(self):
+        links = [
+            'https://awx.example.test/#/job/playbook/99/output',
+            'https://awx.example.test/#/jobs/playbook/99/output',
+            'awx.example.test/#/job/playbook/99/output',
+            '//awx.example.test/#/job/playbook/99/output',
+            'https://awx.example.test/job/playbook/99/output',
+            'https://awx.example.test/api/v2/jobs/99/',
+        ]
+        book = self.workbook(links)
+        captured = io.StringIO()
+        with redirect_stderr(captured):
+            jobs, _, skipped = awx.build_output_plan(book.active, self.client, self.settings)
+        self.assertEqual(list(jobs), [99])
+        self.assertEqual([entry['row'] for entry in jobs[99]], list(range(2, len(links) + 2)))
+        self.assertEqual(skipped, 0)
+        self.assertEqual(captured.getvalue(), '')
+        self.client.get.assert_not_called()
+        self.client.post.assert_not_called()
+
+    def test_schemeless_job_links_use_configured_scheme_and_require_matching_port(self):
+        client = awx.AWXClient('http://awx.example.test:8080/api/v2/', 'offline-token')
+        self.assertEqual(awx.job_id_from_link('awx.example.test:8080/#/job/playbook/99/output', client), 99)
+        with self.assertRaises(awx.AWXError):
+            awx.job_id_from_link('awx.example.test/#/job/playbook/99/output', client)
+
+    def test_singular_links_still_require_a_valid_job_id_and_the_configured_server(self):
+        for link in (
+            'other.example.test/#/job/playbook/99/output',
+            'https://other.example.test/#/job/playbook/99/output',
+            'https://awx.example.test/#/job/playbook/<ID>/output',
+            'https://awx.example.test/#/job/playbook/0/output',
+            'https://awx.example.test/#/job/playbook/-1/output',
+        ):
+            with self.subTest(link=link), self.assertRaises(awx.AWXError):
+                awx.job_id_from_link(link, self.client)
+        self.client.get.assert_not_called()
+        self.client.post.assert_not_called()
+
     def test_invalid_hyperlink_target_is_skipped_and_an_all_invalid_plan_is_empty(self):
         book = self.workbook(['https://awx.example.test/api/v2/jobs/99/'])
         column = awx.excel.read_columns(book.active)['exceiute_job_link']

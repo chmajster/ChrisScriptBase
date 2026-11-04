@@ -2246,7 +2246,7 @@ def execute_main(argv=None):
 
 OUTPUT_SETTINGS_FILE = common.OUTPUT_SETTINGS_FILE
 OUTPUT_DEFAULTS = common.OUTPUT_DEFAULTS
-JOB_PATTERN = re.compile('(?:^|/)jobs/(?:playbook/)?([1-9][0-9]*)(?:/|$)')
+JOB_PATTERN = re.compile('(?:^|/)jobs?/(?:playbook/)?([1-9][0-9]*)(?:/|$)')
 TERMINAL_STATUSES = {'successful', 'failed', 'error', 'canceled'}
 EXCEL_CELL_LIMIT = 32767
 
@@ -2259,6 +2259,12 @@ def parse_output_arguments(argv=None):
     return parse_operation_arguments(parser, argv)
 
 def job_id_from_link(link, client):
+    link = str(link or '').strip()
+    scheme = urlsplit(client.base_url).scheme
+    if link.startswith('//'):
+        link = f'{scheme}:{link}'
+    elif '://' not in link and not link.startswith(('/', '#')):
+        link = f'{scheme}://{link}'
     return resource_id_from_link(link, client, JOB_PATTERN, "Execution link")
 
 def build_output_plan(sheet, client, settings):

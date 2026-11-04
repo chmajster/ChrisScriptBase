@@ -539,7 +539,7 @@ class RefreshTests(unittest.TestCase):
             ['hostname', 'ostype', 'exceiute_job_link', 'output', 'Artifacts', 'artifact filter'],
             [['bad', 'linux', 'https://awx.example.test/', 'keep old log', '{"old":true}', 'keep old message'],
              ['good1', 'linux', 'https://awx.example.test/api/v2/jobs/99/', '', '', ''],
-             ['good2', 'linux', 'https://awx.example.test/#/jobs/playbook/99/output', '', '', '']],
+             ['good2', 'linux', 'https://awx.example.test/#/job/playbook/99/output', '', '', '']],
         )
         book.save(self.path)
         book.close()
@@ -570,6 +570,9 @@ class RefreshTests(unittest.TestCase):
             for row in (3, 4):
                 self.assertEqual(book.active.cell(row, columns['output']).value, 'complete job log\n')
                 self.assertEqual(book.active.cell(row, columns['artifact filter']).value, 'done')
+            cell = book.active.cell(4, columns['exceiute_job_link'])
+            self.assertEqual(cell.value, 'https://awx.example.test/#/job/playbook/99/output')
+            self.assertEqual(cell.hyperlink.target, cell.value)
         finally:
             book.close()
 

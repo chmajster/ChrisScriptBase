@@ -13,6 +13,10 @@ o zamknięcie go w Excelu. Sprawdzenie działa również bez debug i nie zmienia
 Skrypt odczytuje linki z EXECUTION_COLUMN (domyślnie exceiute_job_link) i system
 z ostype. Pobiera pełny stdout każdego unikalnego joba i wpisuje go do OUTPUT_COLUMN
 we wszystkich powiązanych wierszach. Puste linki i LAUNCH_PENDING są pomijane.
+Odczytuje ID z linków WebUI /#/job/playbook/<ID>/output oraz
+/#/jobs/playbook/<ID>/output, a także z adresów API /api/v2/jobs/<ID>/.
+Adres bez protokołu (np. awx.example.com/#/job/playbook/123/output) korzysta
+z protokołu AWX_URL. Serwer, port i protokół muszą odpowiadać AWX_URL.
 Nieprawidłowy link (np. sam adres AWX bez ID joba) powoduje ostrzeżenie z nazwą
 arkusza i kolumny, numerem wiersza, adresem komórki, jej dokładną wartością,
 celem hiperłącza i powodem pominięcia. Komunikat wskazuje źródło sprawdzanego
