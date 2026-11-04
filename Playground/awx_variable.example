@@ -1,6 +1,6 @@
 # Widoczne kolumny w Excelu; [] pokazuje wszystkie.
 # Pozostałe kolumny są ukrywane z zachowaniem danych; własne kolumny dodawane jako puste.
-EXCEL_COLUMNS = ['hostname', 'ostype', 'AWX_Status', 'exceiute_job_link', 'output', 'Uwagi']
+EXCEL_COLUMNS = ['hostname', 'ostype', 'OS VERSION', 'AWX_Status', 'exceiute_job_link', 'output', 'Uwagi']
 EXECUTION_COLUMN = 'exceiute_job_link'
 # ask: pytanie; missing: bez linku; all: wszystkie; errors: artifact status=error.
 # Pełny plan nadal wymaga potwierdzenia przed startem.

@@ -26,6 +26,9 @@ Pokazuje użycie pamięci podręcznej, liczbę żądań i czas operacji.
 Wartości zmiennych grup i zadań nie są wypisywane w diagnostyce.
 Logika, konfiguracja i zapis Excela są wspólne i znajdują się w lib/.
 ApplicationID po INVENTORY to pierwszy człon nazwy inventory przed znakiem _.
+OS VERSION po ostype to jedna wartość z zapisanych faktów hosta w AWX:
+Linux: ansible_lsb.id i release, np. Ubuntu 22.04; Windows: ansible_distribution.
+Brak wymaganych faktów daje none. Skrypt tylko odczytuje fakty, bez uruchamiania jobów.
 Job_Credentials po Job_Link pokazuje credentiale przypisane do szablonu w AWX.
 Machine odziedziczone wyłącznie z szablonu nie są kopiowane do Full_Credential.
 Credentiale z OS Credential i jawne EXTRA_CREDENTIAL_VARIABLES są zachowywane.
@@ -66,7 +69,7 @@ VARIABLES = {
     # "EXCEL_OUTPUT_FILE": 'hosts.xlsx',
     # Widoczne kolumny; [] pokazuje wszystkie. Pozostałe są ukrywane z zachowaniem danych.
     # Własne nazwy, np. 'Uwagi', dodają puste kolumny do uzupełnienia.
-    # "EXCEL_COLUMNS": ['hostname', 'ostype', 'AWX_Status', 'Uwagi'],
+    # "EXCEL_COLUMNS": ['hostname', 'ostype', 'OS VERSION', 'AWX_Status', 'Uwagi'],
     # None oznacza wszystkie hosty. Ścieżka oznacza filtr z kolumny host_limit.
     # Plik wejściowy musi mieć inny adres niż wynikowy EXCEL_OUTPUT_FILE.
     # "INPUT_FILE": 'host-list.xlsx',

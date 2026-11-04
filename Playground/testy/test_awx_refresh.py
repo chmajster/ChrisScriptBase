@@ -48,6 +48,7 @@ class RefreshTests(unittest.TestCase):
         self.inventories = {10: 'app1_mirror_inventory', 20: 'B42_mirror_inventory',
                             30: 'app1_inventory', 40: 'app1_mirror_inventory_backup'}
         self.ostypes = {10: 'linux', 20: 'windows'}
+        self.facts = {}
         self.candidates = [self.host(1, 'Linux1', 10), self.host(2, 'win1', 20),
                            self.host(3, 'Linux2', 10), self.host(4, 'Linux1', 30),
                            self.host(5, 'prefixLinux1', 10), self.host(6, 'Linux1', 40),
@@ -107,6 +108,9 @@ class RefreshTests(unittest.TestCase):
         raise AssertionError(f'Unexpected AWX list request: {path}')
 
     def get(self, path, **options):
+        match = re.fullmatch(r'(?:/api/v2/)?hosts/([0-9]+)/ansible_facts/', path)
+        if match:
+            return self.facts.get(int(match.group(1)), {})
         if path.startswith('organizations/'):
             number = int(path.split('/')[1])
             return next(item for item in self.organizations if item['id'] == number)
@@ -808,6 +812,54 @@ class RefreshTests(unittest.TestCase):
         filters = self.client.items.call_args_list[0].kwargs
         self.assertIn('inventory__name__iregex', filters)
         self.assertIn('name__iregex', filters)
+
+    def test_refresh_fills_shared_os_version_column_and_preserves_previous_job_results(self):
+        self.write_config(EXCEL_COLUMNS=['hostname', 'ostype', 'exceiute_job_link', 'output'])
+        self.write_workbook(['Linux1', 'win1', 'missing'])
+        self.facts = {
+            1: {'ansible_lsb': {'id': 'Ubuntu', 'release': '22.04'}},
+            2: {'ansible_distribution': 'Microsoft Windows Server 2022 Datacenter'},
+        }
+        code, output, _ = self.refresh()
+        self.assertEqual(code, 0, output)
+        book = load_workbook(self.path)
+        try:
+            columns = awx.excel.read_columns(book.active)
+            self.assertEqual(columns['os version'], columns['ostype'] + 1)
+            versions = {book.active.cell(row, columns['hostname']).value:
+                        book.active.cell(row, columns['os version']).value for row in range(2, 5)}
+            self.assertEqual(versions, {'Linux1': 'Ubuntu 22.04',
+                                       'win1': 'Microsoft Windows Server 2022 Datacenter', 'missing': 'none'})
+            self.assertFalse(book.active.column_dimensions[
+                book.active.cell(2, columns['os version']).column_letter].hidden)
+            for row in range(2, 5):
+                self.assertTrue(book.active.cell(row, columns['exceiute_job_link']).value.endswith('/99/output'))
+                self.assertEqual(book.active.cell(row, columns['output']).value, 'previous output')
+                self.assertEqual(book.active.cell(row, columns['artifacts']).value, '{"old": true}')
+                self.assertEqual(book.active.cell(row, columns['uwagi']).value, 'keep note')
+        finally:
+            book.close()
+        for number in (1, 2):
+            self.assertEqual(sum(call.args[0] == f'hosts/{number}/ansible_facts/'
+                                 for call in self.client.get.call_args_list), 1)
+        self.client.post.assert_not_called()
+
+    def test_inventory_export_saves_only_selected_fact_values_in_os_version(self):
+        self.facts[1] = {'ansible_lsb': {'id': 'RedHat', 'release': '9.3'},
+                         'ansible_env': {'TOKEN': 'must-not-export'}}
+        report = awx.fetch_report(self.client, 10, ['Linux1'])
+        self.assertEqual(report['hosts'][0]['OS VERSION'], 'RedHat 9.3')
+        self.assertNotIn('must-not-export', json.dumps(report))
+        names, rows = awx.build_inventory_rows(report, self.settings, 'output', client=self.client)
+        awx.save_inventory_excel(names, rows, self.path, self.settings, 'output', client=self.client)
+        book = load_workbook(self.path)
+        try:
+            columns = awx.excel.read_columns(book.active)
+            self.assertEqual(book.active.cell(2, columns['os version']).value, 'RedHat 9.3')
+            self.assertEqual(columns['os version'], columns['ostype'] + 1)
+        finally:
+            book.close()
+        self.client.post.assert_not_called()
 
     def test_editable_pattern_supports_case_question_mark_and_literal_dot(self):
         for pattern, expected in [('APP?_MIRROR_INVENTORY', ['Linux1']),

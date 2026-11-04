@@ -204,6 +204,8 @@ def open_workbook_sheet(path, preferred="Results", explicit=None):
 OPERATION_HELP = {
     "inventory": r"""Działanie:
   Pobiera hosty, inventory, ostype oraz credentiale z grup AWX.
+  OS VERSION po ostype: Linux = ansible_lsb.id i release, Windows = ansible_distribution.
+  Czyta zapisane fakty hosta z AWX; brak faktów daje none, bez uruchamiania jobów.
   ApplicationID po INVENTORY: pierwszy człon nazwy inventory przed znakiem _.
   Job_Credentials po Job_Link: credentiale przypisane do szablonu w AWX.
   HOPS: nazwy grup hosta i liczby z wzorca <liczba>_hop lub <liczba>hop,
@@ -254,7 +256,9 @@ Przykłady:
   Pozostałe zmienne są zachowywane, zagnieżdżone obiekty łączone, listy zastępowane.
   Job_Type odczytuje z końcowych zmiennych, pod kluczem JOB_TYPE_VARIABLE.
   Brak lub kilka szablonów dla hosta powoduje błąd przed zapisem pliku.
-  Odświeża INVENTORY, ApplicationID, ostype, credentiale, szablon, zmienne i akcję joba.
+  Odświeża INVENTORY, ApplicationID, ostype, OS VERSION, credentiale, szablon, zmienne i akcję joba.
+  OS VERSION: jedna wartość z zapisanych faktów hosta w AWX; Linux = ansible_lsb.id
+  i release, Windows = ansible_distribution. Brak faktów daje none.
   Znalezioną nazwę, organizację i link pokazuje również w konsoli.
   Job_Credentials pokazuje aktualne credentiale szablonu, niezależnie od Extra_Credentials.
   Extra_Credentials: EXTRA_CREDENTIAL_VARIABLES, a przy [] credentiale szablonu.
@@ -917,6 +921,67 @@ def fetch_refresh_report(client, hostnames, inventory_pattern):
     return build_host_report(client, candidates, requested, inventory_names=inventory_names)
 
 
+def os_version_from_facts(ostype, facts):
+    """Combine Linux LSB id/release or read the Windows distribution fact."""
+    ostype = common.normalize_ostype(ostype)
+    if ostype not in ('linux', 'windows') or not isinstance(facts, dict):
+        return 'none'
+    nested = facts.get('ansible_facts')
+    sources = [nested, facts] if isinstance(nested, dict) else [facts]
+
+    def text(value):
+        if isinstance(value, str):
+            value = value.strip()
+            return value if value.casefold() not in ('', 'none') else ''
+        if type(value) is int or type(value) is float and math.isfinite(value):
+            return str(value)
+        return ''
+
+    for source in sources:
+        if ostype == 'linux':
+            for name in ('ansible_lsb', 'lsb'):
+                lsb = source.get(name)
+                if isinstance(lsb, dict):
+                    version = ' '.join(part for part in (text(lsb.get('id')), text(lsb.get('release'))) if part)
+                    if version:
+                        return version
+        else:
+            for name in ('ansible_distribution', 'distribution', 'ansible_distributtion'):
+                version = text(source.get(name))
+                if version:
+                    return version
+    return 'none'
+
+
+def host_os_version(client, host, ostype, cache):
+    """Read cached facts once per source URL, including constructed inventory hosts."""
+    ostype = common.normalize_ostype(ostype)
+    if ostype not in ('linux', 'windows'):
+        return 'none'
+    if isinstance(host.get('ansible_facts'), dict):
+        return os_version_from_facts(ostype, host['ansible_facts'])
+    related = host.get('related') or {}
+    path = related.get('ansible_facts') if isinstance(related, dict) else None
+    path = path if isinstance(path, str) and path.strip() else f"hosts/{host['id']}/ansible_facts/"
+    key = None
+    try:
+        key = client._resolve_url(path)
+        if key not in cache:
+            facts = client.get(path, purpose=f"Odczyt faktów systemu hosta {host['name']!r} do kolumny OS VERSION")
+            if not isinstance(facts, dict):
+                raise AWXError('Fakty hosta muszą być obiektem JSON.')
+            cache[key] = {os_name: os_version_from_facts(os_name, facts) for os_name in ('linux', 'windows')}
+        return cache[key].get(ostype, 'none')
+    except AWXError as exc:
+        if key is not None:
+            cache[key] = {}
+        console.print_message(client.redact(
+            f"Host {host['name']!r}: nie można odczytać faktów systemu; OS VERSION = none.\n"
+            f'  Źródło: {path}\n  Powód: {exc}'
+        ), file=sys.stderr, level='warning', flush=True)
+        return 'none'
+
+
 def build_host_report(client, candidates, requested=None, *, inventory_names=None):
     """Load complete metadata once per source inventory for the selected hosts."""
     credential_variables = credential_variable_names()
@@ -926,6 +991,7 @@ def build_host_report(client, candidates, requested=None, *, inventory_names=Non
     hosts = []
     group_indexes = {}
     host_variables = {}
+    facts_cache = {}
     host_index(candidates)
     for host in candidates:
         source_id = host['inventory']
@@ -941,7 +1007,10 @@ def build_host_report(client, candidates, requested=None, *, inventory_names=Non
         else:
             LOGGER.debug('Host %s: korzystam z gotowego indeksu grup inwentarza ID %s, bez ponownego pobierania.', host['name'], source_id)
         ostype = common.normalize_ostype(host_variables[source_id].get(common.hostname_key(host['name']), {}).get('ostype'))
-        hosts.append({'id': host['id'], 'name': host['name'], 'INVENTORY': inventory_names[source_id], 'ostype': ostype, 'enabled': host.get('enabled', True), **group_indexes[source_id].for_host(host['name'])})
+        version = host_os_version(client, host, ostype, facts_cache)
+        hosts.append({'id': host['id'], 'name': host['name'], 'INVENTORY': inventory_names[source_id], 'ostype': ostype,
+                      common.OS_VERSION_COLUMN: version, 'enabled': host.get('enabled', True),
+                      **group_indexes[source_id].for_host(host['name'])})
     report = {'host_count': len(hosts), 'hosts': hosts}
     if requested is not None:
         order = {common.hostname_key(name): index for index, name in enumerate(requested)}
@@ -1095,6 +1164,7 @@ def build_inventory_rows(report, settings=None, output_column=None, *, client=No
     for host in report['hosts']:
         ostype = common.normalize_ostype(host.get('ostype'))
         host['ostype'] = ostype
+        host[common.OS_VERSION_COLUMN] = host.get(common.OS_VERSION_COLUMN) or os_version_from_facts(ostype, host.get('ansible_facts'))
         ostype_text = 'none' if ostype is None else ostype if isinstance(ostype, str) else json.dumps(ostype, ensure_ascii=False)
         job = OS_JOBS.get(ostype.strip().casefold(), {}) if not auto_find_template and isinstance(ostype, str) else {}
         host['INVENTORY'] = host.get('INVENTORY') or report.get('inventory', {}).get('name') or 'none'
@@ -1174,7 +1244,9 @@ def build_inventory_rows(report, settings=None, output_column=None, *, client=No
                    Szablon=job_link or 'brak', Akcja=job_type or 'zachowana w zmiennych',
                    Nazwy_zmiennych=', '.join(map(str, job_variables)) or 'brak', HOPS=host['HOPS'],
                    Wybrany_jumphost=host['jumphost_for_hops'], Full_Credential=full_credential)
-        values = {'hostname': host['name'], 'INVENTORY': host['INVENTORY'], 'ApplicationID': host['ApplicationID'], 'ostype': ostype_text, 'template_job_name': host['template_job_name'], 'Job_Link': job_link or 'none', 'Job_Credentials': FULL_CREDENTIAL_SEPARATOR.join(host['Job_Credentials']) or 'none', 'Job_Variables': json.dumps(job_variables, ensure_ascii=False), 'HOPS': host['HOPS'], 'HOPS_COUNT': host['HOPS_COUNT'], 'jumphost_for_hops': host['jumphost_for_hops'], 'Extra_Credentials': extra_text, 'OS Credential': FULL_CREDENTIAL_SEPARATOR.join(credentials) or 'none', 'Full_Credential': full_credential, 'Job_Type': job_type, 'AWX_Status': 'found'}
+        values = {'hostname': host['name'], 'INVENTORY': host['INVENTORY'], 'ApplicationID': host['ApplicationID'], 'ostype': ostype_text,
+                  common.OS_VERSION_COLUMN: host[common.OS_VERSION_COLUMN],
+                  'template_job_name': host['template_job_name'], 'Job_Link': job_link or 'none', 'Job_Credentials': FULL_CREDENTIAL_SEPARATOR.join(host['Job_Credentials']) or 'none', 'Job_Variables': json.dumps(job_variables, ensure_ascii=False), 'HOPS': host['HOPS'], 'HOPS_COUNT': host['HOPS_COUNT'], 'jumphost_for_hops': host['jumphost_for_hops'], 'Extra_Credentials': extra_text, 'OS Credential': FULL_CREDENTIAL_SEPARATOR.join(credentials) or 'none', 'Full_Credential': full_credential, 'Job_Type': job_type, 'AWX_Status': 'found'}
         rows.append([values.get(name, '') for name in headers])
     return (headers, rows)
 
@@ -1461,7 +1533,7 @@ def batch_host_limit(hostnames):
 
 def execution_row_context(sheet, row_number, columns, excel_variables):
     """Keep different Excel launch metadata separate, including overridden inputs."""
-    handled = {'hostname', 'AWX_Status', 'ostype', 'template_job_name', 'Job_Link',
+    handled = {'hostname', 'AWX_Status', 'ostype', common.OS_VERSION_COLUMN, 'template_job_name', 'Job_Link',
                'Job_Variables', 'Full_Credential'}
     credential_columns = {'Job_Credentials', 'Extra_Credentials', 'OS Credential', 'jumphost_for_hops'}
     context = {'Job_Variables': excel_variables}

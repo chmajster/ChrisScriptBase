@@ -195,6 +195,14 @@ class ExecutionBatchTests(unittest.TestCase):
         self.assertEqual(len(batches), 1)
         self.assertEqual(batches[0]['limit'], 'localhost,host1,host2')
 
+    def test_os_version_is_informational_and_does_not_split_compatible_batches(self):
+        book = self.workbook(['host1', 'host2'])
+        self.set_row(book, 2, **{'os version': 'Ubuntu 22.04'})
+        self.set_row(book, 3, **{'os version': 'RedHat 9.3'})
+        batches, _, _, _ = self.plan(book)
+        self.assertEqual(len(batches), 1)
+        self.assertEqual(batches[0]['limit'], 'localhost,host1,host2')
+
     def test_missing_or_invalid_os_prevents_plan_creation(self):
         for value in (None, '', 'none', 123, True, '=A1'):
             with self.subTest(value=value):

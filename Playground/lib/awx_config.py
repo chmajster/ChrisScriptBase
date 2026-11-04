@@ -28,8 +28,9 @@ EXECUTION_SETTINGS_FILE = VARIABLES_FILE
 OUTPUT_SETTINGS_FILE = VARIABLES_FILE
 DEFAULT_EXECUTION_COLUMN = 'exceiute_job_link'
 LEGACY_EXECUTION_COLUMN = 'exceiute_job'
+OS_VERSION_COLUMN = 'OS VERSION'
 METADATA_COLUMNS = (
-    "hostname", "AWX_Status", "INVENTORY", "ApplicationID", "ostype", "template_job_name", "Job_Link", "Job_Credentials", "Job_Variables", "HOPS", "HOPS_COUNT", "jumphost_for_hops", "Extra_Credentials",
+    "hostname", "AWX_Status", "INVENTORY", "ApplicationID", "ostype", OS_VERSION_COLUMN, "template_job_name", "Job_Link", "Job_Credentials", "Job_Variables", "HOPS", "HOPS_COUNT", "jumphost_for_hops", "Extra_Credentials",
     "OS Credential", "Full_Credential", "Job_Type",
 )
 ARTIFACT_STATUS_COLUMN = 'artifact status'
@@ -473,6 +474,9 @@ def normalize_excel_columns(value):
             raise AWXError(f"Powtórzona nazwa kolumny w EXCEL_COLUMNS: {name!r}.")
         seen.add(name.casefold())
         names.append(name)
+    if 'ostype' in seen and OS_VERSION_COLUMN.casefold() not in seen:
+        index = next(index for index, name in enumerate(names) if name.casefold() == 'ostype')
+        names.insert(index + 1, OS_VERSION_COLUMN)
     if 'artifact filter' in seen and ARTIFACT_STATUS_COLUMN not in seen:
         index = next(index for index, name in enumerate(names) if name.casefold() == 'artifact filter')
         names.insert(index + 1, ARTIFACT_STATUS_COLUMN)

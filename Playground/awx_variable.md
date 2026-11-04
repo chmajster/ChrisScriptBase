@@ -354,6 +354,7 @@ EXCEL_COLUMNS = [
     'hostname',
     'AWX_Status',
     'ostype',
+    'OS VERSION',
     'exceiute_job_link',
     'output',
     'Survey_installtesttypename',
@@ -364,6 +365,7 @@ EXCEL_COLUMNS = [
 Efekty:
 
 - Wymienione kolumny są widoczne.
+- Wybór `ostype` pokazuje również sąsiednią kolumnę `OS VERSION`.
 - Pozostałe kolumny są ukryte, ale zachowują dane i nadal służą do wykonania jobów.
 - Własna brakująca kolumna, np. `Uwagi`, jest dodawana jako pusta.
 - Nazwy porównywane są bez rozróżniania wielkości liter.
@@ -1290,6 +1292,7 @@ Standardowe kolumny są następujące. Nazwy konfigurowalnych kolumn wykonania i
 | `INVENTORY` | Inventory, z którego pobrano metadane hosta. |
 | `ApplicationID` | Pierwszy człon nazwy inventory przed `_`. |
 | `ostype` | OS odczytany z AWX, np. `linux`, `windows`, `aix`. |
+| `OS VERSION` | Jedna wartość po `ostype`: Linux — `ansible_lsb.id` i `ansible_lsb.release`, np. `Ubuntu 22.04`; Windows — `ansible_distribution`. |
 | `template_job_name` | Nazwa wybranego szablonu, sprawdzana przy execute. |
 | `Job_Link` | Link do szablonu joba. To nie jest link do uruchomionego joba. |
 | `Job_Credentials` | Credentiale przypisane do szablonu. |
@@ -1309,6 +1312,8 @@ Standardowe kolumny są następujące. Nazwy konfigurowalnych kolumn wykonania i
 | `Survey_<zmienna>` | Odpowiedź na konkretne pytanie survey. |
 
 Eksport i odświeżanie porządkują hosty według systemu: Windows, Linux, AIX, następnie pozostałe/puste wartości. Nazwy kolumn są identyfikowane bez rozróżniania wielkości liter.
+
+`OS VERSION` jest uzupełniane przez eksport i odświeżanie z faktów hosta zapisanych w AWX. Dla hostów lustrzanych używany jest adres `related.ansible_facts`, jeśli AWX go udostępnia. Odczyt nie uruchamia zbierania faktów ani jobów. Brak wymaganych faktów daje `none`; błąd ich pobrania dodatkowo pokazuje ostrzeżenie i pozwala kontynuować aktualizację pozostałych danych. Kolumna jest informacyjna i nie rozdziela hostów na osobne uruchomienia joba.
 
 ### Arkusz Ustawienia
 

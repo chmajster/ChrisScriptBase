@@ -34,7 +34,7 @@ Akcję Job_Type odczytuje z końcowych zmiennych; ręczny wybór szablonu jest i
 Znaleziony szablon pokazuje również w konsoli. Brak lub kilka pasujących szablonów
 dla hosta powoduje błąd przed zapisem Excela.
 
-Skrypt zapisuje ten sam plik. Odświeża INVENTORY, ApplicationID, ostype,
+Skrypt zapisuje ten sam plik. Odświeża INVENTORY, ApplicationID, ostype, OS VERSION,
 credentiale, szablon joba, jego zmienne i akcję. ApplicationID po INVENTORY
 to pierwszy człon nazwy inventory przed _. HOPS przed Extra_Credentials zawiera nazwy grup
 z <liczba>_hop lub <liczba>hop i liczby, także z grup nadrzędnych; brak: none.
@@ -47,6 +47,9 @@ Full_Credential jest synchronizowane z wybranymi jumphostami bez powtórzeń.
 Odtwarza brakujące kolumny i porządkuje układ tak
 jak generator. Istniejące linki wykonania, output oraz inne arkusze zostają.
 Job_Credentials po Job_Link odświeża listę credentiali przypisanych do szablonu w AWX.
+OS VERSION po ostype łączy ansible_lsb.id i release dla Linuxa (np. Ubuntu 22.04),
+a dla Windows zawiera ansible_distribution. Korzysta z zapisanych faktów hosta w AWX,
+również przez related.ansible_facts dla hostów lustrzanych. Brak faktów daje none.
 Full_Credential pomija Machine odziedziczone wyłącznie z szablonu joba.
 Credentiale z OS Credential i jawne EXTRA_CREDENTIAL_VARIABLES są zachowywane.
 AWX_Status: found = znaleziony, not_found = brak w AWX, no_hostname = pusty host.
@@ -73,7 +76,7 @@ from lib.awx import run
 # > wspólne ustawienia z awx_variable. Pozostałe zmienne można dopisać tymi samymi nazwami.
 VARIABLES = {
     # Widoczne kolumny; [] pokazuje wszystkie. Pozostałe są ukrywane z zachowaniem danych.
-    # "EXCEL_COLUMNS": ['hostname', 'ostype', 'AWX_Status', 'Uwagi'],
+    # "EXCEL_COLUMNS": ['hostname', 'ostype', 'OS VERSION', 'AWX_Status', 'Uwagi'],
     # Plik .xlsx aktualizowany w miejscu. None wybiera EXCEL_OUTPUT_FILE.
     # "INPUT_FILE": 'hosts.xlsx',
     # Wzorzec nazw inventory do wyszukiwania hostów. INVENTORY jest ignorowane.
