@@ -1,4 +1,4 @@
-"""Credential export regressions. Run: python -m unittest test_awx_credentials -v."""
+"""Credential export regressions. Run: python -m unittest testy.test_awx_credentials -v."""
 
 import tempfile
 import unittest

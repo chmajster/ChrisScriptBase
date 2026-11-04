@@ -1458,6 +1458,14 @@ Launchery uruchamiają wspólną implementację z `lib/`. Jeżeli Python działa
 
 Brakujące openpyxl, a w razie potrzeby także PyYAML, mogą być instalowane w używanym środowisku wirtualnym. Zmiana `awx_variable` nie wymaga przebudowania środowiska; konfiguracja jest odczytywana przy kolejnym uruchomieniu.
 
+Testy znajdują się w katalogu `testy`. Z katalogu `Playground` uruchom cały zestaw:
+
+```powershell
+python -m unittest discover -s testy -v
+```
+
+Pojedynczy moduł można uruchomić jako pakiet, np. `python -m unittest testy.test_awx_credentials -v`. Testy używają klienta AWX z danymi testowymi i nie uruchamiają rzeczywistych jobów.
+
 Dokumentację zweryfikowano względem lokalnych plików:
 
 - [awx_variable](awx_variable) — bieżące ustawienia i komentarze.
