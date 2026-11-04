@@ -218,9 +218,12 @@ def update_artifact_status(sheet):
         return
     for row_number in range(2, sheet.max_row + 1):
         cell = sheet.cell(row_number, columns[ARTIFACT_STATUS_COLUMN])
-        cell.value = artifact_filter_status(sheet.cell(row_number, columns['artifact filter']).value)
+        has_data = any(other.column != cell.column and other.value is not None and str(other.value).strip()
+                       for other in sheet[row_number])
+        cell.value = artifact_filter_status(sheet.cell(row_number, columns['artifact filter']).value) if has_data else None
         cell.data_type = 's'
         cell.number_format = '@'
+        cell.hyperlink = None
 
 
 def prepare_sheet(sheet, execution_column=DEFAULT_EXECUTION_COLUMN, output_column="output", *, reorder=True):

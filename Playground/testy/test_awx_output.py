@@ -67,6 +67,10 @@ class ArtifactStatusTests(unittest.TestCase):
         self.assertEqual(columns['artifact status'], columns['artifact filter'] + 1)
         self.assertEqual([book.active.cell(row, columns['artifact status']).value
                           for row in range(2, len(messages) + 2)], [status for _, status in messages])
+        blank_row = len(messages) + 3
+        book.active.cell(blank_row, 1)
+        awx.excel.update_artifact_status(book.active)
+        self.assertIsNone(book.active.cell(blank_row, columns['artifact status']).value)
 
     def test_saved_status_tracks_changed_messages_and_is_visible_with_artifact_filter(self):
         book = awx.excel.create_workbook(['hostname', 'artifact filter'], [['host1', 'completed']])
