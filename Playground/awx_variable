@@ -1,160 +1,58 @@
-# Wspólne ustawienia skryptów AWX. Zapisuj wartości w postaci NAZWA = wartość.
-# Pierwszeństwo: argumenty wiersza poleceń > VARIABLES w skrypcie uruchamiającym
-# > nadpisania danej operacji (*_OVERRIDES) > wspólne wartości z tego pliku.
-# Nazwy ustawień, klucze zmiennych AWX i nazwy kolumn pozostają bez tłumaczenia.
-
-# === 1. Połączenie z AWX i pobieranie danych ===
-# Adres serwera AWX lub jego API v2.
 AWX_URL = 'http://10.0.0.204:30080'
-# Token uwierzytelniający żądania API; nie wybiera poświadczeń dla zadań.
 AWX_TOKEN = 'XhUJQQAbseBOUzqr0sG24649GSahs6'
-# Dokładna nazwa inwentarza AWX albo jego ID jako liczba bez cudzysłowów.
 INVENTORY = 'it2_inventory'
-# Limit czasu pojedynczego żądania HTTP, w sekundach.
 TIMEOUT = 30
-# Liczba rekordów pobieranych na jednej stronie odpowiedzi API.
 PAGE_SIZE = 200
 
-# === 2. Poświadczenia hostów i zadań ===
-# Nazwy zmiennych z poświadczeniami, odczytywanych z grup hosta i grup nadrzędnych.
 CREDENTIAL_VARIABLES = ['os_credential']
-# Niepusta lista: nazwy lub ID istniejących poświadczeń AWX do Extra_Credentials.
-# []: pobierz poświadczenia przypisane do wybranego szablonu zadania.
-# Poświadczenia Machine przypisane do szablonu nie są kopiowane do Full_Credential.
 EXTRA_CREDENTIAL_VARIABLES = []
-# Separator nazw lub ID w Full_Credential oraz przy wyborze jumphostów w Excelu.
 FULL_CREDENTIAL_SEPARATOR = ', '
 
-# === 3. Dobór szablonu i zmiennych z AWX ===
-# Refresh zawsze wyszukuje szablon według JOB_TEMPLATE_NAME_PATTERN.
-# Organizacja jest ustalana z hosta: nazwa organizacji == ApplicationID.
-# Job_Link, template_job_name i Job_Variables są pobierane z AWX.
 
-# Opcjonalne nadpisania Job_Variables po pobraniu zmiennych z AWX, osobno dla ostype.
-# Przykład: 'linux': {'action': 'install'}, 'windows': {'action': 'reinstall'}.
-# Pozostałe zmienne są zachowywane; obiekty łączone, listy zastępowane. {} nic nie zmienia.
-# window i windows oznaczają Windows. Nazwy zmiennych rozróżniają wielkość liter.
 JOB_VARIABLE_OVERRIDES_BY_OS = {
     'windows': {},
     'linux': {},
     'aix': {},
 }
 
-# === 4. Pliki JSON i Excel oraz wybór hostów ===
-# Ścieżki względne są liczone od bieżącego katalogu uruchomienia skryptu.
-# Plik JSON tworzony przez eksport inwentarza.
 OUTPUT_FILE = 'awx_inventory_hosts.json'
-# Plik Excel tworzony przez eksport; istniejący plik zostanie nadpisany.
 EXCEL_OUTPUT_FILE = 'awx_inventory_hosts.xlsx'
-# Eksport: None pobiera wszystkie hosty; plik wejściowy filtruje je kolumną host_limit.
-# Plik filtra eksportu musi być inny niż EXCEL_OUTPUT_FILE.
-# Odświeżanie, wykonanie i logi: None oznacza użycie EXCEL_OUTPUT_FILE.
 INPUT_FILE = None
-# Nazwa arkusza z hostami; jeden host na wiersz.
 SHEET_NAME = 'Results'
-# Widoczne kolumny w Excelu. [] pokazuje wszystkie; lista nazw pokazuje tylko wybrane.
-# Przykład: ['hostname', 'ostype', 'AWX_Status', 'exceiute_job', 'output'].
-# Pozostałe kolumny są ukrywane, a ich dane zachowane dla kolejnych operacji.
-# Można wskazać kolumny Survey_<nazwa_zmiennej> lub własne, np. 'Uwagi'; brakujące
-# kolumny zostaną dodane jako puste. Wielkość liter w nazwach nie ma znaczenia.
-# Układ kolumn pozostaje standardowy. Ustawienie działa przy eksporcie,
-# odświeżaniu, wykonaniu zadań i pobieraniu logów; [] przywraca widoczność wszystkich.
 EXCEL_COLUMNS = []
-# Refresh ignoruje INVENTORY i szuka nazw hostów w inventory pasujących do wzorca.
-# * oznacza dowolny ciąg znaków (dynamiczne ApplicationID), ? jeden znak.
-# ApplicationID jest wyznaczane z nazwy znalezionego inventory przed pierwszym _.
 REFRESH_INVENTORY_PATTERN = '*_mirror_inventory'
 
-# Refresh zawsze szuka szablonu w organizacji o nazwie równej ApplicationID hosta.
-# Nazwa, link i zmienne bazowe pochodzą z AWX; wyjątki określa JOB_VARIABLE_OVERRIDES_BY_OS.
-# Podgląd: python awx_find_templates.py --hostname 'nazwa_hosta'.
-# Wszystkie fragmenty muszą wystąpić w nazwie; kolejność i wielkość liter bez znaczenia.
-# Fragmenty oddzielaj * lub spacjami; ? dopasowuje jeden znak.
-# Zmienne: {os_name}, {ostype}, {hostname}, {application_id}.
-JOB_TEMPLATE_NAME_PATTERN = '*zabbix*install*{os_name}*'
-# Nazwa systemu w nazwie szablonu. window/windows -> window; AIX -> aix.
+JOB_TEMPLATE_NAME_PATTERN = '*hello*{os_name}*'
 JOB_TEMPLATE_OS_NAMES = {'linux': 'unix', 'aix': 'aix', 'windows': 'window'}
 
-# Nagłówek kolumny hostów przy odświeżaniu; None włącza automatyczne wykrywanie.
 HOST_COLUMN = None
-# Wykonanie: [] wybiera wszystkie hosty z Excela; można podać listę nazw
-# lub tekst rozdzielony przecinkami/spacjami. Brakujące hosty są pobierane
-# z INVENTORY w AWX i dopisywane do arkusza.
 HOSTS = []
 
-# === 5. Uruchamianie zadań i akcja playbooka ===
-# Maksymalna liczba unikalnych hostów w jednym zadaniu (liczba całkowita > 0).
-# Osobne paczki tworzone są dla różnych szablonów, OS, zmiennych i poświadczeń.
-# Limit joba zawsze zaczyna się od localhost; automatyczny dodatek nie zużywa BATCH_SIZE.
 BATCH_SIZE = 10
-# Kolumna z linkami do uruchomień. Istniejące wpisy zapobiegają ponownemu startowi;
-# ponowienie wymaga potwierdzenia w terminalu. Tej samej kolumny używa pobieranie logów.
 EXECUTION_COLUMN = 'exceiute_job'
-# Domyślna akcja playbooka, np. install/reinstall/update/custom.
-# Wykonanie: --job-type > odpowiedzi survey > Job_Variables > Job_Type w Excelu > JOB_TYPE.
-# Pusty tekst nie narzuca akcji.
 JOB_TYPE = ''
-# Nazwa zmiennej extra_vars, do której trafia wybrana akcja.
-# Aby sterować akcją przez pytanie survey, podaj nazwę zmiennej tego pytania.
 JOB_TYPE_VARIABLE = 'action'
 
-# === 6. Ankiety AWX (survey): Excel, odpowiedzi i pytania w terminalu ===
-# Klucze odpowiedzi muszą odpowiadać polu „Answer Variable Name” pytania w AWX.
-# Eksport i odświeżanie tworzą kolumny Survey_<nazwa_zmiennej> dla wykrytych pytań.
-# Wypełnianie pustych komórek: Job_Variables > SURVEY_EXCEL_DEFAULTS
-# > SURVEY_ANSWERS > wartość domyślna pytania w AWX.
-# Odświeżanie nadpisuje także wypełnione komórki odpowiedziami z konfiguracji;
-# przy wspólnym kluczu SURVEY_EXCEL_DEFAULTS ma pierwszeństwo przed SURVEY_ANSWERS.
-# Klucze spoza wykrytych pytań nie tworzą dodatkowych kolumn survey.
 SURVEY_EXCEL_DEFAULTS = {
     'installtesttypename': 'testads',
 }
-# Wspólne odpowiedzi używane przy wykonaniu; {} nie dodaje nadpisań.
-# Pierwszeństwo odpowiedzi: --survey-answers > komórka Survey_<nazwa_zmiennej>
-# > Job_Variables > SURVEY_ANSWERS > wartość domyślna pytania w AWX.
-# Wykonanie odczytuje bieżące komórki Excela; SURVEY_EXCEL_DEFAULTS służy do ich
-# uzupełniania. Dla zmiennej akcji odpowiedź survey wygrywa z Job_Type/JOB_TYPE,
-# a jawne --job-type ma pierwszeństwo przed odpowiedzią survey dla tej zmiennej.
 SURVEY_ANSWERS = {
     'installtesttypename': 'reinstall',
 }
-# True: pytaj w terminalu o brakujące odpowiedzi; False: bez pytań.
-# --survey włącza pytania, a --no-survey je wyłącza.
 SURVEY_INTERACTIVE = False
 
-# === 7. Oczekiwanie na zadania i pobieranie wyników ===
-# Wykonanie: True czeka na sukces paczki przed kolejną; błąd zatrzymuje dalsze paczki.
-# False wysyła paczki bez oczekiwania na zakończenie.
-# Logi: True czeka na końcowy status; False pobiera aktualnie dostępny wynik.
 WAIT_FOR_COMPLETION = False
-# Odstęp między sprawdzeniami statusu zadania, w sekundach.
 POLL_INTERVAL = 5
-# Maksymalny czas oczekiwania na zakończenie zadania, w sekundach.
 JOB_WAIT_TIMEOUT = 3600
-# Kolumna Excela z treścią logu zadania (stdout).
 OUTPUT_COLUMN = 'output'
-# Katalog pełnych logów TXT o nazwach <id_zadania>.<inwentarz>.<system>.txt.
 OUTPUT_DIRECTORY = 'output'
 
-# === 8. Diagnostyka i wygląd terminala ===
-# Szczegółowe komunikaty diagnostyczne; token API jest maskowany w logach.
 DEBUG = False
-# Podgląd wykonania bez uruchamiania zadań i zapisu Excela; może odczytywać dane AWX.
 DRY_RUN = False
-# auto: kolory w terminalu; always: wymuszaj kolory ANSI; never: wyłącz kolory.
 COLOR = 'auto'
 
-# === 9. Opcjonalne nadpisania dla poszczególnych operacji ===
-# Klucze mają te same nazwy co powyżej; {} zachowuje wspólne wartości.
-# Refresh zawsze ustala organizację i szablon na podstawie hosta oraz wzorca.
-# Przykład: EXECUTE_OVERRIDES = {'BATCH_SIZE': 5, 'WAIT_FOR_COMPLETION': True}.
-# Eksport inwentarza: awx_inventory_hosts.py.
 INVENTORY_OVERRIDES = {}
-# Odświeżanie istniejącego Excela: awx_refresh_excel.py.
 REFRESH_OVERRIDES = {}
-# Uruchamianie zadań: awx_execute_jobs.py.
 EXECUTE_OVERRIDES = {}
-# Pobieranie logów: awx_job_output.py.
 OUTPUT_OVERRIDES = {}
-# Wyszukiwanie szablonów w konsoli: awx_find_templates.py.
 TEMPLATES_OVERRIDES = {}
