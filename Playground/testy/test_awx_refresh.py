@@ -503,6 +503,47 @@ class RefreshTests(unittest.TestCase):
         finally:
             book.close()
 
+    def test_output_skips_invalid_row_and_updates_only_rows_with_valid_job_links(self):
+        output_directory = Path(self.directory.name) / 'logs'
+        self.write_config(INVENTORY=10, OUTPUT_DIRECTORY=str(output_directory))
+        book = awx.excel.create_workbook(
+            ['hostname', 'ostype', 'exceiute_job_link', 'output', 'Artifacts', 'artifact filter'],
+            [['bad', 'linux', 'https://awx.example.test/', 'keep old log', '{"old":true}', 'keep old message'],
+             ['good1', 'linux', 'https://awx.example.test/api/v2/jobs/99/', '', '', ''],
+             ['good2', 'linux', 'https://awx.example.test/#/jobs/playbook/99/output', '', '', '']],
+        )
+        book.save(self.path)
+        book.close()
+        self.client.get = Mock(return_value={
+            'id': 99, 'status': 'successful',
+            'summary_fields': {'inventory': {'name': 'test_inventory'}},
+            'artifacts': {'good1': {'message': 'done'}, 'good2': {'message': 'done'}},
+        })
+        self.client.stdout = Mock(return_value='complete job log\n')
+        captured = io.StringIO()
+        with patch.object(awx, 'AWXClient', return_value=self.client), redirect_stdout(captured), redirect_stderr(captured):
+            code = awx.run('output', [], variables_file=self.config_path)
+        self.assertEqual(code, 0, captured.getvalue())
+        self.assertIn('Pomijam wiersz 2', captured.getvalue())
+        self.assertIn('nieprawidłowy link): 1', captured.getvalue())
+        self.client.get.assert_called_once()
+        self.assertEqual(self.client.get.call_args.args[0], 'jobs/99/')
+        self.client.stdout.assert_called_once_with(99)
+        self.client.post.assert_not_called()
+        self.assertEqual((output_directory / '99.test_inventory.linux.txt').read_text(encoding='utf-8'),
+                         'complete job log\n')
+        book = load_workbook(self.path)
+        try:
+            columns = awx.excel.read_columns(book.active)
+            self.assertEqual(book.active.cell(2, columns['output']).value, 'keep old log')
+            self.assertEqual(book.active.cell(2, columns['artifacts']).value, '{"old":true}')
+            self.assertEqual(book.active.cell(2, columns['artifact filter']).value, 'keep old message')
+            for row in (3, 4):
+                self.assertEqual(book.active.cell(row, columns['output']).value, 'complete job log\n')
+                self.assertEqual(book.active.cell(row, columns['artifact filter']).value, 'done')
+        finally:
+            book.close()
+
     def test_execute_os_mismatch_in_later_batch_stops_before_any_launch_or_save(self):
         self.prepare_launch([{'hostname': 'Linux1'}, {'hostname': 'Linux2', 'ostype': 'windows'}])
         original = self.path.read_bytes()

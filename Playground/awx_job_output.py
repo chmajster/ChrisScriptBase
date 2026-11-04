@@ -9,6 +9,12 @@ Przykłady:
 Skrypt odczytuje linki z EXECUTION_COLUMN (domyślnie exceiute_job_link) i system
 z ostype. Pobiera pełny stdout każdego unikalnego joba i wpisuje go do OUTPUT_COLUMN
 we wszystkich powiązanych wierszach. Puste linki i LAUNCH_PENDING są pomijane.
+Nieprawidłowy link (np. sam adres AWX bez ID joba) powoduje ostrzeżenie z nazwą
+arkusza i kolumny, numerem wiersza, adresem komórki, jej dokładną wartością,
+celem hiperłącza i powodem pominięcia. Komunikat wskazuje źródło sprawdzanego
+adresu i oczekiwany format linku. Tokeny są maskowane. Skrypt pomija ten wiersz
+i pobiera wyniki dla pozostałych poprawnych linków, zachowując dotychczasowe
+logi i artefakty pominiętego wiersza.
 
 Artifacts zawiera JSON z pola artifacts joba. Sąsiednia kolumna artifact filter
 zawiera message znalezione dla hostname z tego wiersza. Skrypt przeszukuje

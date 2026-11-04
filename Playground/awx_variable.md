@@ -1135,6 +1135,8 @@ Inventory pochodzi z danych joba AWX, OS z wierszy Excela. Znaki niedozwolone w 
 
 Każdy unikalny job jest odczytywany raz, a jego wynik trafia do odpowiednich wierszy. Przy wielu OS dla tego samego joba mogą powstać osobne pliki z tym samym stdout.
 
+Nieprawidłowy link w `exceiute_job_link` (np. adres strony głównej AWX bez ID joba) powoduje ostrzeżenie z nazwą arkusza i kolumny, numerem wiersza, adresem komórki, jej dokładną wartością, rzeczywistym celem hiperłącza i powodem pominięcia. Komunikat wskazuje, czy sprawdzano tekst komórki, czy cel hiperłącza, oraz podaje oczekiwany format adresu konkretnego joba. Cudzysłowy i zapis znaków specjalnych pozwalają zauważyć spacje i nowe linie; tokeny pozostają maskowane. Skrypt pomija ten wiersz i kontynuuje pobieranie dla poprawnych linków. Dotychczasowe logi i artefakty pominiętego wiersza pozostają zachowane. Licznik pominiętych wierszy obejmuje też puste linki i `LAUNCH_PENDING`.
+
 Komórka Excela mieści do 32767 znaków. Dłuższy log jest skracany z adresem pełnego pliku TXT. Zapis TXT zachowuje pełną treść.
 
 `Artifacts` przechowuje JSON artefaktów. `artifact filter` zawiera komunikaty `message` dopasowane do hosta. Artefakty są aktualizowane również wtedy, gdy późniejszy odczyt stdout się nie powiedzie. Długi JSON artefaktów może zostać skrócony z odwołaniem do pełnych danych w AWX.

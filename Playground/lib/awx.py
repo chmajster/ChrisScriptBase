@@ -408,6 +408,9 @@ Oczekiwanie i rozmiar logu:
   WAIT_FOR_COMPLETION=True czeka na zakończenie. False pobiera tekst dostępny teraz.
   Excel: maksymalnie 32767 znaków w komórce; pełny tekst pozostaje w pliku TXT.
   Ponowne uruchomienie odświeża logi i artefakty. Puste linki i LAUNCH_PENDING są pomijane.
+  Ostrzeżenie dla nieprawidłowego linku pokazuje arkusz, wiersz, komórkę,
+  wartość pola, cel hiperłącza, źródło sprawdzanego adresu i powód pominięcia.
+  Taki wiersz jest pomijany; pozostałe poprawne joby są nadal pobierane.
   Długie artefakty są skracane w Excelu z adresem pełnych danych w API AWX.
 
 Przykłady:
@@ -2278,13 +2281,27 @@ def build_output_plan(sheet, client, settings):
             LOGGER.debug('Pomijam wiersz %d: %s.', row_number, reason)
             skipped += 1
             continue
-        if cell.data_type == 'f':
-            raise AWXError(f"Row {row_number}: execution link must contain a URL rather than an Excel formula.")
-        link = cell.hyperlink.target if cell.hyperlink and cell.hyperlink.target else value
+        target = cell.hyperlink.target if cell.hyperlink and cell.hyperlink.target else None
+        link = target or value
+        source = ('wartość komórki (formuła Excela)' if cell.data_type == 'f'
+                  else 'cel hiperłącza' if target else 'wartość komórki')
         try:
+            if cell.data_type == 'f':
+                raise AWXError('Komórka zawiera formułę Excela. Wymagany jest adres URL joba.')
             job_id = job_id_from_link(link, client)
         except (AWXError, ValueError) as exc:
-            raise AWXError(f"Row {row_number}: {exc}") from None
+            skipped += 1
+            console.print_message(client.redact(
+                f'Pomijam wiersz {row_number} ({cell.coordinate}): nieprawidłowy link do joba AWX.\n'
+                f'  Arkusz: {sheet.title!r}\n'
+                f'  Kolumna: {sheet.cell(1, columns[execution_name]).value!r}\n'
+                f'  Wartość komórki: {cell.value!r}\n'
+                f"  Cel hiperłącza: {repr(target) if target is not None else 'brak'}\n"
+                f'  Źródło sprawdzanego adresu: {source}\n'
+                f'  Powód pominięcia: {exc}\n'
+                f'  Oczekiwany adres: {client.base_url}jobs/<ID>/ lub link WebUI konkretnego joba.'
+            ), file=sys.stderr, level='warning', flush=True)
+            continue
         ostype = str(sheet.cell(row_number, columns['ostype']).value or 'unknown').strip().casefold() or 'unknown'
         jobs.setdefault(job_id, []).append({'row': row_number, 'ostype': ostype})
     return (jobs, columns.get(output_name, sheet.max_column + 1), skipped)
@@ -2505,7 +2522,7 @@ def output_main(argv=None):
         console.print_message(
             f'Arkusz {sheet.title!r}\nWiersze danych: {max(0, sheet.max_row - 1)}\n'
             f'Zadania do odczytu: {len(jobs)}\nPowiązane wiersze: {sum(map(len, jobs.values()))}\n'
-            f'Pominięte wiersze (brak linku lub LAUNCH_PENDING): {skipped}.', level='info')
+            f'Pominięte wiersze (brak linku, LAUNCH_PENDING lub nieprawidłowy link): {skipped}.', level='info')
         console.print_message(
             f'Linki do zadań odczytuję z kolumny {settings["EXECUTION_COLUMN"]!r}\n'
             f'Logi zapisuję w {settings["OUTPUT_COLUMN"]!r}\nPełne pliki TXT: {output_directory}.', level='info')
