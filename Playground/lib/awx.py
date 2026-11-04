@@ -186,6 +186,9 @@ def open_workbook_sheet(path, preferred="Results", explicit=None):
     LOGGER.debug('Excel: otwieram plik %s', path)
     try:
         workbook = load_workbook(path, keep_links=True)
+    except FileNotFoundError:
+        raise AWXError(f"Plik Excel nie istnieje: {path}. "
+                       "Sprawdź ścieżkę lub wskaż istniejący plik opcją --file.") from None
     except (OSError, ValueError, BadZipFile, ParseError, InvalidFileException) as exc:
         raise AWXError(f"Cannot read {path}: {exc}") from None
     try:
@@ -297,8 +300,14 @@ Przykłady:
   Czyta hostname, Job_Link, Job_Variables i Full_Credential z Excela.
   Łączy hosty o wspólnym szablonie (ID i nazwa), OS, zmiennych i credentialach w paczki BATCH_SIZE.
   Różne OS, Job_Variables lub Full_Credential oznaczają osobne uruchomienia.
+  Podział uwzględnia też INVENTORY, ApplicationID, HOPS, HOPS_COUNT, Job_Type
+  oraz kolumny credentiali i jumphostów. Różnice oznaczają oddzielne joby
+  tego samego szablonu. Kolejność kluczy JSON i credentiali nie zmienia grupy.
+  Różne Job_Variables z Excela pozostają rozdzielone również po nadpisaniach.
   Ten sam hostname z różnymi parametrami również może mieć osobne uruchomienia.
   Sprawdza template_job_name względem Job_Link w AWX oraz zgodność URL z hiperlinkiem.
+  Przed pierwszym startem porównuje ostype z hostem w inwentarzu szablonu.
+  Brak OS lub niezgodność zatrzymuje wszystkie paczki przed startem i zapisem.
   Niezgodność zatrzymuje start przed wysłaniem żądania uruchomienia.
   Limit każdej paczki zaczyna się od localhost, np. localhost,host1,host2.
   localhost występuje raz; dodany automatycznie nie zużywa miejsca w BATCH_SIZE.
@@ -1112,10 +1121,12 @@ def build_inventory_rows(report, settings=None, output_column=None, *, client=No
         rows.append([values.get(name, '') for name in headers])
     return (headers, rows)
 
-def save_inventory_excel(headers, rows, output_file, settings=None, output_column=None, client=None, template_cache=None):
+def save_inventory_excel(headers, rows, output_file, settings=None, output_column=None, client=None, template_cache=None,
+                         *, export_settings=None, export_info=None):
     """Create the same complete, styled workbook used by every AWX script."""
     settings = common.read_execution_settings() if settings is None else settings
     output_column = common.read_output_settings()['OUTPUT_COLUMN'] if output_column is None else output_column
+    template_cache = {} if template_cache is None else template_cache
     workbook = excel.create_workbook(headers, rows, sheet_name=settings['SHEET_NAME'], execution_column=settings['EXECUTION_COLUMN'], output_column=output_column)
     try:
         columns = excel.read_columns(workbook.active)
@@ -1126,6 +1137,17 @@ def save_inventory_excel(headers, rows, output_file, settings=None, output_colum
         if client is not None:
             update_survey_columns(client, workbook.active, settings, cache=template_cache)
             jumphosts.populate_choices(workbook.active, client, FULL_CREDENTIAL_SEPARATOR)
+        snapshot = {**(export_settings if export_settings is not None else settings),
+                    'SHEET_NAME': workbook.active.title, 'OUTPUT_COLUMN': output_column,
+                    'EXCEL_OUTPUT_FILE': Path(output_file).resolve()}
+        password_variables = {question['variable'] for _, questions, _ in (template_cache or {}).values()
+                              for question in questions if question['type'] == 'password'}
+        excel.add_settings_sheet(workbook, {
+            'Eksport': {'Skrypt': 'awx_inventory_hosts.py',
+                        'Data eksportu (UTC)': datetime.now(timezone.utc).replace(tzinfo=None),
+                        'Liczba hostów': len(rows), **(export_info or {})},
+            'Parametry': snapshot,
+        }, sensitive_keys=password_variables, secrets=(snapshot.get('AWX_TOKEN'),))
         excel.save_workbook(workbook, output_file, execution_column=settings['EXECUTION_COLUMN'], output_column=output_column, excel_columns=settings.get('EXCEL_COLUMNS'))
     finally:
         workbook.close()
@@ -1141,36 +1163,73 @@ def inventory_main(argv=None):
         debug_step('Eksport', 'ustawienia połączenia i plików', Serwer=AWX_URL, Inwentarz=INVENTORY,
                    Limit_HTTP_s=TIMEOUT, Rekordy_na_stronę=PAGE_SIZE,
                    Plik_JSON=OUTPUT_FILE, Plik_Excel=EXCEL_OUTPUT_FILE)
+        console.print_message(f'Eksport hostów z AWX\n  Inwentarz: {INVENTORY}', flush=True)
         hostnames = None
         input_file = args.input_file or common.read_execution_settings()["INPUT_FILE"]
         if input_file is not None:
             input_file = Path(input_file)
             if input_file.resolve() == EXCEL_OUTPUT_FILE.resolve():
                 raise AWXError('The input and output Excel files must use different paths. Change EXCEL_OUTPUT_FILE in the configuration.')
+            console.print_message(f'Odczytuję listę hostów z pliku: {input_file.resolve()}',
+                                  level='progress', flush=True)
             hostnames = read_host_limits(input_file)
         debug_step('Eksport', 'wybór hostów', Filtr=input_file or 'wszystkie hosty inwentarza',
                    Liczba_nazw=len(hostnames) if hostnames is not None else 'bez ograniczenia')
         client = AWXClient(AWX_URL, token)
+        scope = f'hosty z listy ({len(hostnames)})' if hostnames is not None else 'wszystkie hosty inwentarza'
+        console.print_message(f'[1/4] Pobieram hosty, grupy i zmienne z AWX.\n  Zakres: {scope}',
+                              level='progress', flush=True)
         report = fetch_report(client, INVENTORY, hostnames=hostnames)
         missing = report.get('missing_hosts', [])
         if missing:
             details = ', '.join(missing[:20])
             if len(missing) > 20:
                 details += f" ... (+{len(missing) - 20})"
-            console.print_message(f"Missing hosts ({len(missing)}): {details}", file=sys.stderr, level="warning")
+            console.print_message(f"Nie znaleziono hostów w AWX ({len(missing)}): {details}",
+                                  file=sys.stderr, level="warning", flush=True)
         workflow = common.read_execution_settings()
         output_column = common.read_output_settings()['OUTPUT_COLUMN']
         template_cache = {}
+        console.print_message(
+            f'[2/4] Pobrano hostów: {report["host_count"]}. Przygotowuję szablony, zmienne i poświadczenia.',
+            level='progress', flush=True)
         headers, rows = build_inventory_rows(report, workflow, output_column, client=client, template_cache=template_cache)
         debug_step('Eksport', 'przygotowano dane wynikowe', Wiersze=len(rows),
                    Kolumny=', '.join(headers), Widoczne_kolumny=workflow.get('EXCEL_COLUMNS') or 'wszystkie')
-        for row in rows:
-            console.print_message(' , '.join((f"{header} : {value}" for header, value in zip(headers, row))), level="data")
-        sys.stdout.flush()
+        console.print_message(f'\nWyniki hostów ({len(rows)}):', flush=True)
+        if not rows:
+            console.print_message('Brak hostów do eksportu.\n', level='warning', flush=True)
+        for index, row in enumerate(rows, start=1):
+            values = dict(zip(headers, row))
+            title = f'Host [{index}/{len(rows)}]: {values["hostname"]}'
+            if args.debug:
+                fields = {name: values[name] for name in common.METADATA_COLUMNS if name != 'hostname'}
+                console.print_record(title, fields)
+            else:
+                console.print_message(title, level='data', flush=True)
+        console.print_message('[3/4] Zapisuję plik JSON z danymi hostów.', level='progress', flush=True)
         LOGGER.debug('Zapisuję eksport JSON: %s\n  Liczba hostów: %d', OUTPUT_FILE, report['host_count'])
         OUTPUT_FILE.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-        save_inventory_excel(headers, rows, EXCEL_OUTPUT_FILE, workflow, output_column, client=client, template_cache=template_cache)
+        console.print_message('[4/4] Zapisuję Excel z arkuszem Ustawienia, ankietami i listami poświadczeń.',
+                              level='progress', flush=True)
+        export_keys = ('SHEET_NAME', 'EXCEL_COLUMNS', 'EXECUTION_COLUMN', 'JOB_URL', 'JOB_TYPE',
+                       'JOB_TYPE_VARIABLE', 'SURVEY_ANSWERS', 'SURVEY_EXCEL_DEFAULTS')
+        export_settings = {**settings, **{name: workflow[name] for name in export_keys},
+                           'INPUT_FILE': input_file.resolve() if input_file is not None else None,
+                           'OUTPUT_FILE': OUTPUT_FILE.resolve(), 'DEBUG': args.debug, 'COLOR': args.color}
+        export_info = {'Plik konfiguracji': common.current_variables_file().resolve(),
+                       'Kolejność nadpisań': 'Argumenty komendy > VARIABLES > INVENTORY_OVERRIDES > wspólne wartości pliku',
+                       'Źródło hostów': scope, 'Filtr hostów': hostnames,
+                       'Inwentarz w AWX': report['inventory'], 'Nie znaleziono hostów': missing}
+        save_inventory_excel(headers, rows, EXCEL_OUTPUT_FILE, workflow, output_column, client=client,
+                             template_cache=template_cache, export_settings=export_settings, export_info=export_info)
         debug_step('Eksport', 'zapisano wyniki', JSON=OUTPUT_FILE.resolve(), Excel=EXCEL_OUTPUT_FILE.resolve(), Wiersze=len(rows))
+        console.print_message(
+            f'\nEksport zakończony. Zapisano hostów: {len(rows)}. Nie znaleziono: {len(missing)}.\n'
+            f'  JSON:  {OUTPUT_FILE.resolve()}\n'
+            f'  Excel: {EXCEL_OUTPUT_FILE.resolve()}\n'
+            f'  Czas:  {time.perf_counter() - started:.1f} s',
+            level='warning' if missing else 'success', flush=True)
         return 0
     finally:
         debug_step('Eksport', 'koniec obsługi operacji', Żądania_API=client.request_count if client is not None else 0,
@@ -1197,7 +1256,8 @@ def parse_execute_arguments(argv=None):
                         help="Pytaj w terminalu o brakujące odpowiedzi survey; --no-survey wyłącza pytania.")
     parser.add_argument("--survey-answers", help="Odpowiedzi survey jako obiekt JSON; nadpisuje SURVEY_ANSWERS i Job_Variables.")
     parser.add_argument("--show-survey", action="store_true", help="Pokaż pytania/defaulty survey; bez startu jobów i zapisu Excela.")
-    parser.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=None, help="Podgląd paczek; --no-dry-run wyłącza podgląd ustawiony w zmiennych.")
+    parser.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=None,
+                        help="Pokaż plan bez uruchamiania jobów i zapisu Excela; --no-dry-run wyłącza DRY_RUN z konfiguracji.")
     return parse_operation_arguments(parser, argv)
 
 def resource_id_from_link(link, client, pattern, label):
@@ -1271,13 +1331,22 @@ def execution_template_from_row(sheet, row_number, columns, client, override='')
 def parse_variables(value, row_number):
     if value is None or (isinstance(value, str) and value.strip().casefold() in ('', 'none')):
         return {}
+    def unique_keys(pairs):
+        result = {}
+        for name, item in pairs:
+            if name in result:
+                raise ValueError('Duplicate JSON key')
+            result[name] = item
+        return result
+
     try:
-        variables = json.loads(value)
+        variables = json.loads(value, object_pairs_hook=unique_keys)
         if not isinstance(variables, dict):
             raise ValueError('not a dictionary')
         json.dumps(variables, allow_nan=False)
     except (TypeError, ValueError):
-        raise AWXError(f'Row {row_number}: Job_Variables must be a JSON object, e.g. {{"action": "check"}}.') from None
+        raise AWXError(f'Row {row_number}: Job_Variables must be a JSON object with unique keys, '
+                       'e.g. {"action": "check"}.') from None
     return variables
 
 def parse_credentials(value, row_number, column_name='Full_Credential', *, keep_order=False):
@@ -1330,6 +1399,35 @@ def batch_host_limit(hostnames):
                                    if common.hostname_key(name) not in ('', 'localhost'))])
 
 
+def execution_row_context(sheet, row_number, columns, excel_variables):
+    """Keep different Excel launch metadata separate, including overridden inputs."""
+    handled = {'hostname', 'AWX_Status', 'ostype', 'template_job_name', 'Job_Link',
+               'Job_Variables', 'Full_Credential'}
+    credential_columns = {'Job_Credentials', 'Extra_Credentials', 'OS Credential', 'jumphost_for_hops'}
+    context = {'Job_Variables': excel_variables}
+    for name in common.METADATA_COLUMNS:
+        if name in handled:
+            continue
+        cell = sheet.cell(row_number, columns[name.casefold()]) if name.casefold() in columns else None
+        if cell is not None and cell.data_type == 'f':
+            raise AWXError(f'Row {row_number}: {name} must contain a literal value.')
+        value = cell.value if cell is not None else None
+        if name in credential_columns:
+            value = parse_credentials(value, row_number, name)
+        else:
+            text = str(value).strip() if value is not None else ''
+            if text.casefold() in ('', 'none'):
+                value = None
+            elif name == 'HOPS_COUNT':
+                if isinstance(value, bool) or not re.fullmatch(r'[0-9]+(?:\.0+)?', text):
+                    raise AWXError(f'Row {row_number}: HOPS_COUNT must be a nonnegative integer or empty.')
+                value = int(text.split('.')[0])
+            else:
+                value = text
+        context[name] = value
+    return context
+
+
 def build_execution_plan(sheet, client, settings, job_type_override=None, hostnames=None, job_url_override=None, survey_overrides=None, survey_cache=None):
     """Verify Excel templates and batch equal OS/payloads, preserving distinct runs per host."""
     columns = excel.read_columns(sheet)
@@ -1356,13 +1454,18 @@ def build_execution_plan(sheet, client, settings, job_type_override=None, hostna
         os_cell = sheet.cell(row_number, columns['ostype']) if 'ostype' in columns else None
         if os_cell is not None and os_cell.data_type == 'f':
             raise AWXError(f'Row {row_number}: ostype must contain a literal operating system name.')
-        ostype = common.normalize_ostype(str(os_cell.value or '')) if os_cell is not None else ''
+        ostype = common.normalize_ostype(os_cell.value) if os_cell is not None else None
         selected_template = execution_template_from_row(sheet, row_number, columns, client, selected_job_url)
         if selected_template is None:
             LOGGER.debug('Plan wykonania: pomijam wiersz %d — host %s nie ma szablonu zadania.', row_number, hostname)
             skipped_without_job += 1
             continue
         template_id, template_name, link = selected_template
+        if not isinstance(ostype, str) or ostype in ('', 'none'):
+            raise AWXError(f'Row {row_number}, host {hostname!r}: ostype is required to verify the job against AWX. Refresh Excel.')
+        status = sheet.cell(row_number, columns['awx_status']).value if 'awx_status' in columns else None
+        if status is not None and str(status).strip().casefold() not in ('', 'found'):
+            raise AWXError(f'Row {row_number}, host {hostname!r}: AWX_Status must be found before launching. Refresh Excel.')
         excel_variables = parse_variables(sheet.cell(row_number, columns['job_variables']).value, row_number)
         variables = deepcopy(settings.get('SURVEY_ANSWERS', {}))
         variables.update(excel_variables)
@@ -1389,8 +1492,9 @@ def build_execution_plan(sheet, client, settings, job_type_override=None, hostna
         base_refs, jump_refs = synchronise_full_credential(sheet, row_number)
         credential_refs = tuple(sorted(set(base_refs + jump_refs)))
         preserve_defaults = bool(jump_refs and not base_refs)
+        context = execution_row_context(sheet, row_number, columns, excel_variables)
         key = (template_id, template_name, ostype, json.dumps(variables, sort_keys=True, ensure_ascii=False),
-               credential_refs, preserve_defaults)
+               credential_refs, preserve_defaults, json.dumps(context, sort_keys=True, ensure_ascii=False))
         execution_key = (host_key, key)
         execution = str(sheet.cell(row_number, execution_column).value or '').strip()
         if execution_key not in hosts:
@@ -1632,15 +1736,14 @@ def show_template_surveys(client, links):
         survey.display_questions(template_id, details.get('survey_enabled', False), survey.read_questions(spec or {'spec': []}, template_id))
 
 def resolve_execution_hostnames(client, batches, template_cache):
-    """Use actual template inventory names for Ansible's case-sensitive limits."""
+    """Verify Excel OS against the template inventory before resolving host limits."""
     inventories = {}
     for batch in batches:
         batch['limit'] = batch_host_limit(entry['hostname'] for entry in batch['entries'])
         details, _, _ = template_survey(client, batch['template_id'], template_cache)
         defaults = details.get('defaults', {})
-        if 'inventory' not in defaults:
-            continue  # Retain compatibility with launch APIs without inventory metadata.
-        inventory = defaults['inventory']
+        inventory = (defaults['inventory'] if 'inventory' in defaults
+                     else templates.template_details(client, batch['template_id']).get('inventory'))
         inventory_id = inventory.get('id') if isinstance(inventory, dict) else inventory
         if type(inventory_id) is not int or inventory_id < 1:
             raise AWXError(f"Template {batch['template_id']}: configure its required inventory in AWX.")
@@ -1657,11 +1760,32 @@ def resolve_execution_hostnames(client, batches, template_cache):
         missing = [name for name in names if common.hostname_key(name) not in index]
         if missing:
             raise AWXError(f"Hosts not found in template inventory {inventory_id}: {', '.join(missing)}")
+        hostvars = {}
+        if names:
+            exported = client.get(f'inventories/{inventory_id}/script/?all=1&hostvars=1',
+                                  purpose=f'Weryfikacja ostype hostów w inwentarzu szablonu {inventory_id}')
+            metadata = exported.get('_meta') if isinstance(exported, dict) else None
+            values = metadata.get('hostvars') if isinstance(metadata, dict) else None
+            if not isinstance(values, dict):
+                raise AWXError(f'Inventory {inventory_id}: cannot verify ostype; AWX returned no host variables.')
+            hostvars = {common.hostname_key(name): variables for name, variables in values.items()}
         for batch in inventory_batches:
             for entry in batch['entries']:
                 key = common.hostname_key(entry['hostname'])
+                if key != 'localhost':
+                    variables = hostvars.get(key)
+                    actual_os = common.normalize_ostype(variables.get('ostype')) if isinstance(variables, dict) else None
+                    rows = ', '.join(map(str, entry['rows']))
+                    label = f"Template {batch['template_id']}, host {entry['hostname']!r}, Excel rows {rows}"
+                    if not isinstance(actual_os, str) or actual_os in ('', 'none'):
+                        raise AWXError(f'{label}: cannot verify ostype; it is missing in AWX inventory {inventory_id}.')
+                    if actual_os != entry['ostype']:
+                        raise AWXError(f"{label}: Excel ostype {entry['ostype']!r} does not match AWX ostype {actual_os!r} "
+                                       f'in inventory {inventory_id}. Refresh Excel before launching.')
                 entry['hostname'] = 'localhost' if key == 'localhost' else index[key]['name']
             batch['limit'] = batch_host_limit(entry['hostname'] for entry in batch['entries'])
+        debug_step('Walidacja hostów', 'nazwy i OS zgodne z inwentarzem szablonów',
+                   Inwentarz_ID=inventory_id, Hosty=len(names), Paczki=len(inventory_batches))
 
 
 def job_url(template_link, client, job_id):
@@ -1825,6 +1949,11 @@ def confirm_job_rerun(sheet, execution_column, entries):
 def execute_main(argv=None):
     started = time.perf_counter()
     args = parse_execute_arguments(argv)
+    if args.dry_run:
+        console.print_message(
+            'Tryb podglądu (dry-run): przygotowuję plan wykonania.\n'
+            'Joby nie zostaną uruchomione, a plik Excel nie zostanie zapisany.',
+            level='warning', flush=True)
     if args.job_type is not None and (not args.job_type.strip()):
         raise AWXError('--job-type must be nonempty, e.g. install, reinstall, or update.')
     if args.job_url is not None and not args.job_url.strip():
@@ -1885,6 +2014,8 @@ def execute_main(argv=None):
             show_template_surveys(client, links)
             return 0
         console.print_message(f"Input: {path}\nbatch size: {settings['BATCH_SIZE']}\nbatches: {len(batches)}\nalready recorded runs: {len(existing)}\nrows without job: {skipped}", flush=True, level="info")
+        console.print_message('Wspólna paczka wymaga zgodnego szablonu, OS, zmiennych, Full_Credential i pozostałych metadanych wykonania. '
+                              'Różnice tworzą osobne joby, także dla tego samego szablonu.', flush=True)
         if args.dry_run:
             LOGGER.debug('Podgląd wykonania: nie uruchamiam zadań i nie zapisuję pliku\n  Walidacja ankiety w AWX: %s',
                          'włączona' if interactive_survey else 'wyłączona w zwykłym podglądzie')
@@ -1903,7 +2034,8 @@ def execute_main(argv=None):
                                       f"template_job_name={batch['template_job_name']}\nostype={batch['ostype'] or 'unknown'}\n"
                                       f"limit={batch['limit']}\ncredentials={list(batch['credential_refs'])}\n"
                                       f"job_type={batch['job_type'] or 'none'}\nextra_vars={json.dumps(preview, ensure_ascii=False)}", level="progress")
-            console.print_message('Dry run: no jobs launched and no workbook changes.', level="warning")
+            console.print_message('Podgląd zakończony: joby nie zostały uruchomione; plik Excel nie został zmieniony.',
+                                  level="warning", flush=True)
             return 0
         if any((entry['execution'].startswith('LAUNCH_PENDING') for entry in existing)):
             raise AWXError('An earlier launch has a LAUNCH_PENDING marker. Check AWX, then replace it with the job link or clear it only if no job was launched.')
@@ -1927,9 +2059,11 @@ def execute_main(argv=None):
         batches, existing, column, skipped = build_execution_plan(
             sheet, client, settings, job_type_override=args.job_type, hostnames=selected_hosts or None,
             job_url_override=selected_job_url or None, survey_overrides=survey_overrides, survey_cache=cache)
+        console.print_message('Sprawdzam hosty i ich OS w inwentarzach wskazanych przez szablony AWX.',
+                              level='progress', flush=True)
+        resolve_execution_hostnames(client, batches, cache)
         resolve_credentials(client, batches, template_cache=cache)
         validate_templates(client, batches, interactive=interactive_survey, cache=cache)
-        resolve_execution_hostnames(client, batches, cache)
         LOGGER.debug('Wykonanie: przygotowanie zakończone — zweryfikowano szablony, poświadczenia, zmienne i nazwy hostów.')
         if settings['WAIT_FOR_COMPLETION']:
             recorded_jobs = {}

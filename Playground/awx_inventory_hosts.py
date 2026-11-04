@@ -11,10 +11,15 @@ Opcjonalny plik wejściowy musi mieć kolumnę host_limit z nazwami hostów.
 Wyniki zapisują się pod OUTPUT_FILE i EXCEL_OUTPUT_FILE; Excel jest tworzony
 od nowa. Do aktualizacji istniejącego arkusza z historią jobów służy
 awx_refresh_excel.py. Kolejność systemów w wynikowym Excelu: Windows, Linux, AIX.
+Arkusz Ustawienia zawiera datę eksportu, źródło konfiguracji i użyte parametry
+po uwzględnieniu nadpisań. Token AWX jest pomijany, a hasła są maskowane.
+Jest to zapis informacyjny; skrypty nadal odczytują konfigurację z awx_variable.
 
 Ustawienia wspólne: awx_variable obok launcherów. Słownik VARIABLES poniżej
 pozwala zmienić wartości tylko dla tego launchera. Argumenty komendy mają
 pierwszeństwo. Puste VARIABLES = {} zachowuje ustawienia z pliku.
+Bez -d skrypt pokazuje etapy pobierania i zapisu, krótkie linie Host [n/N]: hostname
+oraz podsumowanie ze ścieżkami plików. Szczegółowe pola hostów pokazuje tryb -d.
 Tryb -d opisuje filtr hostów, pobieranie stron API, grupy bezpośrednie i nadrzędne,
 źródła poświadczeń, wybór szablonów, ankiety oraz zapis JSON i Excela.
 Pokazuje użycie pamięci podręcznej, liczbę żądań i czas operacji.

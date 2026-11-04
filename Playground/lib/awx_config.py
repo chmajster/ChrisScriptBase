@@ -26,8 +26,8 @@ VARIABLES_FILE = PROJECT_ROOT / "awx_variable"
 EXECUTION_SETTINGS_FILE = VARIABLES_FILE
 OUTPUT_SETTINGS_FILE = VARIABLES_FILE
 METADATA_COLUMNS = (
-    "hostname", "INVENTORY", "ApplicationID", "ostype", "template_job_name", "Job_Link", "Job_Credentials", "Job_Variables", "HOPS", "HOPS_COUNT", "jumphost_for_hops", "Extra_Credentials",
-    "OS Credential", "Full_Credential", "Job_Type", "AWX_Status",
+    "hostname", "AWX_Status", "INVENTORY", "ApplicationID", "ostype", "template_job_name", "Job_Link", "Job_Credentials", "Job_Variables", "HOPS", "HOPS_COUNT", "jumphost_for_hops", "Extra_Credentials",
+    "OS Credential", "Full_Credential", "Job_Type",
 )
 ARTIFACT_COLUMNS = ("Artifacts", "artifact filter")
 CONNECTION_KEYS = ("AWX_URL", "AWX_TOKEN", "TIMEOUT", "PAGE_SIZE")

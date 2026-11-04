@@ -45,6 +45,14 @@ class ExecutionBatchTests(unittest.TestCase):
     def plan(self, book):
         return awx.build_execution_plan(book.active, self.client, self.settings)
 
+    def inventory(self, hosts):
+        self.client.items = Mock(return_value=[{'id': index, 'name': name}
+                                               for index, name in enumerate(hosts, 1)])
+        self.client.get = Mock(return_value={'_meta': {'hostvars': {
+            name: {'ostype': os} for name, os in hosts.items()
+        }}})
+        return {7: ({'defaults': {'inventory': {'id': 10}}}, [], {})}
+
     def set_row(self, book, number, **values):
         columns = awx.excel.read_columns(book.active)
         for name, value in values.items():
@@ -76,16 +84,170 @@ class ExecutionBatchTests(unittest.TestCase):
         book = self.workbook(['host1', 'LOCALHOST', 'host2'])
         batches, _, _, _ = self.plan(book)
         self.client.items = Mock(return_value=[{'id': 1, 'name': 'Host1'}, {'id': 2, 'name': 'HOST2'}])
+        self.client.get = Mock(return_value={'_meta': {'hostvars': {
+            'Host1': {'ostype': 'linux'}, 'HOST2': {'ostype': 'linux'},
+        }}})
         cache = {7: ({'defaults': {'inventory': {'id': 10}}}, [], {})}
         awx.resolve_execution_hostnames(self.client, batches, cache)
         self.assertEqual(batches[0]['limit'], 'localhost,Host1,HOST2')
         self.assertNotIn('localhost', self.client.items.call_args.kwargs['name__iregex'].casefold())
-        self.client.get.assert_not_called()
-        # Older launch responses may omit inventory metadata; the limit still applies.
+        self.client.get.assert_called_once()
+        self.assertEqual(self.client.get.call_args.args[0], 'inventories/10/script/?all=1&hostvars=1')
+        # Older launch responses use the inventory from the template definition.
         batches[0]['limit'] = 'Host1,HOST2'
+        self.client.template_detail_cache[7]['inventory'] = 10
         self.client.items.reset_mock()
         awx.resolve_execution_hostnames(self.client, batches, {7: ({'defaults': {}}, [], {})})
         self.assertEqual(batches[0]['limit'], 'localhost,Host1,HOST2')
+        self.client.items.assert_called_once()
+
+    def test_different_metadata_creates_separate_jobs_for_the_same_template(self):
+        self.settings['BATCH_SIZE'] = 10
+        for column, first, second in (
+            ('inventory', 'app_inventory', 'other_inventory'),
+            ('applicationid', 'app', 'other'),
+            ('hops', '1_hop (HOPS: 1)', '2_hop (HOPS: 2)'),
+            ('hops_count', 1, 2),
+            ('os credential', 'machine-a', 'machine-b'),
+            ('extra_credentials', 'vault-a', 'vault-b'),
+            ('job_credentials', 'default-a', 'default-b'),
+            ('jumphost_for_hops', 'jump-a', 'jump-b'),
+            ('job_type', 'install', 'reinstall'),
+        ):
+            with self.subTest(column=column):
+                book = self.workbook(['host1', 'host2'])
+                self.set_row(book, 2, **{column: first})
+                self.set_row(book, 3, **{column: second})
+                batches, _, _, _ = self.plan(book)
+                self.assertEqual(len(batches), 2)
+                self.assertEqual([batch['template_id'] for batch in batches], [7, 7])
+                self.assertEqual([batch['limit'] for batch in batches], ['localhost,host1', 'localhost,host2'])
+
+    def test_same_hostname_with_different_metadata_is_a_separate_run(self):
+        book = self.workbook(['host1', 'host1'])
+        self.set_row(book, 2, inventory='app_inventory')
+        self.set_row(book, 3, inventory='other_inventory')
+        batches, _, _, _ = self.plan(book)
+        self.assertEqual(len(batches), 2)
+        self.assertEqual([batch['entries'][0]['rows'] for batch in batches], [[2], [3]])
+
+    def test_credential_order_and_numeric_hop_format_do_not_split_equal_metadata(self):
+        self.settings['BATCH_SIZE'] = 10
+        book = self.workbook(['host1', 'host2'])
+        for column in ('os credential', 'extra_credentials', 'job_credentials', 'jumphost_for_hops'):
+            self.set_row(book, 2, **{column: 'a, b'})
+            self.set_row(book, 3, **{column: 'b, a'})
+        self.set_row(book, 2, hops_count=3)
+        self.set_row(book, 3, hops_count='3.0')
+        batches, _, _, _ = self.plan(book)
+        self.assertEqual(len(batches), 1)
+        self.assertEqual(batches[0]['limit'], 'localhost,host1,host2')
+
+    def test_json_order_is_ignored_but_nested_values_and_types_are_distinct(self):
+        self.settings['BATCH_SIZE'] = 10
+        book = self.workbook(['host1', 'host2', 'host3', 'host4'])
+        for number, value in enumerate((
+            '{"action":"install","options":{"retries":1,"enabled":true}}',
+            '{"options":{"enabled":true,"retries":1},"action":"install"}',
+            '{"action":"install","options":{"retries":"1","enabled":true}}',
+            '{"action":"install","options":{"retries":1,"enabled":false}}',
+        ), 2):
+            self.set_row(book, number, job_variables=value)
+        batches, _, _, _ = self.plan(book)
+        self.assertEqual([batch['limit'] for batch in batches],
+                         ['localhost,host1,host2', 'localhost,host3', 'localhost,host4'])
+
+    def test_different_excel_inputs_stay_separate_after_a_shared_override(self):
+        book = self.workbook(['host1', 'host2'])
+        self.set_row(book, 2, job_variables='{"version": 1}')
+        self.set_row(book, 3, job_variables='{"version": 2}')
+        batches, _, _, _ = awx.build_execution_plan(book.active, self.client, self.settings,
+                                                   survey_overrides={'version': 3})
+        self.assertEqual(len(batches), 2)
+        self.assertEqual([batch['variables']['version'] for batch in batches], [3, 3])
+
+    def test_survey_answer_differences_create_separate_jobs(self):
+        book = self.workbook(['host1', 'host2'])
+        awx.excel.ensure_columns(book.active, awx.excel.read_columns(book.active), ['Survey_mode'])
+        self.set_row(book, 2, survey_mode='install')
+        self.set_row(book, 3, survey_mode='reinstall')
+        batches, _, _, _ = self.plan(book)
+        self.assertEqual([batch['variables']['mode'] for batch in batches], ['install', 'reinstall'])
+
+    def test_notes_and_output_values_do_not_split_identical_launch_parameters(self):
+        book = self.workbook(['host1', 'host2'])
+        awx.excel.ensure_columns(book.active, awx.excel.read_columns(book.active), ['Uwagi'])
+        self.set_row(book, 2, uwagi='first note', output='old output', artifacts='{"old":true}', awx_status='found')
+        self.set_row(book, 3, uwagi='second note', output='other output', artifacts='{}', awx_status='')
+        batches, _, _, _ = self.plan(book)
+        self.assertEqual(len(batches), 1)
+        self.assertEqual(batches[0]['limit'], 'localhost,host1,host2')
+
+    def test_missing_or_invalid_os_prevents_plan_creation(self):
+        for value in (None, '', 'none', 123, True, '=A1'):
+            with self.subTest(value=value):
+                book = self.workbook(['host1'])
+                self.set_row(book, 2, ostype=value)
+                with self.assertRaisesRegex(awx.AWXError, 'ostype'):
+                    self.plan(book)
+        self.client.post.assert_not_called()
+
+    def test_missing_hosts_and_nonliteral_metadata_cannot_be_launched(self):
+        for column, value in (('awx_status', 'not_found'), ('awx_status', 'no_hostname'),
+                              ('applicationid', '=A1'), ('hops_count', -1)):
+            with self.subTest(column=column, value=value):
+                book = self.workbook(['host1'])
+                self.set_row(book, 2, **{column: value})
+                with self.assertRaises(awx.AWXError):
+                    self.plan(book)
+        self.client.post.assert_not_called()
+
+    def test_duplicate_json_keys_cannot_silently_change_launch_variables(self):
+        for value in ('{"action":"install","action":"delete"}', '{"options":{"version":1,"version":2}}'):
+            with self.subTest(value=value):
+                book = self.workbook(['host1'])
+                self.set_row(book, 2, job_variables=value)
+                with self.assertRaisesRegex(awx.AWXError, 'unique keys'):
+                    self.plan(book)
+        self.client.post.assert_not_called()
+
+    def test_live_os_mismatch_prevents_launch_even_when_template_is_the_same(self):
+        book = self.workbook(['host1', 'host2'])
+        batches, _, _, _ = self.plan(book)
+        cache = self.inventory({'host1': 'linux', 'host2': 'windows'})
+        with self.assertRaisesRegex(awx.AWXError, "host2.*Excel ostype 'linux'.*AWX ostype 'windows'"):
+            awx.resolve_execution_hostnames(self.client, batches, cache)
+        self.client.post.assert_not_called()
+
+    def test_live_os_is_read_once_per_inventory_across_separate_jobs(self):
+        book = self.workbook(['host1', 'host2', 'host3'])
+        self.set_row(book, 2, ostype='WINDOWS')
+        self.set_row(book, 3, ostype='window')
+        self.set_row(book, 4, ostype='linux', job_link='https://awx.example.test/api/v2/job_templates/8/')
+        batches, _, _, _ = self.plan(book)
+        cache = self.inventory({'host1': 'window', 'host2': 'Windows', 'host3': 'LINUX'})
+        cache[8] = cache[7]
+        awx.resolve_execution_hostnames(self.client, batches, cache)
+        self.assertEqual([batch['limit'] for batch in batches], ['localhost,host1,host2', 'localhost,host3'])
+        self.client.get.assert_called_once()
+        self.client.items.assert_called_once()
+
+    def test_unavailable_host_os_stops_instead_of_assuming_excel_is_correct(self):
+        for value in (None, '', 'none', [], 123):
+            with self.subTest(value=value):
+                book = self.workbook(['host1'])
+                batches, _, _, _ = self.plan(book)
+                cache = self.inventory({'host1': value})
+                with self.assertRaisesRegex(awx.AWXError, 'cannot verify ostype'):
+                    awx.resolve_execution_hostnames(self.client, batches, cache)
+        self.client.post.assert_not_called()
+
+    def test_missing_template_inventory_cannot_bypass_os_verification(self):
+        book = self.workbook(['host1'])
+        batches, _, _, _ = self.plan(book)
+        with self.assertRaisesRegex(awx.AWXError, 'configure its required inventory'):
+            awx.resolve_execution_hostnames(self.client, batches, {7: ({'defaults': {}}, [], {})})
+        self.client.post.assert_not_called()
         self.client.items.assert_not_called()
 
     def test_launch_payload_always_starts_with_localhost(self):

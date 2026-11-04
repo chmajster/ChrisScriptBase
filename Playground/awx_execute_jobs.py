@@ -10,6 +10,9 @@ Przykłady:
     python .\awx_execute_jobs.py --hosts host1 host2 --job-url "https://awx.example.com/#/templates/job_template/7/details" --dry-run
     python .\awx_execute_jobs.py --help
 
+Podgląd wykonania: --dry-run albo "DRY_RUN": True w VARIABLES tego skryptu.
+--no-dry-run wyłącza podgląd ustawiony w konfiguracji.
+
 Wejście: hostname, ostype, template_job_name, Job_Link, Job_Variables i Full_Credential. Zmienne joba
 muszą być obiektem JSON, np. {"action": "install"}. Credentiale joba są rozwiązywane
 z nazw lub ID obiektów zapisanych w AWX. API jest uwierzytelniane przez AWX_TOKEN.
@@ -27,9 +30,17 @@ albo z przypisanych credentiali szablonu joba i łączy je z credentialami hosta
 W Full_Credential credential hosta zastępuje domyślny credential szablonu
 tego samego typu (poza Vault). Jawne dodatki z konfiguracji są zachowywane.
 Hosty z takim samym szablonem, nazwą szablonu, OS, zmiennymi i zestawem credentiali
-trafiają do wspólnych paczek. Różnica w dowolnym z tych pól oznacza osobny run.
+trafiają do wspólnych paczek do BATCH_SIZE. Podział uwzględnia też INVENTORY,
+ApplicationID, HOPS, HOPS_COUNT, Job_Type oraz kolumny credentiali i jumphostów.
+Różnica w dowolnym z tych pól oznacza osobny job, także przy tym samym szablonie.
+Różne Job_Variables w Excelu pozostają osobnymi runami również po nadpisaniu
+wartości argumentami komendy. Kolejność kluczy JSON i credentiali nie rozdziela paczek.
+Kolumny historii, wyników, AWX_Status i notatki nie są parametrami grupowania.
 Identyczne wpisy hosta są łączone; różne parametry tego samego hosta tworzą osobne runy.
 Windows/window, Linux i AIX są rozdzielane nawet przy wspólnym szablonie.
+Przed pierwszym startem OS jest porównywany z ostype hosta w inwentarzu szablonu
+AWX. Brak OS, niezgodność lub AWX_Status inny niż found zatrzymuje wykonanie
+przed uruchomieniem jobów; pusty status jest akceptowany w starszych arkuszach.
 Przed startem nazwa template_job_name jest porównywana z definicją wskazaną przez
 Job_Link w AWX. Tekst URL i hiperlink komórki muszą wskazywać ten sam szablon.
 Niezgodność zatrzymuje wykonanie przed wysłaniem żądania startu.

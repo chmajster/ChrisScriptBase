@@ -3,8 +3,10 @@
 import logging
 import math
 import os
+import re
 import tempfile
 from copy import copy
+from datetime import datetime
 from pathlib import Path
 
 from .awx_config import ARTIFACT_COLUMNS, AWXError, METADATA_COLUMNS, normalize_excel_columns
@@ -13,6 +15,7 @@ from .awx_dependencies import ensure_openpyxl
 ensure_openpyxl()
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.filters import AutoFilter
@@ -22,6 +25,94 @@ from openpyxl.worksheet.table import TableColumn
 HOST_COLUMNS = ("hostname", "host_limit", "host", "hosts")
 OS_ORDER = {"windows": 0, "linux": 1, "aix": 2}
 LOGGER = logging.getLogger('awx_inventory_hosts')
+SETTINGS_SHEET = "Ustawienia"
+
+
+def add_settings_sheet(workbook, sections, *, sensitive_keys=(), secrets=()):
+    """Add an informational snapshot without copying tokens or password values."""
+    if any(name.casefold() == SETTINGS_SHEET.casefold() for name in workbook.sheetnames):
+        raise AWXError('Nazwa arkusza "Ustawienia" jest zarezerwowana dla parametrów eksportu. Zmień SHEET_NAME.')
+    hidden_keys = {str(name).casefold() for name in sensitive_keys}
+    secret_values = tuple(value for value in secrets if isinstance(value, str) and value)
+    sensitive_name = re.compile(r'password|passwd|passphrase|token|secret|private[_-]?key|api[_-]?key', re.IGNORECASE)
+    sheet = workbook.create_sheet(SETTINGS_SHEET, 1)
+    sheet.sheet_properties.tabColor = "1F3A5F"
+    sheet.sheet_view.showGridLines = False
+    sheet.merge_cells("A1:C1")
+    sheet["A1"] = "Ustawienia eksportu AWX"
+    sheet["A1"].font = Font(name="Arial", size=15, bold=True, color="1F3A5F")
+    sheet.row_dimensions[1].height = 30
+    sheet.merge_cells("A2:C2")
+    sheet["A2"] = "Zapis informacyjny parametrów użytych podczas eksportu. Edycja tego arkusza nie zmienia konfiguracji skryptów."
+    sheet["A2"].font = Font(name="Arial", size=10, color="475569")
+    sheet["A2"].alignment = Alignment(vertical="center", wrap_text=True)
+    sheet.row_dimensions[2].height = 30
+    sheet.append([])
+    sheet.append(["Sekcja", "Parametr", "Wartość"])
+
+    def append_values(section, values, prefix=""):
+        for name, value in values.items():
+            name = str(name)
+            if name.upper() == "AWX_TOKEN":
+                continue
+            parameter = f"{prefix}.{name}" if prefix else name
+            if name.casefold() in hidden_keys or sensitive_name.search(name):
+                value = "***"
+            elif isinstance(value, dict) and value:
+                append_values(section, value, parameter)
+                continue
+            elif isinstance(value, (list, tuple)) and value:
+                append_values(section, {f"[{index}]": item for index, item in enumerate(value, 1)}, parameter)
+                continue
+            if isinstance(value, Path):
+                value = str(value)
+            elif value is None:
+                value = "None"
+            elif isinstance(value, (dict, list, tuple)):
+                value = "{}" if isinstance(value, dict) else "[]"
+            elif value == "":
+                value = '""'
+            if isinstance(value, str):
+                for secret in secret_values:
+                    value = value.replace(secret, "***")
+                value = ILLEGAL_CHARACTERS_RE.sub("", value)
+                if len(value) > 32767:
+                    raise AWXError(f'Parametr {parameter!r} jest za długi na komórkę Excela.')
+            sheet.append([section, parameter, value])
+            cell = sheet.cell(sheet.max_row, 3)
+            if isinstance(value, str):
+                cell.data_type = "s"
+                cell.number_format = "@"
+            elif isinstance(value, datetime):
+                cell.number_format = "yyyy-mm-dd hh:mm:ss"
+
+    for section, values in sections.items():
+        append_values(section, values)
+    widths = {"A": 25, "B": 48, "C": 100}
+    for column, width in widths.items():
+        sheet.column_dimensions[column].width = width
+    for row in sheet.iter_rows(min_row=4):
+        header = row[0].row == 4
+        height = 26
+        for cell in row:
+            cell.font = Font(name="Arial", size=10, bold=header, color="FFFFFF" if header else "1F2937")
+            cell.fill = PatternFill("solid", fgColor="1F3A5F" if header else "F0F4F8" if cell.row % 2 else "FFFFFF")
+            cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+            lines = sum(max(1, math.ceil(len(line) / (widths[cell.column_letter] - 3)))
+                        for line in str(cell.value).split("\n"))
+            height = max(height, lines * 16 + 6)
+        sheet.row_dimensions[row[0].row].height = min(409, height)
+    sheet.freeze_panes = "C5"
+    sheet.auto_filter.ref = f"A4:C{sheet.max_row}"
+    sheet.print_options.horizontalCentered = True
+    sheet.sheet_properties.pageSetUpPr.fitToPage = True
+    sheet.page_setup.orientation = "landscape"
+    sheet.page_setup.paperSize = sheet.PAPERSIZE_A3
+    sheet.page_setup.fitToWidth = 1
+    sheet.page_setup.fitToHeight = 0
+    sheet.print_title_rows = "1:4"
+    sheet.print_area = sheet.dimensions
+    return sheet
 
 
 def headers(execution_column="exceiute_job", output_column="output"):

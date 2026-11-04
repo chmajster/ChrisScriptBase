@@ -99,6 +99,20 @@ def print_message(*values, level="info", file=None, sep=" ", end="\n", flush=Fal
     print(colorize(message, level, stream=stream), file=stream, end=end, flush=flush)
 
 
+def print_record(title, fields, *, file=None):
+    """Show aligned fields, keeping multiline values under their own label."""
+    width = max((len(name) for name in fields), default=0)
+    lines = [title]
+    for name, value in fields.items():
+        text = str(value) if value is not None else ""
+        if text.strip().casefold() in ("", "none"):
+            text = "brak"
+        first, *remaining = text.splitlines()
+        lines.append(f"  {name:<{width}} : {first}")
+        lines.extend(f"  {'':<{width}}   {line}" for line in remaining)
+    print_message("\n".join(lines), level="data", file=file, end="\n\n", flush=True)
+
+
 def job_status_level(status):
     if status == "successful":
         return "success"

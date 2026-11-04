@@ -155,6 +155,145 @@ class RefreshTests(unittest.TestCase):
                                variables_file=self.config_path)
         return code, captured.getvalue(), factory
 
+    def prepare_launch(self, records):
+        self.write_config(INVENTORY=10)
+        headers = awx.excel.headers()
+        rows = []
+        for record in records:
+            values = {'ostype': 'linux', 'AWX_Status': 'found',
+                      'template_job_name': 'Zabbix IT2 Unix install',
+                      'Job_Link': 'https://awx.example.test/api/v2/job_templates/7/',
+                      'Job_Variables': '{"action":"install","version":1}',
+                      'Full_Credential': 'app1-os, shared-vault', **record}
+            rows.append([values.get(name, '') for name in headers])
+        book = awx.excel.create_workbook(headers, rows)
+        book.save(self.path)
+        book.close()
+
+        def get(path, **options):
+            result = self.get(path, **options)
+            if re.fullmatch(r'job_templates/[0-9]+/launch/', path):
+                result = {**result, 'ask_limit_on_launch': True, 'ask_credential_on_launch': True,
+                          'ask_variables_on_launch': True,
+                          'defaults': {**result['defaults'], 'inventory': {'id': 10}}}
+            return result
+
+        self.client.get = Mock(side_effect=get)
+
+    def execute(self, argv=None):
+        captured = io.StringIO()
+        with patch.object(awx, 'AWXClient', return_value=self.client), redirect_stdout(captured), redirect_stderr(captured):
+            code = awx.run('execute', argv or [], variables_file=self.config_path)
+        return code, captured.getvalue()
+
+    def test_execute_launches_one_job_per_distinct_excel_configuration(self):
+        self.prepare_launch([
+            {'hostname': 'Linux1'}, {'hostname': 'Linux2'},
+            {'hostname': 'prefixLinux1', 'Job_Variables': '{"action":"install","version":2}',
+             'Full_Credential': 'B42-os, shared-vault'},
+        ])
+        self.client.post.side_effect = [{'job': 99, 'artifacts': {}}, {'job': 100, 'artifacts': {}}]
+        code, output = self.execute()
+        self.assertEqual(code, 0, output)
+        calls = self.client.post.call_args_list
+        self.assertEqual([call.args[0] for call in calls], ['job_templates/7/launch/'] * 2)
+        payloads = [call.args[1] for call in calls]
+        self.assertEqual([payload['limit'] for payload in payloads],
+                         ['localhost,Linux1,Linux2', 'localhost,prefixLinux1'])
+        self.assertEqual([payload['extra_vars']['version'] for payload in payloads], [1, 2])
+        self.assertEqual([payload['credentials'] for payload in payloads], [[110, 901], [120, 901]])
+        self.assertTrue(all(payload['extra_vars']['mode'] == 'install' for payload in payloads))
+        paths = [call.args[0] for call in self.client.get.call_args_list]
+        self.assertEqual(paths.count('inventories/10/script/?all=1&hostvars=1'), 1)
+        book = load_workbook(self.path)
+        try:
+            columns = awx.excel.read_columns(book.active)
+            links = [book.active.cell(row, columns['exceiute_job']).value for row in (2, 3, 4)]
+            self.assertEqual(links[0], links[1])
+            self.assertNotEqual(links[1], links[2])
+        finally:
+            book.close()
+
+    def test_execute_os_mismatch_in_later_batch_stops_before_any_launch_or_save(self):
+        self.prepare_launch([{'hostname': 'Linux1'}, {'hostname': 'Linux2', 'ostype': 'windows'}])
+        original = self.path.read_bytes()
+        with patch.object(awx.excel, 'save_workbook') as save:
+            code, output = self.execute()
+        self.assertEqual(code, 1, output)
+        self.assertIn("Excel ostype 'windows' does not match AWX ostype 'linux'", output)
+        self.client.post.assert_not_called()
+        save.assert_not_called()
+        self.assertEqual(self.path.read_bytes(), original)
+
+    def test_execute_invalid_credential_stops_all_batches_before_save(self):
+        self.prepare_launch([{'hostname': 'Linux1'},
+                             {'hostname': 'Linux2', 'Full_Credential': 'missing-credential'}])
+        original = self.path.read_bytes()
+        with patch.object(awx.excel, 'save_workbook') as save:
+            code, output = self.execute()
+        self.assertEqual(code, 1, output)
+        self.assertIn('Cannot resolve credential', output)
+        self.client.post.assert_not_called()
+        save.assert_not_called()
+        self.assertEqual(self.path.read_bytes(), original)
+
+    def test_dry_run_shows_separate_configurations_without_launches_or_excel_writes(self):
+        self.prepare_launch([{'hostname': 'Linux1'}, {'hostname': 'Linux2', 'ApplicationID': 'other'}])
+        original = self.path.read_bytes()
+        with patch.object(awx.excel, 'save_workbook') as save:
+            code, output = self.execute(['--dry-run'])
+        self.assertEqual(code, 0, output)
+        self.assertIn('Batch 1: template=7', output)
+        self.assertIn('Batch 2: template=7', output)
+        self.client.post.assert_not_called()
+        save.assert_not_called()
+        self.assertEqual(self.path.read_bytes(), original)
+
+    def test_inventory_settings_record_effective_cli_and_launcher_parameters(self):
+        json_path = Path(self.directory.name) / 'inventory.json'
+        filter_path = Path(self.directory.name) / 'filter.xlsx'
+        book = Workbook()
+        book.active.append(['host_limit'])
+        book.active.append(['Linux1'])
+        book.save(filter_path)
+        book.close()
+        self.write_config(INVENTORY=10, OUTPUT_FILE=str(json_path), INPUT_FILE='unused-filter.xlsx',
+                          INVENTORY_OVERRIDES={'TIMEOUT': 15, 'DEBUG': True})
+        captured = io.StringIO()
+        with patch.object(awx, 'AWXClient', return_value=self.client), redirect_stdout(captured), redirect_stderr(captured):
+            code = awx.run('inventory', ['--file', str(filter_path), '--no-debug'],
+                           variables={'TIMEOUT': 12, 'SHEET_NAME': 'Hosts', 'EXCEL_COLUMNS': ['hostname']},
+                           variables_file=self.config_path)
+        self.assertEqual(code, 0, captured.getvalue())
+        book = load_workbook(self.path)
+        try:
+            self.assertEqual(book.active.title, 'Hosts')
+            self.assertEqual(book.sheetnames[1], 'Ustawienia')
+            sheet = book['Ustawienia']
+            values = {row[1]: row[2] for row in sheet.iter_rows(min_row=5, values_only=True)}
+            self.assertEqual(values['TIMEOUT'], 12)
+            self.assertIs(values['DEBUG'], False)
+            self.assertEqual(values['INPUT_FILE'], str(filter_path.resolve()))
+            self.assertEqual(values['SHEET_NAME'], 'Hosts')
+            self.assertEqual(values['EXCEL_OUTPUT_FILE'], str(self.path.resolve()))
+            self.assertEqual(values['Plik konfiguracji'], str(self.config_path.resolve()))
+            self.assertEqual(values['Filtr hostów.[1]'], 'Linux1')
+            self.assertEqual(values['Liczba hostów'], 1)
+            self.assertNotIn('AWX_TOKEN', values)
+            self.assertNotIn('test-token', str(values))
+            self.assertEqual(sheet.sheet_state, 'visible')
+            original_snapshot = list(sheet.values)
+        finally:
+            book.close()
+        code, output, _ = self.refresh()
+        self.assertEqual(code, 0, output)
+        book = load_workbook(self.path)
+        try:
+            self.assertEqual(list(book['Ustawienia'].values), original_snapshot)
+        finally:
+            book.close()
+        self.client.post.assert_not_called()
+
     def test_dynamic_inventories_exact_names_order_and_source_cache(self):
         report = awx.fetch_refresh_report(self.client, ['WIN1', 'linux1', 'Linux2', 'missing', 'LINUX1'],
                                           '*_mirror_inventory')
