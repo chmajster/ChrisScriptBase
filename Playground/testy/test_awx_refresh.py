@@ -397,9 +397,10 @@ class RefreshTests(unittest.TestCase):
         book = load_workbook(self.path)
         try:
             column = awx.excel.read_columns(book.active)['exceiute_job_link']
-            self.assertEqual(book.active.cell(2, column).value, previous)
+            self.assertEqual(book.active.cell(2, column).value,
+                             'https://awx.example.test/excecution/jobs/playbook/90/output')
             self.assertEqual(book.active.cell(3, column).value,
-                             'https://awx.example.test/#/jobs/playbook/100/output')
+                             'https://awx.example.test/excecution/jobs/playbook/100/output')
         finally:
             book.close()
 
@@ -418,7 +419,7 @@ class RefreshTests(unittest.TestCase):
             column = awx.excel.read_columns(book.active)['exceiute_job_link']
             first, second = (book.active.cell(row, column) for row in (2, 3))
             self.assertEqual(first.value, second.value)
-            self.assertEqual(first.value, 'https://awx.example.test/#/jobs/playbook/100/output')
+            self.assertEqual(first.value, 'https://awx.example.test/excecution/jobs/playbook/100/output')
             self.assertEqual(first.hyperlink.target, first.value)
             self.assertIn(previous, first.comment.text)
             self.assertIsNone(second.comment)
@@ -454,7 +455,8 @@ class RefreshTests(unittest.TestCase):
         book = load_workbook(self.path)
         try:
             columns = awx.excel.read_columns(book.active)
-            self.assertEqual(book.active.cell(2, columns['exceiute_job_link']).value, completed_link)
+            self.assertEqual(book.active.cell(2, columns['exceiute_job_link']).value,
+                             'https://awx.example.test/excecution/jobs/playbook/90/output')
             self.assertIsNone(book.active.cell(2, columns['exceiute_job_link']).comment)
             self.assertIn('/100/output', book.active.cell(3, columns['exceiute_job_link']).value)
             self.assertIn(failed_link, book.active.cell(3, columns['exceiute_job_link']).comment.text)
@@ -479,7 +481,8 @@ class RefreshTests(unittest.TestCase):
         book = load_workbook(self.path)
         try:
             columns = awx.excel.read_columns(book.active)
-            self.assertEqual(book.active.cell(2, columns['exceiute_job_link']).value, completed_link)
+            self.assertEqual(book.active.cell(2, columns['exceiute_job_link']).value,
+                             'https://awx.example.test/excecution/jobs/playbook/90/output')
             self.assertIsNone(book.active.cell(2, columns['exceiute_job_link']).comment)
             self.assertIn('/100/output', book.active.cell(3, columns['exceiute_job_link']).value)
             self.assertEqual(book.active.cell(4, columns['job_variables']).value, 'invalid JSON')
@@ -626,7 +629,7 @@ class RefreshTests(unittest.TestCase):
             columns = awx.excel.read_columns(book.active)
             self.assertNotIn('exceiute_job', columns)
             cell = book.active.cell(2, columns['exceiute_job_link'])
-            self.assertEqual(cell.value, 'https://awx.example.test/#/jobs/playbook/90/output')
+            self.assertEqual(cell.value, 'https://awx.example.test/excecution/jobs/playbook/90/output')
             self.assertEqual(cell.hyperlink.target, cell.value)
             self.assertEqual(cell.comment.text, 'keep history note')
             self.assertFalse(book.active.column_dimensions[cell.column_letter].hidden)
@@ -707,7 +710,7 @@ class RefreshTests(unittest.TestCase):
                 self.assertEqual(book.active.cell(row, columns['artifact filter']).value, message)
                 self.assertEqual(book.active.cell(row, columns['artifact status']).value, status)
             cell = book.active.cell(4, columns['exceiute_job_link'])
-            self.assertEqual(cell.value, 'https://awx.example.test/#/job/playbook/99/output')
+            self.assertEqual(cell.value, 'https://awx.example.test/excecution/jobs/playbook/99/output')
             self.assertEqual(cell.hyperlink.target, cell.value)
         finally:
             book.close()

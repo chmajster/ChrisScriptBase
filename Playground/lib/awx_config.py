@@ -495,7 +495,7 @@ def normalize_execution_column(value):
 
 
 def job_web_url(source_url, job_id=None):
-    """Build a job output link in the UI, preserving a known UI prefix/router."""
+    """Build the execution UI output link with the job run ID."""
     try:
         parsed = urlsplit(source_url)
     except ValueError:
@@ -503,22 +503,12 @@ def job_web_url(source_url, job_id=None):
     if parsed.scheme not in ('http', 'https') or not parsed.netloc:
         return source_url
     if job_id is None:
-        match = re.search(r'/jobs/(?:playbook/)?([1-9][0-9]*)(?:/|$)', parsed.fragment or parsed.path)
+        match = re.search(r'(?:^|/)jobs?/(?:playbook/)?([1-9][0-9]*)(?:/|$)', parsed.fragment or parsed.path)
         if not match:
             return source_url
         job_id = int(match.group(1))
-    route = f'/jobs/playbook/{job_id}/output'
-    if parsed.fragment:
-        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, '', route))
-    api = re.search(r'/(?:api(?:/controller)?|controller)/v2(?:/|$)', parsed.path, re.IGNORECASE)
-    if api:
-        prefix = parsed.path[:api.start()].rstrip('/') + '/'
-        return urlunsplit((parsed.scheme, parsed.netloc, prefix, '', route))
-    for marker in ('/templates/', '/jobs/'):
-        if marker in parsed.path:
-            prefix = parsed.path.split(marker, 1)[0]
-            return urlunsplit((parsed.scheme, parsed.netloc, prefix + route, '', ''))
-    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip('/') + '/', '', route))
+    route = f'/excecution/jobs/playbook/{job_id}/output'
+    return urlunsplit((parsed.scheme, parsed.netloc, route, '', ''))
 
 
 def normalize_template_settings(settings, *, require_organization=False):

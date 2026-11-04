@@ -350,6 +350,7 @@ Akcja i historia:
   Akcja: --job-type > odpowiedzi survey > Job_Variables > kolumna Job_Type > JOB_TYPE.
   Trafia do extra_vars[JOB_TYPE_VARIABLE], domyślnie action.
   Link WebUI joba zapisuje w EXECUTION_COLUMN (domyślnie exceiute_job_link).
+  Format: HOST/excecution/jobs/playbook/<ID uruchomienia>/output.
   Stara kolumna exceiute_job jest przenoszona z zachowaniem historii.
   Po zakończeniu joba zapisuje Artifacts (JSON) i artifact filter (message hosta).
   Obok artifact filter jest artifact status: słowo completed daje completed,
@@ -405,6 +406,7 @@ Przykłady:
   Przed odczytem Excela i zapytaniami do AWX sprawdza dostęp do zapisu pliku.
   Otwarty lub zablokowany plik zatrzymuje operację; zamknij go w Excelu i ponów.
   Czyta linki z EXECUTION_COLUMN (domyślnie exceiute_job_link) i system z ostype.
+  Obsługuje /excecution/jobs/playbook/<ID>/output oraz starsze linki WebUI i API.
   Pobiera pełny stdout raz na unikalny job, także failed/error/canceled.
   Wpisuje log do OUTPUT_COLUMN we wszystkich powiązanych wierszach tego joba.
   Artifacts: JSON z pola artifacts joba. artifact filter: message dla hostname.

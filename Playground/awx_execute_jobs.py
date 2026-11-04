@@ -91,7 +91,8 @@ EXECUTION_SCOPE='ask' przywraca pytanie. Pełny plan zawsze wymaga potwierdzenia
 wpisy z historią, bez pytań o zakres i start.
 
 Uruchomienie zapisuje link WebUI joba w EXECUTION_COLUMN (exceiute_job_link),
-np. https://awx.example.com/#/jobs/playbook/123/output. Link wskazuje job w
+np. https://awx.example.com/excecution/jobs/playbook/123/output. ID 123 to ID
+uruchomienia, a nie szablonu. Link wskazuje job w
 przeglądarce, także gdy Job_Link szablonu jest adresem API. Stara kolumna
 exceiute_job jest przenoszona do exceiute_job_link z zachowaniem historii.
 Po zakończeniu joba zapisuje również Artifacts (JSON) i artifact filter

@@ -21,7 +21,7 @@ class SettingsSheetTests(unittest.TestCase):
         sheet.append(['hostname', 'exceiute_job', 'exceiute_job_link', 'Survey_mode'])
         sheet.append(['host1', 'https://awx.example.test/api/v2/jobs/90/', None])
         sheet.append(['host2', 'https://awx.example.test/api/v2/jobs/91/',
-                      'https://awx.example.test/#/jobs/playbook/91/output'])
+                      'https://awx.example.test/excecution/jobs/playbook/91/output'])
         sheet.cell(2, 2).comment = Comment('old history', 'Operator')
         sheet.cell(2, 3).comment = Comment('new history', 'AWX')
         rule = DataValidation(type='list', formula1='"install,update"', promptTitle='AWX survey')
@@ -36,8 +36,38 @@ class SettingsSheetTests(unittest.TestCase):
         survey_column = get_column_letter(columns['survey_mode'])
         self.assertEqual(str(rule.sqref), f'{survey_column}2:{survey_column}10')
         excel.format_sheet(sheet)
-        self.assertEqual(cell.value, 'https://awx.example.test/#/jobs/playbook/90/output')
+        self.assertEqual(cell.value, 'https://awx.example.test/excecution/jobs/playbook/90/output')
         self.assertEqual(cell.hyperlink.target, cell.value)
+
+    def test_saved_history_links_use_execution_ui_and_preserve_run_ids_and_comments(self):
+        links = [
+            'https://awx.example.test/api/v2/jobs/90/',
+            'https://awx.example.test/#/jobs/playbook/91/output',
+            'https://awx.example.test/#/job/playbook/92/output',
+            'https://awx.example.test/awx/jobs/playbook/93/output',
+            'https://awx.example.test/excecution/jobs/playbook/94/output',
+        ]
+        template = 'https://awx.example.test/#/templates/job_template/7/details'
+        book = excel.create_workbook(['hostname', 'Job_Link', 'exceiute_job_link'],
+                                     [[f'host{number}', template, link] for number, link in enumerate(links)])
+        self.addCleanup(book.close)
+        columns = excel.read_columns(book.active)
+        for row in range(2, len(links) + 2):
+            book.active.cell(row, columns['exceiute_job_link']).comment = Comment('previous run', 'Operator')
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'history.xlsx'
+            excel.save_workbook(book, path)
+            saved = excel.load_workbook(path)
+            try:
+                for row, job_id in enumerate(range(90, 95), 2):
+                    cell = saved.active.cell(row, columns['exceiute_job_link'])
+                    expected = f'https://awx.example.test/excecution/jobs/playbook/{job_id}/output'
+                    self.assertEqual(cell.value, expected)
+                    self.assertEqual(cell.hyperlink.target, expected)
+                    self.assertEqual(cell.comment.text, 'previous run')
+                    self.assertEqual(saved.active.cell(row, columns['job_link']).value, template)
+            finally:
+                saved.close()
 
     def test_conflicting_old_and_new_job_history_stops_migration(self):
         book = excel.Workbook()

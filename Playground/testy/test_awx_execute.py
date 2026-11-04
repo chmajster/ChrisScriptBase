@@ -283,25 +283,27 @@ class ExecutionBatchTests(unittest.TestCase):
             'limit': 'localhost,host1', 'extra_vars': {'action': 'install'},
         })
         self.assertEqual(book.active.max_row, 2)
-        self.assertEqual(book.active.cell(2, column).value, 'https://awx.example.test/#/jobs/playbook/99/output')
+        self.assertEqual(book.active.cell(2, column).value, 'https://awx.example.test/excecution/jobs/playbook/99/output')
         self.assertEqual(book.active.cell(2, column).hyperlink.target, book.active.cell(2, column).value)
 
-    def test_job_links_open_web_ui_for_api_hash_and_path_template_urls(self):
-        for source, expected in (
-            (TEMPLATE_URL, 'https://awx.example.test/#/jobs/playbook/99/output'),
-            ('https://awx.example.test/#/templates/job_template/7/details',
-             'https://awx.example.test/#/jobs/playbook/99/output'),
-            ('https://awx.example.test/templates/job_template/7/details',
-             'https://awx.example.test/jobs/playbook/99/output'),
-            ('https://awx.example.test/awx/api/v2/job_templates/7/',
-             'https://awx.example.test/awx/#/jobs/playbook/99/output'),
-            ('https://awx.example.test/awx/#/templates/job_template/7/details',
-             'https://awx.example.test/awx/#/jobs/playbook/99/output'),
+    def test_job_links_use_execution_ui_and_run_id_for_all_template_url_formats(self):
+        for source in (
+            TEMPLATE_URL,
+            'https://awx.example.test/#/templates/job_template/7/details',
+            'https://awx.example.test/templates/job_template/7/details',
+            'https://awx.example.test/awx/api/v2/job_templates/7/',
+            'https://awx.example.test/awx/#/templates/job_template/7/details',
+            'https://awx.example.test/excecution/templates/job-template/7/details',
         ):
             with self.subTest(source=source):
                 link = awx.job_url(source, self.client, 99)
-                self.assertEqual(link, expected)
+                self.assertEqual(link, 'https://awx.example.test/excecution/jobs/playbook/99/output')
                 self.assertEqual(awx.job_id_from_link(link, self.client), 99)
+
+        client = awx.AWXClient('http://awx.example.test:8080/api/controller/v2/', 'offline-token')
+        link = awx.job_url('http://awx.example.test:8080/api/controller/v2/job_templates/7/', client, 99)
+        self.assertEqual(link, 'http://awx.example.test:8080/excecution/jobs/playbook/99/output')
+        self.assertEqual(awx.job_id_from_link(link, client), 99)
 
     def test_same_template_and_variables_are_split_by_os(self):
         self.settings['BATCH_SIZE'] = 10

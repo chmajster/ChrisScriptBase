@@ -150,6 +150,8 @@ class OutputPlanTests(unittest.TestCase):
 
     def test_singular_and_plural_job_links_with_or_without_scheme_share_one_job(self):
         links = [
+            'https://awx.example.test/excecution/jobs/playbook/99/output',
+            'awx.example.test/excecution/jobs/playbook/99/output',
             'https://awx.example.test/#/job/playbook/99/output',
             'https://awx.example.test/#/jobs/playbook/99/output',
             'awx.example.test/#/job/playbook/99/output',

@@ -838,9 +838,9 @@ Po walidacji `awx_execute_jobs.py` pokazuje plan wszystkich jobów: nazwę i ID 
 EXECUTION_COLUMN = 'exceiute_job_link'
 ```
 
-Execute zapisuje tu linki bezpośrednio do jobów w WebUI, np. `https://awx.example.com/#/jobs/playbook/123/output`. Także szablon wskazany adresem API daje link WebUI. `awx_job_output.py` odczytuje ID joba z tej samej kolumny.
+Execute zapisuje tu linki bezpośrednio do jobów w WebUI, np. `https://awx.example.com/excecution/jobs/playbook/123/output`. Liczba `123` to ID uruchomienia zwrócone przez AWX, nie ID szablonu. Także szablon wskazany adresem API daje ten format linku WebUI. `awx_job_output.py` odczytuje ID joba z tej samej kolumny.
 
-Stara kolumna `exceiute_job` oraz jej nazwa w konfiguracji i `EXCEL_COLUMNS` są rozpoznawane jako `exceiute_job_link`. Nagłówek jest przenoszony z zachowaniem linków i komentarzy; zapis aktualizuje również stare adresy API jobów do WebUI. Jeżeli obie kolumny zawierają różne joby dla tego samego wiersza, skrypt zatrzyma się i poprosi o uzgodnienie historii.
+Stara kolumna `exceiute_job` oraz jej nazwa w konfiguracji i `EXCEL_COLUMNS` są rozpoznawane jako `exceiute_job_link`. Nagłówek jest przenoszony z zachowaniem linków i komentarzy; zapis aktualizuje również stare adresy API oraz linki `/#/job/...` i `/#/jobs/...` do formatu `/excecution/jobs/playbook/<ID>/output`, zachowując ID uruchomienia. Jeżeli obie kolumny zawierają różne joby dla tego samego wiersza, skrypt zatrzyma się i poprosi o uzgodnienie historii.
 
 Nie używaj nazwy kolumny metadanych, `Artifacts` ani kolumny stdout.
 
@@ -1143,7 +1143,7 @@ Inventory pochodzi z danych joba AWX, OS z wierszy Excela. Znaki niedozwolone w 
 
 Każdy unikalny job jest odczytywany raz, a jego wynik trafia do odpowiednich wierszy. Przy wielu OS dla tego samego joba mogą powstać osobne pliki z tym samym stdout.
 
-Odczyt ID obsługuje linki WebUI `/#/job/playbook/<ID>/output` i `/#/jobs/playbook/<ID>/output` oraz adresy API `/api/v2/jobs/<ID>/`. Jeżeli adres zawiera nazwę serwera bez `http://` / `https://`, używany jest protokół z `AWX_URL`. Nadal sprawdzana jest zgodność serwera, portu i protokołu z konfiguracją.
+Odczyt ID obsługuje linki WebUI `/excecution/jobs/playbook/<ID>/output`, starsze `/#/job/playbook/<ID>/output` i `/#/jobs/playbook/<ID>/output` oraz adresy API `/api/v2/jobs/<ID>/`. Jeżeli adres zawiera nazwę serwera bez `http://` / `https://`, używany jest protokół z `AWX_URL`. Nadal sprawdzana jest zgodność serwera, portu i protokołu z konfiguracją.
 
 Przed odczytem Excela i zapytaniami do AWX `awx_job_output.py` sprawdza dostęp do zapisu istniejącego pliku. Na Windows próbuje uzyskać wyłączny dostęp bez zmiany zawartości. Jeżeli plik jest otwarty lub zablokowany, operacja kończy się przed pobieraniem wyników, a komunikat podaje ścieżkę i prosi o zamknięcie pliku. Kontrola działa niezależnie od `DEBUG` i nie tworzy brakującego pliku.
 
