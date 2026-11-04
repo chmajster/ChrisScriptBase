@@ -29,6 +29,10 @@ zawiera message znalezione dla hostname z tego wiersza. Skrypt przeszukuje
 zagnieżdżone słowniki i listy: host jako klucz JSON lub wartość pola host,
 hostname albo inventory_hostname. Dopasowanie pełnej nazwy ignoruje wielkość
 liter. Kilka komunikatów łączy nowymi liniami; brak dopasowania daje puste pole.
+Bezpośrednio za artifact filter jest artifact status: completed, jeśli pole
+zawiera całe słowo completed (bez rozróżniania wielkości liter), inaczej error.
+Puste pole oznacza error. Status jest uzupełniany również dla starszych wierszy.
+W awx_execute_jobs.py opcja 3 / --execution-scope errors uruchamia tylko te wpisy.
 Artefakty są aktualizowane również wtedy, gdy pobranie stdout się nie powiedzie.
 
 Pełny log zapisuje również jako <id_joba>.<inventory>.<os>.txt w OUTPUT_DIRECTORY.
@@ -65,7 +69,7 @@ VARIABLES = {
     # "INPUT_FILE": 'hosts.xlsx',
     # "SHEET_NAME": 'Results',
     # Widoczne kolumny; [] pokazuje wszystkie. Pozostałe są ukrywane z zachowaniem danych.
-    # "EXCEL_COLUMNS": ['hostname', 'exceiute_job_link', 'output', 'Artifacts', 'artifact filter'],
+    # "EXCEL_COLUMNS": ['hostname', 'exceiute_job_link', 'output', 'Artifacts', 'artifact filter', 'artifact status'],
     # Nazwa musi odpowiadać kolumnie używanej przez launcher execute.
     # "EXECUTION_COLUMN": 'exceiute_job_link',
 

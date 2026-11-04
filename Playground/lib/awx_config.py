@@ -32,7 +32,8 @@ METADATA_COLUMNS = (
     "hostname", "AWX_Status", "INVENTORY", "ApplicationID", "ostype", "template_job_name", "Job_Link", "Job_Credentials", "Job_Variables", "HOPS", "HOPS_COUNT", "jumphost_for_hops", "Extra_Credentials",
     "OS Credential", "Full_Credential", "Job_Type",
 )
-ARTIFACT_COLUMNS = ("Artifacts", "artifact filter")
+ARTIFACT_STATUS_COLUMN = 'artifact status'
+ARTIFACT_COLUMNS = ("Artifacts", "artifact filter", ARTIFACT_STATUS_COLUMN)
 CONNECTION_KEYS = ("AWX_URL", "AWX_TOKEN", "TIMEOUT", "PAGE_SIZE")
 TEMPLATE_KEYS = ("JOB_TEMPLATE_AUTO_DISCOVERY", "JOB_TEMPLATE_ORGANIZATION",
                  "JOB_TEMPLATE_NAME_PATTERN", "JOB_TEMPLATE_OS_NAMES")
@@ -472,7 +473,15 @@ def normalize_excel_columns(value):
             raise AWXError(f"Powtórzona nazwa kolumny w EXCEL_COLUMNS: {name!r}.")
         seen.add(name.casefold())
         names.append(name)
+    if 'artifact filter' in seen and ARTIFACT_STATUS_COLUMN not in seen:
+        index = next(index for index, name in enumerate(names) if name.casefold() == 'artifact filter')
+        names.insert(index + 1, ARTIFACT_STATUS_COLUMN)
     return names
+
+
+def artifact_filter_status(value):
+    """Classify a host message by the whole word completed, ignoring letter case."""
+    return 'completed' if re.search(r'\bcompleted\b', str(value or ''), re.IGNORECASE) else 'error'
 
 
 def normalize_execution_column(value):
@@ -586,8 +595,8 @@ def read_execution_settings(settings_file=None, *, refresh=False):
     scope = settings["EXECUTION_SCOPE"]
     if scope is None:
         scope = 'ask'
-    if not isinstance(scope, str) or scope.strip().casefold() not in ('ask', 'missing', 'all'):
-        raise AWXError('EXECUTION_SCOPE must be ask, missing, or all.')
+    if not isinstance(scope, str) or scope.strip().casefold() not in ('ask', 'missing', 'all', 'errors'):
+        raise AWXError('EXECUTION_SCOPE must be ask, missing, all, or errors.')
     settings['EXECUTION_SCOPE'] = scope.strip().casefold()
     column = settings["EXECUTION_COLUMN"]
     if column is None:

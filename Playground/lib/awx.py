@@ -348,14 +348,18 @@ Akcja i historia:
   Link WebUI joba zapisuje w EXECUTION_COLUMN (domyślnie exceiute_job_link).
   Stara kolumna exceiute_job jest przenoszona z zachowaniem historii.
   Po zakończeniu joba zapisuje Artifacts (JSON) i artifact filter (message hosta).
+  Obok artifact filter jest artifact status: słowo completed daje completed,
+  pozostałe wiadomości i puste pola dają error. Wielkość liter nie ma znaczenia.
   Gdy WAIT_FOR_COMPLETION=False, pobierz końcowe artefakty przez awx_job_output.py.
   Zakres: 1 / Enter — tylko wpisy bez linku, 2 — wszystkie wybrane wpisy,
-  0 — anuluj. --execution-scope missing/all zastępuje pytanie o zakres.
+  3 — tylko artifact status=error, 0 — anuluj.
+  --execution-scope missing/all/errors zastępuje pytanie o zakres.
   EXECUTION_SCOPE='ask' (domyślnie) włącza pytanie. HOSTS / --hosts nadal ogranicza zakres.
   Pełny plan wymaga osobnego potwierdzenia [tak/N] przed zapisem i startem.
   Przy ponowieniu poprzedni link zostaje w komentarzu komórki EXECUTION_COLUMN.
   --dry-run nie pyta o zakres i start; domyślnie pokazuje tylko wpisy bez linku.
   --execution-scope all --dry-run pokazuje również wpisy z historią.
+  --execution-scope errors --dry-run pokazuje wyłącznie wiersze z błędem.
   LAUNCH_PENDING wymaga sprawdzenia uruchomienia w AWX i nie jest ponawiany pytaniem.
   WAIT_FOR_COMPLETION=True czeka na sukces; błąd zatrzymuje kolejne paczki.
 
@@ -386,6 +390,7 @@ Przykłady:
   python .\awx_execute_jobs.py --survey --dry-run
   python .\awx_execute_jobs.py --execution-scope missing
   python .\awx_execute_jobs.py --execution-scope all --dry-run
+  python .\awx_execute_jobs.py --execution-scope errors --dry-run
   python .\awx_execute_jobs.py -file .\hosty.xlsx --batch-size 10 --job-type install
   python .\awx_execute_jobs.py --hosts host1 --job-url "https://awx.example.com/#/templates/job_template/7/details" --dry-run
   --dry-run: bez startu jobów i zapisu. Brakujące metadane może odczytać z AWX.
@@ -399,6 +404,8 @@ Przykłady:
   Pobiera pełny stdout raz na unikalny job, także failed/error/canceled.
   Wpisuje log do OUTPUT_COLUMN we wszystkich powiązanych wierszach tego joba.
   Artifacts: JSON z pola artifacts joba. artifact filter: message dla hostname.
+  artifact status obok filtra: completed, gdy jest całe słowo completed; inaczej error.
+  Pusta wiadomość też daje error. Wielkość liter nie ma znaczenia.
   Szuka pełnej nazwy hosta w kluczach JSON oraz polach host/hostname/inventory_hostname.
   Obsługuje zagnieżdżone słowniki/listy; wiele komunikatów łączy nowymi liniami.
   Brak dopasowanego message zostawia pustą komórkę; brak artefaktów zapisuje {}.
@@ -1303,8 +1310,8 @@ def parse_execute_arguments(argv=None):
     parser.add_argument("--job-url", help="URL szablonu joba dla wskazanych hostów; nadpisuje JOB_URL i Job_Link.")
     parser.add_argument("--batch-size", type=int, help="Maksymalna liczba hostów w jobie; nadpisuje BATCH_SIZE.")
     parser.add_argument("--job-type", help="Akcja playbooka, np. install/reinstall/update; nadpisuje także kolumnę Job_Type.")
-    parser.add_argument('--execution-scope', choices=('ask', 'missing', 'all'),
-                        help='Zakres: ask pyta (domyślnie), missing uruchamia tylko wpisy bez linku, all także wpisy z historią. Końcowe potwierdzenie planu jest wymagane.')
+    parser.add_argument('--execution-scope', choices=('ask', 'missing', 'all', 'errors'),
+                        help='Zakres: ask pyta (domyślnie), missing tylko bez linku, all wszystkie, errors tylko artifact status=error. Końcowe potwierdzenie planu jest wymagane.')
     parser.add_argument("--survey", action=argparse.BooleanOptionalAction, default=None,
                         help="Pytaj w terminalu o brakujące odpowiedzi survey; --no-survey wyłącza pytania.")
     parser.add_argument("--survey-answers", help="Odpowiedzi survey jako obiekt JSON; nadpisuje SURVEY_ANSWERS i Job_Variables.")
@@ -1481,7 +1488,7 @@ def execution_row_context(sheet, row_number, columns, excel_variables):
     return context
 
 
-def build_execution_plan(sheet, client, settings, job_type_override=None, hostnames=None, job_url_override=None, survey_overrides=None, survey_cache=None):
+def build_execution_plan(sheet, client, settings, job_type_override=None, hostnames=None, job_url_override=None, survey_overrides=None, survey_cache=None, row_numbers=None):
     """Verify Excel templates and batch equal OS/payloads, preserving distinct runs per host."""
     excel.migrate_execution_column(sheet, common.normalize_execution_column(settings['EXECUTION_COLUMN']))
     columns = excel.read_columns(sheet)
@@ -1490,10 +1497,13 @@ def build_execution_plan(sheet, client, settings, job_type_override=None, hostna
             raise AWXError(f"Missing {name} column. Generate a new Excel export with awx_inventory_hosts.py.")
     execution_column = columns.get(common.normalize_execution_column(settings['EXECUTION_COLUMN']).casefold(), sheet.max_column + 1)
     hosts = {}
+    selected_rows = set(row_numbers) if row_numbers is not None else None
     selected = {common.hostname_key(name) for name in hostnames} if hostnames is not None else None
     skipped_without_job = 0
     selected_job_url = str(job_url_override or '').strip()
     for row_number in range(2, sheet.max_row + 1):
+        if selected_rows is not None and row_number not in selected_rows:
+            continue
         host_value = sheet.cell(row_number, columns['hostname']).value
         if host_value is None or not str(host_value).strip():
             LOGGER.debug('Plan wykonania: pomijam wiersz %d — pusta nazwa hosta.', row_number)
@@ -2034,33 +2044,59 @@ def confirm_execution_plan(client, batches, *, job_type_variable='action'):
     return answer.strip().casefold() in ('tak', 't', 'yes', 'y')
 
 
-def choose_execution_scope(column_name, batches, existing, *, requested='ask', preview=False):
+def execution_row_scopes(sheet, execution_column, hostnames=None):
+    """Select rows before validating jobs so completed rows cannot join error retries."""
+    excel.update_artifact_status(sheet)
+    columns = excel.read_columns(sheet)
+    selected = {common.hostname_key(name) for name in hostnames} if hostnames else None
+    scopes = {'all': [], 'missing': [], 'errors': []}
+    pending = []
+    for row_number in range(2, sheet.max_row + 1):
+        hostname = common.hostname_key(sheet.cell(row_number, columns['hostname']).value)
+        if not hostname or selected is not None and hostname not in selected:
+            continue
+        scopes['all'].append(row_number)
+        execution = str(sheet.cell(row_number, columns[execution_column.casefold()]).value or '').strip()
+        if execution.casefold() in ('', 'none'):
+            scopes['missing'].append(row_number)
+        if execution.startswith('LAUNCH_PENDING'):
+            pending.append(row_number)
+        if sheet.cell(row_number, columns[common.ARTIFACT_STATUS_COLUMN]).value == 'error':
+            scopes['errors'].append(row_number)
+    return scopes, pending
+
+
+def choose_execution_scope(column_name, scopes, *, requested='ask', preview=False):
     """Select new entries or all selected entries; previews default to new entries."""
     if requested != 'ask':
         return requested
     if preview or not sys.stdin.isatty():
         return 'missing'
     console.print_record('WYBÓR ZAKRESU URUCHOMIENIA', {
-        f'Wpisy bez linku w {column_name}': sum(len(batch['entries']) for batch in batches),
-        'Wpisy z wcześniejszym jobem': len(existing),
+        f'Wiersze bez linku w {column_name}': len(scopes['missing']),
+        'Wiersze z wcześniejszym jobem': len(scopes['all']) - len(scopes['missing']),
+        'Wiersze z artifact status=error': len(scopes['errors']),
     })
     console.print_message(
         '1 — Tylko wpisy bez linku do wcześniejszego joba (domyślnie).\n'
         '2 — Wszystkie wybrane wpisy, również te z wcześniejszym jobem.\n'
+        '3 — Tylko wpisy z artifact status=error (ponowienie).\n'
         '0 — Anuluj.\n'
         'Po wyborze zobaczysz pełny plan do potwierdzenia.', flush=True)
     while True:
         try:
-            answer = input('Na których wpisach uruchomić joby? [1/2/0, Enter=1]: ').strip().casefold()
+            answer = input('Na których wpisach uruchomić joby? [1/2/3/0, Enter=1]: ').strip().casefold()
         except EOFError:
             return None
         if answer in ('', '1', 'missing'):
             return 'missing'
         if answer in ('2', 'all'):
             return 'all'
+        if answer in ('3', 'error', 'errors'):
+            return 'errors'
         if answer in ('0', 'n', 'nie', 'anuluj'):
             return None
-        console.print_message('Wpisz 1 (bez linku), 2 (wszystkie) albo 0 (anuluj).', level='warning', flush=True)
+        console.print_message('Wpisz 1 (bez linku), 2 (wszystkie), 3 (error) albo 0 (anuluj).', level='warning', flush=True)
 
 
 def archive_execution_history(sheet, execution_column, entries):
@@ -2138,41 +2174,52 @@ def execute_main(argv=None):
             add_selected_hosts(sheet, selected_hosts, client, connection, settings,
                                job_url_override=selected_job_url, template_cache=template_cache)
         excel.sort_host_rows(sheet)
-        batches, existing, column, skipped = build_execution_plan(
-            sheet, client, settings, job_type_override=args.job_type, hostnames=selected_hosts or None,
-            job_url_override=selected_job_url or None, survey_overrides=survey_overrides)
         if args.show_survey:
+            batches, existing, column, skipped = build_execution_plan(
+                sheet, client, settings, job_type_override=args.job_type, hostnames=selected_hosts or None,
+                job_url_override=selected_job_url or None, survey_overrides=survey_overrides)
             links = {entry['template_id']: entry['link'] for entry in [*batches, *existing]}
             show_template_surveys(client, links)
             return 0
+        scopes, pending_rows = execution_row_scopes(sheet, settings['EXECUTION_COLUMN'], selected_hosts)
         console.print_record('PRZYGOTOWANIE URUCHOMIENIA', {
             'Plik Excel': client.redact(str(path)),
             'Arkusz': client.redact(sheet.title),
             'Maks. hostów w paczce': settings['BATCH_SIZE'],
-            'Nowe paczki': len(batches),
-            'Wpisy z historią': len(existing),
-            'Pominięte wiersze bez szablonu': skipped,
+            'Wybrane wiersze': len(scopes['all']),
+            'Wiersze z historią': len(scopes['all']) - len(scopes['missing']),
+            'Wiersze z artifact status=error': len(scopes['errors']),
             'Tryb wykonania': ('kolejne paczki po sukcesie poprzedniego joba' if settings['WAIT_FOR_COMPLETION']
                                else 'wysłanie wszystkich paczek bez czekania na wyniki'),
         })
-        if not args.dry_run and any(entry['execution'].startswith('LAUNCH_PENDING') for entry in existing):
+        if not args.dry_run and pending_rows:
             raise AWXError('W Excelu jest znacznik LAUNCH_PENDING po wcześniejszej próbie uruchomienia. Sprawdź w AWX, czy job powstał. Zastąp znacznik linkiem do joba lub usuń go dopiero po upewnieniu się, że job nie został uruchomiony.')
         scope = choose_execution_scope(
-            settings['EXECUTION_COLUMN'], batches, existing,
+            settings['EXECUTION_COLUMN'], scopes,
             requested=args.execution_scope or settings['EXECUTION_SCOPE'], preview=args.dry_run)
         if scope is None:
             console.print_message('Uruchomienie anulowane. Joby nie zostały uruchomione; plik Excel nie został zmieniony.',
                                   level='warning', flush=True)
             return 0
-        console.print_message('Wybrany zakres: ' + ('wszystkie wybrane wpisy, również z historią.' if scope == 'all'
-                                                   else 'tylko wpisy bez linku do wcześniejszego joba.'), flush=True)
+        descriptions = {
+            'all': 'wszystkie wybrane wpisy, również z historią.',
+            'missing': 'tylko wpisy bez linku do wcześniejszego joba.',
+            'errors': 'tylko wpisy z artifact status=error, również z historią.',
+        }
+        console.print_message('Wybrany zakres: ' + descriptions[scope], flush=True)
+        selected_rows = scopes['errors'] if scope == 'errors' else scopes['all']
+        batches, existing, column, skipped = build_execution_plan(
+            sheet, client, settings, job_type_override=args.job_type, hostnames=selected_hosts or None,
+            job_url_override=selected_job_url or None, survey_overrides=survey_overrides, row_numbers=selected_rows)
         rerun_entries = []
-        if scope == 'all' and existing:
+        if scope in ('all', 'errors') and existing:
             rerun_entries = existing
             archive_execution_history(sheet, column, rerun_entries)
             batches, existing, column, skipped = build_execution_plan(
                 sheet, client, settings, job_type_override=args.job_type, hostnames=selected_hosts or None,
-                job_url_override=selected_job_url or None, survey_overrides=survey_overrides)
+                job_url_override=selected_job_url or None, survey_overrides=survey_overrides, row_numbers=selected_rows)
+        if skipped:
+            console.print_message(f'Pominięte wiersze bez szablonu: {skipped}.', level='warning', flush=True)
         if args.dry_run:
             LOGGER.debug('Podgląd wykonania: nie uruchamiam zadań i nie zapisuję pliku\n  Walidacja ankiety w AWX: %s',
                          'włączona' if interactive_survey else 'wyłączona w zwykłym podglądzie')
@@ -2182,7 +2229,8 @@ def execute_main(argv=None):
                                               row_numbers=rows, cache=template_cache)
                 batches, existing, column, skipped = build_execution_plan(
                     sheet, client, settings, job_type_override=args.job_type, hostnames=selected_hosts or None,
-                    job_url_override=selected_job_url or None, survey_overrides=survey_overrides, survey_cache=cache)
+                    job_url_override=selected_job_url or None, survey_overrides=survey_overrides, survey_cache=cache,
+                    row_numbers=selected_rows)
                 validate_templates(client, batches, interactive=True, check_credentials=False, cache=cache)
             display_execution_plan(client, batches, preview=True, job_type_variable=settings['JOB_TYPE_VARIABLE'])
             console.print_message('Podgląd zakończony: joby nie zostały uruchomione; plik Excel nie został zmieniony.',
@@ -2190,8 +2238,11 @@ def execute_main(argv=None):
             return 0
         if not batches:
             excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=settings['OUTPUT_COLUMN'], excel_columns=settings.get('EXCEL_COLUMNS'))
-            console.print_message('Brak wpisów do uruchomienia w wybranym zakresie. Zapisano układ arkusza.\n'
-                                  'Aby ponowić joby z historią, wybierz opcję 2 lub --execution-scope all.',
+            message = ('Brak wierszy z artifact status=error w wybranym zakresie. Zapisano układ arkusza.'
+                       if scope == 'errors' else
+                       'Brak wpisów do uruchomienia w wybranym zakresie. Zapisano układ arkusza.\n'
+                       'Aby ponowić joby z historią, wybierz opcję 2 (all) albo 3 (errors).')
+            console.print_message(message,
                                   level='warning', flush=True)
             return 0
         console.print_message('Sprawdzam w AWX szablony jobów, hosty, systemy, poświadczenia i odpowiedzi survey.',
@@ -2201,7 +2252,8 @@ def execute_main(argv=None):
                                       row_numbers=rows, cache=template_cache)
         batches, existing, column, skipped = build_execution_plan(
             sheet, client, settings, job_type_override=args.job_type, hostnames=selected_hosts or None,
-            job_url_override=selected_job_url or None, survey_overrides=survey_overrides, survey_cache=cache)
+            job_url_override=selected_job_url or None, survey_overrides=survey_overrides, survey_cache=cache,
+            row_numbers=selected_rows)
         resolve_execution_hostnames(client, batches, cache)
         resolve_credentials(client, batches, template_cache=cache)
         validate_templates(client, batches, interactive=interactive_survey, cache=cache)
@@ -2214,11 +2266,11 @@ def execute_main(argv=None):
             recorded_jobs = {}
             previous = [(entry, True) for entry in existing] + [(entry, False) for entry in rerun_entries]
             for entry, require_success in previous:
-                parsed = urlsplit(entry['execution'])
-                match = re.search('/jobs/(?:playbook/)?([1-9][0-9]*)(?:/|$)', parsed.fragment or parsed.path)
-                if match and client._origin(parsed) == client.origin:
-                    job_id = int(match.group(1))
-                    recorded_jobs[job_id] = recorded_jobs.get(job_id, False) or require_success
+                try:
+                    job_id = job_id_from_link(entry['execution'], client)
+                except (AWXError, ValueError):
+                    continue
+                recorded_jobs[job_id] = recorded_jobs.get(job_id, False) or require_success
             for job_id in sorted(recorded_jobs):
                 console.print_message(f'Sprawdzam zakończenie wcześniejszego joba {job_id} przed startem nowego planu.',
                                       level='progress', flush=True)
@@ -2405,6 +2457,8 @@ def write_job_artifacts(sheet, job, entries, source):
             message = artifact_messages(artifacts, hostname)
             write_output(sheet, columns['artifacts'], row_number, content, source, label='Artifacts')
             write_output(sheet, columns['artifact filter'], row_number, message, source, label='Artifact message')
+            status = common.artifact_filter_status(sheet.cell(row_number, columns['artifact filter']).value)
+            write_output(sheet, columns[common.ARTIFACT_STATUS_COLUMN], row_number, status, source, label='Artifact status')
 
 
 def write_output(sheet, column, row_number, content, text_path, *, label='Output'):
@@ -2453,8 +2507,8 @@ def collect_outputs(workbook, sheet, path, output_directory, client, settings, j
             write_job_artifacts(sheet, job, entries, client._resolve_url(f"jobs/{job_id}/"))
             artifacts_written = True
             console.print_message(
-                f'Zadanie {job_id}: przygotowano Artifacts (JSON) i artifact filter '
-                f'(komunikaty message dopasowane do hostname).\nLiczba wierszy: {len(entries)}.', level='info')
+                f'Zadanie {job_id}: przygotowano Artifacts (JSON), artifact filter '
+                f'(message hosta) i artifact status (completed/error).\nLiczba wierszy: {len(entries)}.', level='info')
             stage = 'pobieranie pełnego logu z AWX'
             console.print_message(f'Zadanie {job_id}: pobieram pełny log wykonania (stdout).', level='progress', flush=True)
             content = client.stdout(job_id)
@@ -2496,7 +2550,7 @@ def collect_outputs(workbook, sheet, path, output_directory, client, settings, j
                 if log_written:
                     console.print_message(
                         f'Zadanie {job_id}: zapisano Excel — log w kolumnie {settings["OUTPUT_COLUMN"]!r}, '
-                        f'artefakty w Artifacts i artifact filter.\nLiczba wierszy: {len(entries)}.', level='success')
+                        f'artefakty w Artifacts, artifact filter i artifact status.\nLiczba wierszy: {len(entries)}.', level='success')
                 else:
                     console.print_message(
                         f'Zadanie {job_id}: zapisano artefakty w Excelu. Pobieranie logu nie zostało ukończone.\n'
@@ -2538,7 +2592,8 @@ def output_main(argv=None):
             f'Logi zapisuję w {settings["OUTPUT_COLUMN"]!r}\nPełne pliki TXT: {output_directory}.', level='info')
         console.print_message(
             'Każde zadanie pobieram raz, a jego log kopiuję do wszystkich powiązanych wierszy. '
-            'Artifacts zawiera artefakty zadania w JSON, a artifact filter — komunikaty message dla hosta z danego wiersza.',
+            'Artifacts zawiera artefakty zadania w JSON, artifact filter — message hosta, '
+            'a artifact status — completed, gdy wiadomość zawiera słowo completed, lub error.',
             level='info')
         if settings['WAIT_FOR_COMPLETION']:
             console.print_message(

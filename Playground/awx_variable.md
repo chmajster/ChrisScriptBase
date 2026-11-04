@@ -170,7 +170,7 @@ Poniżej stan istotnych ustawień z lokalnego `awx_variable` w chwili przygotowa
 | `HOST_COLUMN` / `HOSTS` | `None` / `[]`. |
 | `BATCH_SIZE` | `10` hostów na job, w ramach zgodnej grupy parametrów. |
 | `EXECUTION_COLUMN` | `'exceiute_job_link'`. |
-| `EXECUTION_SCOPE` | `'ask'`: pytanie o wpisy bez linku lub wszystkie wybrane wpisy. |
+| `EXECUTION_SCOPE` | `'ask'`: pytanie o wpisy bez linku, wszystkie lub tylko `artifact status=error`. |
 | `JOB_TYPE` / `JOB_TYPE_VARIABLE` | `''` / `'action'`. |
 | `SURVEY_EXCEL_DEFAULTS` | `{'installtesttypename': 'testads'}`. |
 | `SURVEY_ANSWERS` | `{'installtesttypename': 'reinstall'}`. |
@@ -846,6 +846,7 @@ Historia:
 
 - Tryb `missing` pomija wpisy z historią; puste komórki i `none` oznaczają brak linku.
 - Tryb `all` ponawia także wpisy z historią w wybranym zakresie hostów.
+- Tryb `errors` wybiera wyłącznie wiersze z `artifact status=error`, także z historią.
 - Potwierdzony rerun zachowuje poprzedni link w komentarzu.
 - Przed żądaniem startu zapisywany jest `LAUNCH_PENDING`.
 - `LAUNCH_PENDING` oznacza zamiar uruchomienia z niepotwierdzonym wynikiem; przed ponowieniem trzeba ustalić stan joba w AWX.
@@ -853,7 +854,7 @@ Historia:
 
 ### EXECUTION_SCOPE
 
-**Typ:** `ask`, `missing` albo `all`. **Domyślnie:** `'ask'`.
+**Typ:** `ask`, `missing`, `all` albo `errors`. **Domyślnie:** `'ask'`.
 
 ```python
 EXECUTION_SCOPE = 'ask'
@@ -863,14 +864,19 @@ W terminalu skrypt pyta:
 
 - `1` — tylko wpisy bez linku w `exceiute_job_link`; wybór domyślny, również po Enter.
 - `2` — wszystkie wybrane wpisy, również z wcześniejszym jobem.
+- `3` — tylko wpisy z `artifact status=error`, również z wcześniejszym jobem.
 - `0` — anuluj bez zapisu i startu.
 
 Zakres uwzględnia `HOSTS` / `--hosts`. Wybór `all` nie rozszerza wskazanej listy hostów. Po wyborze skrypt pokazuje pełny plan i wymaga potwierdzenia `[tak/N]`.
+
+`errors` wybiera konkretne wiersze z błędem przed grupowaniem i walidacją szablonów. Jeżeli ten sam serwer ma osobny wiersz `completed`, ten wiersz pozostaje poza ponowieniem. Status jest przeliczany z aktualnego `artifact filter`; puste pole także daje `error`, również dla hostów bez wcześniejszego joba. Poprzednie linki ponawianych wierszy pozostają w komentarzach.
 
 ```powershell
 python .\awx_execute_jobs.py --execution-scope missing
 python .\awx_execute_jobs.py --execution-scope all
 python .\awx_execute_jobs.py --execution-scope all --dry-run
+python .\awx_execute_jobs.py --execution-scope errors
+python .\awx_execute_jobs.py --execution-scope errors --dry-run
 ```
 
 Argument `--execution-scope` ma pierwszeństwo przed `EXECUTION_SCOPE`. `--dry-run` nie pyta o zakres ani start; przy `ask` pokazuje wpisy bez linku. Brak interaktywnego terminala uniemożliwia końcowe potwierdzenie startu. Anulowanie planu pozostawia plik bez zmian, także po wyborze `all` i przygotowaniu ponowienia w pamięci.
@@ -1110,7 +1116,7 @@ OUTPUT_COLUMN = 'output'
 
 `awx_job_output.py` wpisuje tu stdout joba do wszystkich powiązanych wierszy. Nazwa musi być różna od `EXECUTION_COLUMN` i nazw metadanych/artefaktów. Brakująca kolumna jest dodawana.
 
-Nie zmienia nazw osobnych kolumn `Artifacts` i `artifact filter`.
+Nie zmienia nazw osobnych kolumn `Artifacts`, `artifact filter` i `artifact status`.
 
 ### OUTPUT_DIRECTORY
 
@@ -1144,6 +1150,8 @@ Nieprawidłowy link w `exceiute_job_link` (np. adres strony głównej AWX bez ID
 Komórka Excela mieści do 32767 znaków. Dłuższy log jest skracany z adresem pełnego pliku TXT. Zapis TXT zachowuje pełną treść.
 
 `Artifacts` przechowuje JSON artefaktów. `artifact filter` zawiera komunikaty `message` dopasowane do hosta. Artefakty są aktualizowane również wtedy, gdy późniejszy odczyt stdout się nie powiedzie. Długi JSON artefaktów może zostać skrócony z odwołaniem do pełnych danych w AWX.
+
+Bezpośrednio za `artifact filter` znajduje się `artifact status`. Całe słowo `completed`, niezależnie od wielkości liter, daje `completed`; każda inna treść, w tym pusta komórka, daje `error`. Na przykład `Installation COMPLETED successfully` daje `completed`, a `failed` i `uncompleted` dają `error`. Status ocenia treść komunikatu hosta; status zadania AWX jest odczytywany oddzielnie. Kolumna jest uzupełniana także dla istniejących danych i aktualizowana przy zapisie. Gdy `EXCEL_COLUMNS` pokazuje `artifact filter`, pokazuje również sąsiednie `artifact status`.
 
 Pobranie logu joba o statusie `failed` może zakończyć się sukcesem — sukces pobrania i sukces joba są różnymi informacjami.
 
@@ -1297,6 +1305,7 @@ Standardowe kolumny są następujące. Nazwy konfigurowalnych kolumn wykonania i
 | `output` | Stdout; nazwę określa `OUTPUT_COLUMN`. |
 | `Artifacts` | Artefakty joba w JSON. |
 | `artifact filter` | Komunikaty `message` przypisane do hosta. |
+| `artifact status` | `completed` dla słowa `completed` w filtrze; inaczej `error`. Obok `artifact filter`. |
 | `Survey_<zmienna>` | Odpowiedź na konkretne pytanie survey. |
 
 Eksport i odświeżanie porządkują hosty według systemu: Windows, Linux, AIX, następnie pozostałe/puste wartości. Nazwy kolumn są identyfikowane bez rozróżniania wielkości liter.

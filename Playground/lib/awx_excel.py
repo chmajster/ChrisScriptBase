@@ -11,8 +11,8 @@ from datetime import datetime
 from pathlib import Path
 
 from .awx_config import (
-    ARTIFACT_COLUMNS, AWXError, DEFAULT_EXECUTION_COLUMN, LEGACY_EXECUTION_COLUMN,
-    METADATA_COLUMNS, job_web_url, normalize_excel_columns, normalize_execution_column,
+    ARTIFACT_COLUMNS, ARTIFACT_STATUS_COLUMN, AWXError, DEFAULT_EXECUTION_COLUMN, LEGACY_EXECUTION_COLUMN,
+    METADATA_COLUMNS, artifact_filter_status, job_web_url, normalize_excel_columns, normalize_execution_column,
 )
 from .awx_dependencies import ensure_openpyxl
 
@@ -211,6 +211,18 @@ def migrate_execution_column(sheet, execution_column):
             sheet.data_validations.dataValidation.remove(rule)
 
 
+def update_artifact_status(sheet):
+    """Keep the result column derived from the current artifact filter cells."""
+    columns = read_columns(sheet)
+    if 'artifact filter' not in columns or ARTIFACT_STATUS_COLUMN not in columns:
+        return
+    for row_number in range(2, sheet.max_row + 1):
+        cell = sheet.cell(row_number, columns[ARTIFACT_STATUS_COLUMN])
+        cell.value = artifact_filter_status(sheet.cell(row_number, columns['artifact filter']).value)
+        cell.data_type = 's'
+        cell.number_format = '@'
+
+
 def prepare_sheet(sheet, execution_column=DEFAULT_EXECUTION_COLUMN, output_column="output", *, reorder=True):
     """Repair and order the complete schema without dropping custom columns or history."""
     if any(merged.max_row > 1 for merged in sheet.merged_cells.ranges):
@@ -277,6 +289,7 @@ def prepare_sheet(sheet, execution_column=DEFAULT_EXECUTION_COLUMN, output_colum
                 dimension.min = target_column
                 dimension.max = target_column
                 sheet.column_dimensions[dimension.index] = dimension
+    update_artifact_status(sheet)
     return read_columns(sheet), added
 
 
@@ -315,6 +328,7 @@ def format_sheet(sheet, execution_column=DEFAULT_EXECUTION_COLUMN, output_column
     """Apply the same formatting and text/link handling at every workflow stage."""
     execution_column = normalize_execution_column(execution_column)
     migrate_execution_column(sheet, execution_column)
+    update_artifact_status(sheet)
     names = {name.casefold() for name in headers(execution_column, output_column)}
     columns = read_columns(sheet)
     inverse = {column: name for name, column in columns.items()}

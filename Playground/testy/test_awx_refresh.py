@@ -433,6 +433,133 @@ class RefreshTests(unittest.TestCase):
         self.assertNotIn('WYBÓR ZAKRESU URUCHOMIENIA', output)
         self.assertEqual(self.client.post.call_args.args[1]['limit'], 'localhost,Linux2')
 
+    def test_error_scope_menu_reruns_only_failed_rows_and_preserves_completed_history(self):
+        completed_link = 'https://awx.example.test/#/jobs/playbook/90/output'
+        failed_link = 'https://awx.example.test/#/job/playbook/91/output'
+        self.prepare_launch([
+            {'hostname': 'Linux1', 'artifact filter': 'Installation COMPLETED', 'exceiute_job_link': completed_link},
+            {'hostname': 'Linux2', 'artifact filter': 'installation failed', 'exceiute_job_link': failed_link},
+        ])
+        self.client.post.side_effect = [{'job': 100, 'artifacts': {'Linux2': {'message': 'completed'}}}]
+        with patch.object(sys.stdin, 'isatty', return_value=True), patch('builtins.input', side_effect=['3', 'tak']) as confirmation:
+            code, output = self.execute([])
+        self.assertEqual(code, 0, output)
+        self.assertEqual(confirmation.call_count, 2)
+        self.client.post.assert_called_once()
+        self.assertEqual(self.client.post.call_args.args[1]['limit'], 'localhost,Linux2')
+        book = load_workbook(self.path)
+        try:
+            columns = awx.excel.read_columns(book.active)
+            self.assertEqual(book.active.cell(2, columns['exceiute_job_link']).value, completed_link)
+            self.assertIsNone(book.active.cell(2, columns['exceiute_job_link']).comment)
+            self.assertIn('/100/output', book.active.cell(3, columns['exceiute_job_link']).value)
+            self.assertIn(failed_link, book.active.cell(3, columns['exceiute_job_link']).comment.text)
+            self.assertEqual([book.active.cell(row, columns['artifact status']).value for row in (2, 3)],
+                             ['completed', 'completed'])
+        finally:
+            book.close()
+
+    def test_error_scope_filters_rows_before_deduplication_and_validation(self):
+        completed_link = 'https://awx.example.test/#/jobs/playbook/90/output'
+        self.prepare_launch([
+            {'hostname': 'Linux1', 'artifact filter': 'completed', 'exceiute_job_link': completed_link},
+            {'hostname': 'Linux1', 'artifact filter': 'failed',
+             'exceiute_job_link': 'https://awx.example.test/#/jobs/playbook/91/output'},
+            {'hostname': 'Linux2', 'artifact filter': 'completed', 'Job_Variables': 'invalid JSON'},
+        ])
+        self.client.post.side_effect = [{'job': 100, 'artifacts': {}}]
+        with patch.object(sys.stdin, 'isatty', return_value=True), patch('builtins.input', return_value='tak'):
+            code, output = self.execute(['--execution-scope', 'errors'])
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.client.post.call_args.args[1]['limit'], 'localhost,Linux1')
+        book = load_workbook(self.path)
+        try:
+            columns = awx.excel.read_columns(book.active)
+            self.assertEqual(book.active.cell(2, columns['exceiute_job_link']).value, completed_link)
+            self.assertIsNone(book.active.cell(2, columns['exceiute_job_link']).comment)
+            self.assertIn('/100/output', book.active.cell(3, columns['exceiute_job_link']).value)
+            self.assertEqual(book.active.cell(4, columns['job_variables']).value, 'invalid JSON')
+            self.assertFalse(book.active.cell(4, columns['exceiute_job_link']).value)
+        finally:
+            book.close()
+
+    def test_configured_error_scope_respects_hosts_and_includes_empty_messages(self):
+        self.prepare_launch([
+            {'hostname': 'Linux1', 'artifact filter': 'failed',
+             'exceiute_job_link': 'https://awx.example.test/#/jobs/playbook/90/output'},
+            {'hostname': 'Linux2', 'artifact filter': ''},
+        ])
+        self.write_config(INVENTORY=10, EXECUTION_SCOPE='errors')
+        self.client.post.side_effect = [{'job': 100, 'artifacts': {}}]
+        with patch.object(sys.stdin, 'isatty', return_value=True), patch('builtins.input', return_value='tak') as confirmation:
+            code, output = self.execute(['--hosts', 'Linux2'])
+        self.assertEqual(code, 0, output)
+        confirmation.assert_called_once()
+        self.assertEqual(self.client.post.call_args.args[1]['limit'], 'localhost,Linux2')
+
+    def test_error_scope_dry_run_and_declined_plan_do_not_launch_or_save(self):
+        self.prepare_launch([
+            {'hostname': 'Linux1', 'artifact filter': 'completed'},
+            {'hostname': 'Linux2', 'artifact filter': 'failed',
+             'exceiute_job_link': 'https://awx.example.test/#/jobs/playbook/91/output'},
+        ])
+        original = self.path.read_bytes()
+        for dry_run in (True, False):
+            args = ['--execution-scope', 'errors', *(['--dry-run'] if dry_run else [])]
+            with self.subTest(dry_run=dry_run), patch.object(awx.excel, 'save_workbook') as save:
+                with patch.object(sys.stdin, 'isatty', return_value=True), patch('builtins.input', return_value='n') as confirmation:
+                    code, output = self.execute(args)
+                self.assertEqual(code, 0, output)
+                plan = output.split('PODGLĄD PLANU' if dry_run else 'PLAN DO POTWIERDZENIA', 1)[1]
+                self.assertIn('- Linux2', plan)
+                self.assertNotIn('- Linux1', plan)
+                if dry_run:
+                    confirmation.assert_not_called()
+                else:
+                    confirmation.assert_called_once()
+                self.client.post.assert_not_called()
+                save.assert_not_called()
+                self.assertEqual(self.path.read_bytes(), original)
+
+    def test_error_scope_with_no_errors_does_not_query_templates_or_launch(self):
+        self.prepare_launch([{'hostname': 'Linux1', 'artifact filter': 'completed'}])
+        self.client.get = Mock(side_effect=AssertionError('Unexpected detail request'))
+        self.client.items = Mock(side_effect=AssertionError('Unexpected list request'))
+        with patch('builtins.input') as confirmation:
+            code, output = self.execute(['--execution-scope', 'errors'])
+        self.assertEqual(code, 0, output)
+        self.assertIn('Brak wierszy z artifact status=error', output)
+        confirmation.assert_not_called()
+        self.client.get.assert_not_called()
+        self.client.items.assert_not_called()
+        self.client.post.assert_not_called()
+
+    def test_error_retry_waits_for_the_previous_singular_job_link_and_allows_its_failure(self):
+        self.prepare_launch([
+            {'hostname': 'Linux1', 'artifact filter': 'completed',
+             'exceiute_job_link': 'https://awx.example.test/#/jobs/playbook/90/output'},
+            {'hostname': 'Linux2', 'artifact filter': 'failed',
+             'exceiute_job_link': 'https://awx.example.test/#/job/playbook/91/output'},
+        ])
+        self.write_config(INVENTORY=10, WAIT_FOR_COMPLETION=True)
+
+        def launch(*args):
+            wait.assert_called_once()
+            self.assertEqual(wait.call_args.args[1], 91)
+            self.assertFalse(wait.call_args.kwargs['require_success'])
+            return {'job': 100}
+
+        self.client.post.side_effect = launch
+        with patch.object(awx, 'wait_for_job', side_effect=[
+            {'id': 91, 'status': 'failed'},
+            {'id': 100, 'status': 'successful', 'artifacts': {'Linux2': {'message': 'completed'}}},
+        ]) as wait:
+            with patch.object(sys.stdin, 'isatty', return_value=True), patch('builtins.input', return_value='tak'):
+                code, output = self.execute(['--execution-scope', 'errors'])
+        self.assertEqual(code, 0, output)
+        self.assertEqual([call.args[1] for call in wait.call_args_list], [91, 100])
+        self.client.post.assert_called_once()
+
     def test_scope_cancellation_or_eof_leaves_the_file_unchanged(self):
         self.prepare_launch([{'hostname': 'Linux1'}])
         original = self.path.read_bytes()
@@ -464,7 +591,7 @@ class RefreshTests(unittest.TestCase):
         self.prepare_launch([{'hostname': 'Linux1', 'exceiute_job_link': 'LAUNCH_PENDING template=7'},
                              {'hostname': 'Linux2'}])
         original = self.path.read_bytes()
-        for scope in ('all', 'missing'):
+        for scope in ('all', 'missing', 'errors'):
             with self.subTest(scope=scope), patch.object(awx.excel, 'save_workbook') as save, patch('builtins.input') as confirmation:
                 code, output = self.execute(['--execution-scope', scope])
                 self.assertEqual(code, 1, output)
@@ -546,7 +673,8 @@ class RefreshTests(unittest.TestCase):
         self.client.get = Mock(return_value={
             'id': 99, 'status': 'successful',
             'summary_fields': {'inventory': {'name': 'test_inventory'}},
-            'artifacts': {'good1': {'message': 'done'}, 'good2': {'message': 'done'}},
+            'artifacts': {'good1': {'message': 'Installation COMPLETED successfully'},
+                          'good2': {'message': 'installation failed'}},
         })
         self.client.stdout = Mock(return_value='complete job log\n')
         captured = io.StringIO()
@@ -567,9 +695,13 @@ class RefreshTests(unittest.TestCase):
             self.assertEqual(book.active.cell(2, columns['output']).value, 'keep old log')
             self.assertEqual(book.active.cell(2, columns['artifacts']).value, '{"old":true}')
             self.assertEqual(book.active.cell(2, columns['artifact filter']).value, 'keep old message')
-            for row in (3, 4):
+            for row, message, status in (
+                (3, 'Installation COMPLETED successfully', 'completed'),
+                (4, 'installation failed', 'error'),
+            ):
                 self.assertEqual(book.active.cell(row, columns['output']).value, 'complete job log\n')
-                self.assertEqual(book.active.cell(row, columns['artifact filter']).value, 'done')
+                self.assertEqual(book.active.cell(row, columns['artifact filter']).value, message)
+                self.assertEqual(book.active.cell(row, columns['artifact status']).value, status)
             cell = book.active.cell(4, columns['exceiute_job_link'])
             self.assertEqual(cell.value, 'https://awx.example.test/#/job/playbook/99/output')
             self.assertEqual(cell.hyperlink.target, cell.value)

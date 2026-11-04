@@ -8,6 +8,7 @@ Przykłady:
     python .\awx_execute_jobs.py --survey --dry-run
     python .\awx_execute_jobs.py --execution-scope missing
     python .\awx_execute_jobs.py --execution-scope all --dry-run
+    python .\awx_execute_jobs.py --execution-scope errors --dry-run
     python .\awx_execute_jobs.py -file .\hosty.xlsx --batch-size 10 --job-type install
     python .\awx_execute_jobs.py --hosts host1 host2 --job-url "https://awx.example.com/#/templates/job_template/7/details" --dry-run
     python .\awx_execute_jobs.py --help
@@ -82,8 +83,9 @@ linków z arkusza. Jawne --job-url nadpisuje Job_Link i aktualizuje template_job
 Akceptowany jest URL szablonu UI/API na serwerze z AWX_URL.
 
 Przed planem skrypt pyta o zakres: 1 / Enter — tylko wpisy bez linku do joba,
-2 — wszystkie wybrane wpisy (także z historią), 0 — anuluj. Zakres nadal
-uwzględnia HOSTS / --hosts. --execution-scope missing lub all zastępuje to pytanie;
+2 — wszystkie wybrane wpisy (także z historią), 3 — tylko artifact status=error,
+0 — anuluj. Zakres nadal uwzględnia HOSTS / --hosts.
+--execution-scope missing, all lub errors zastępuje to pytanie;
 EXECUTION_SCOPE='ask' przywraca pytanie. Pełny plan zawsze wymaga potwierdzenia.
 --dry-run domyślnie pokazuje wpisy bez linku; --execution-scope all pokazuje też
 wpisy z historią, bez pytań o zakres i start.
@@ -93,7 +95,13 @@ np. https://awx.example.com/#/jobs/playbook/123/output. Link wskazuje job w
 przeglądarce, także gdy Job_Link szablonu jest adresem API. Stara kolumna
 exceiute_job jest przenoszona do exceiute_job_link z zachowaniem historii.
 Po zakończeniu joba zapisuje również Artifacts (JSON) i artifact filter
-(message znalezione dla hosta). Przy WAIT_FOR_COMPLETION=False końcowe wyniki
+(message znalezione dla hosta). Kolumna artifact status bezpośrednio obok
+artifact filter ma completed, jeśli wiadomość zawiera słowo completed
+(bez rozróżniania wielkości liter); w przeciwnym razie, także dla pustego pola,
+ma error. Status jest uzupełniany również dla istniejących danych.
+--execution-scope errors ponawia wyłącznie takie wiersze, również z historią;
+wiersze completed pozostają poza planem. Puste wiadomości nowych hostów także
+oznaczają error. Przy WAIT_FOR_COMPLETION=False końcowe wyniki
 uzupełnia awx_job_output.py.
 W trybie missing wiersze z istniejącym wpisem są pomijane. Tryb all ponawia
 również te wpisy; poprzedni link zostaje w komentarzu komórki z nowym adresem.
@@ -135,7 +143,7 @@ VARIABLES = {
     # "INPUT_FILE": 'hosts.xlsx',
     # "SHEET_NAME": 'Results',
     # Widoczne kolumny; [] pokazuje wszystkie. Ukryte dane nadal służą do wykonania zadań.
-    # "EXCEL_COLUMNS": ['hostname', 'exceiute_job_link', 'Artifacts', 'artifact filter', 'Uwagi'],
+    # "EXCEL_COLUMNS": ['hostname', 'exceiute_job_link', 'Artifacts', 'artifact filter', 'artifact status', 'Uwagi'],
 
     # Wybrane hosty: jeden host ['host1'] albo lista ['host1', 'host2'].
     # Można też podać tekst 'host1,host2'. [] oznacza wszystkie wiersze z Excela.
@@ -179,7 +187,7 @@ VARIABLES = {
 
     # Linki WebUI do uruchomień. Tryb missing pomija wpisy z historią.
     # "EXECUTION_COLUMN": 'exceiute_job_link',
-    # ask: pytanie o zakres; missing: tylko bez linku; all: także wpisy z historią.
+    # ask: pytanie; missing: bez linku; all: wszystkie; errors: artifact status=error.
     # Zakres jest ograniczany przez HOSTS / --hosts. Plan nadal wymaga potwierdzenia.
     # "EXECUTION_SCOPE": 'ask',
     # Full_Credential: nazwy/ID zapisanych credentiali joba, oddzielone separatorem.

@@ -46,6 +46,60 @@ class WorkbookAccessTests(unittest.TestCase):
         self.assertFalse(missing.exists())
 
 
+class ArtifactStatusTests(unittest.TestCase):
+    def test_status_is_derived_from_completed_word_and_placed_next_to_the_filter(self):
+        messages = [
+            ('Installation completed successfully.', 'completed'),
+            ('COMPLETED', 'completed'),
+            ('First step\nCompleted!', 'completed'),
+            ('uncompleted', 'error'),
+            ('completedness', 'error'),
+            ('installation failed', 'error'),
+            ('', 'error'),
+            (None, 'error'),
+        ]
+        book = awx.excel.create_workbook(
+            ['hostname', 'artifact filter'],
+            [[f'host{index}', message] for index, (message, _) in enumerate(messages, 1)],
+        )
+        self.addCleanup(book.close)
+        columns = awx.excel.read_columns(book.active)
+        self.assertEqual(columns['artifact status'], columns['artifact filter'] + 1)
+        self.assertEqual([book.active.cell(row, columns['artifact status']).value
+                          for row in range(2, len(messages) + 2)], [status for _, status in messages])
+
+    def test_saved_status_tracks_changed_messages_and_is_visible_with_artifact_filter(self):
+        book = awx.excel.create_workbook(['hostname', 'artifact filter'], [['host1', 'completed']])
+        self.addCleanup(book.close)
+        columns = awx.excel.read_columns(book.active)
+        book.active.cell(2, columns['artifact filter']).value = 'failed on retry'
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'hosts.xlsx'
+            awx.excel.save_workbook(book, path, excel_columns=['hostname', 'artifact filter'])
+            saved = awx.excel.load_workbook(path)
+            try:
+                columns = awx.excel.read_columns(saved.active)
+                cell = saved.active.cell(2, columns['artifact status'])
+                self.assertEqual(cell.value, 'error')
+                self.assertFalse(saved.active.column_dimensions[cell.column_letter].hidden)
+                self.assertEqual(columns['artifact status'], columns['artifact filter'] + 1)
+            finally:
+                saved.close()
+
+    def test_shared_artifact_writer_classifies_each_host_independently(self):
+        book = awx.excel.create_workbook(['hostname'], [['host1'], ['host2'], ['host3']])
+        self.addCleanup(book.close)
+        awx.write_job_artifacts(book.active, {
+            'status': 'failed', 'artifacts': {
+                'host1': {'message': 'Installation COMPLETED successfully'},
+                'host2': {'message': 'installation failed'},
+            },
+        }, [{'row': row} for row in (2, 3, 4)], 'https://awx.example.test/api/v2/jobs/99/')
+        columns = awx.excel.read_columns(book.active)
+        self.assertEqual([book.active.cell(row, columns['artifact status']).value for row in (2, 3, 4)],
+                         ['completed', 'error', 'error'])
+
+
 class OutputPlanTests(unittest.TestCase):
     def setUp(self):
         self.client = awx.AWXClient('https://awx.example.test', 'offline-token')
