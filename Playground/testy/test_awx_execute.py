@@ -18,7 +18,7 @@ TEMPLATE_URL = 'https://awx.example.test/api/v2/job_templates/7/'
 class ExecutionBatchTests(unittest.TestCase):
     def setUp(self):
         self.settings = {
-            'EXECUTION_COLUMN': 'exceiute_job', 'OUTPUT_COLUMN': 'output',
+            'EXECUTION_COLUMN': 'exceiute_job_link', 'OUTPUT_COLUMN': 'output',
             'BATCH_SIZE': 2, 'JOB_URL': '', 'JOB_TYPE': '', 'JOB_TYPE_VARIABLE': 'action',
             'SURVEY_ANSWERS': {}, 'WAIT_FOR_COMPLETION': False, 'EXCEL_COLUMNS': [],
         }
@@ -67,6 +67,18 @@ class ExecutionBatchTests(unittest.TestCase):
         self.assertEqual(book.active.max_row, 4)
         self.assertEqual(existing, [])
         self.assertEqual(skipped, 0)
+
+    def test_plan_recognizes_history_under_the_legacy_column_name(self):
+        book = self.workbook(['host1'])
+        column = awx.excel.read_columns(book.active)['exceiute_job_link']
+        book.active.cell(1, column).value = 'exceiute_job'
+        previous = 'https://awx.example.test/api/v2/jobs/90/'
+        book.active.cell(2, column).value = previous
+        batches, existing, _, _ = self.plan(book)
+        self.assertEqual(batches, [])
+        self.assertEqual(existing[0]['execution'], previous)
+        self.assertNotIn('exceiute_job', awx.excel.read_columns(book.active))
+        self.client.post.assert_not_called()
 
     def test_existing_localhost_is_moved_first_and_not_duplicated(self):
         self.settings['BATCH_SIZE'] = 10
@@ -263,7 +275,25 @@ class ExecutionBatchTests(unittest.TestCase):
             'limit': 'localhost,host1', 'extra_vars': {'action': 'install'},
         })
         self.assertEqual(book.active.max_row, 2)
-        self.assertIn('/99/', book.active.cell(2, column).value)
+        self.assertEqual(book.active.cell(2, column).value, 'https://awx.example.test/#/jobs/playbook/99/output')
+        self.assertEqual(book.active.cell(2, column).hyperlink.target, book.active.cell(2, column).value)
+
+    def test_job_links_open_web_ui_for_api_hash_and_path_template_urls(self):
+        for source, expected in (
+            (TEMPLATE_URL, 'https://awx.example.test/#/jobs/playbook/99/output'),
+            ('https://awx.example.test/#/templates/job_template/7/details',
+             'https://awx.example.test/#/jobs/playbook/99/output'),
+            ('https://awx.example.test/templates/job_template/7/details',
+             'https://awx.example.test/jobs/playbook/99/output'),
+            ('https://awx.example.test/awx/api/v2/job_templates/7/',
+             'https://awx.example.test/awx/#/jobs/playbook/99/output'),
+            ('https://awx.example.test/awx/#/templates/job_template/7/details',
+             'https://awx.example.test/awx/#/jobs/playbook/99/output'),
+        ):
+            with self.subTest(source=source):
+                link = awx.job_url(source, self.client, 99)
+                self.assertEqual(link, expected)
+                self.assertEqual(awx.job_id_from_link(link, self.client), 99)
 
     def test_same_template_and_variables_are_split_by_os(self):
         self.settings['BATCH_SIZE'] = 10

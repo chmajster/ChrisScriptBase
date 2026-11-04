@@ -3,6 +3,7 @@
 import io
 import json
 import re
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -10,6 +11,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.comments import Comment
 
 with patch.object(Path, 'read_text', side_effect=FileNotFoundError):
     from lib import awx
@@ -31,7 +33,7 @@ class RefreshTests(unittest.TestCase):
                             'variables': {'action': 'install'}}
                         for os, number in [('linux', 7), ('windows', 8)]},
             'INPUT_FILE': None, 'SHEET_NAME': 'Results', 'BATCH_SIZE': 10,
-            'EXECUTION_COLUMN': 'exceiute_job', 'JOB_TYPE': '', 'JOB_TYPE_VARIABLE': 'action',
+            'EXECUTION_COLUMN': 'exceiute_job_link', 'JOB_TYPE': '', 'JOB_TYPE_VARIABLE': 'action',
             'WAIT_FOR_COMPLETION': False, 'POLL_INTERVAL': 1, 'JOB_WAIT_TIMEOUT': 30,
             'HOSTS': [], 'JOB_URL': '', 'SURVEY_ANSWERS': {}, 'SURVEY_INTERACTIVE': False,
             'SURVEY_EXCEL_DEFAULTS': {}, 'EXCEL_COLUMNS': [],
@@ -137,7 +139,7 @@ class RefreshTests(unittest.TestCase):
         book = Workbook()
         sheet = book.active
         sheet.title = 'Results'
-        sheet.append(['hostname', 'INVENTORY', 'ApplicationID', 'exceiute_job', 'output',
+        sheet.append(['hostname', 'INVENTORY', 'ApplicationID', 'exceiute_job_link', 'output',
                       'Artifacts', 'artifact filter', 'Uwagi'])
         for name in names:
             sheet.append([name, 'stale_inventory', 'stale-app',
@@ -183,8 +185,75 @@ class RefreshTests(unittest.TestCase):
     def execute(self, argv=None):
         captured = io.StringIO()
         with patch.object(awx, 'AWXClient', return_value=self.client), redirect_stdout(captured), redirect_stderr(captured):
-            code = awx.run('execute', argv or [], variables_file=self.config_path)
+            code = awx.run('execute', argv if argv is not None else ['--execution-scope', 'missing'],
+                           variables_file=self.config_path)
         return code, captured.getvalue()
+
+    def test_failed_debug_connection_stops_every_operation_before_excel_or_resource_queries(self):
+        self.addCleanup(awx.configure_debug, False)
+        self.write_config(INVENTORY=10, DEBUG=True, JOB_TEMPLATE_ORGANIZATION='Operations',
+                          OUTPUT_FILE=str(Path(self.directory.name) / 'hosts.json'))
+        self.client.get.side_effect = awx.AWXError('HTTP 401: rejected ' + self.settings['AWX_TOKEN'])
+        for operation in ('execute', 'refresh', 'output', 'inventory', 'templates'):
+            self.client.get.reset_mock()
+            captured = io.StringIO()
+            args = ['--file', str(self.path)] if operation == 'inventory' else []
+            with self.subTest(operation=operation), patch.object(awx, 'AWXClient', return_value=self.client):
+                with patch.object(awx, 'open_workbook_sheet') as read, patch.object(awx, 'read_host_limits') as limits:
+                    with patch.object(awx.excel, 'save_workbook') as save, patch('builtins.input') as prompt:
+                        with redirect_stdout(captured), redirect_stderr(captured):
+                            code = awx.run(operation, args, variables_file=self.config_path)
+                        self.assertEqual(code, 1, captured.getvalue())
+                        self.assertIn('Test połączenia z AWX nie powiódł się', captured.getvalue())
+                        self.assertNotIn(self.settings['AWX_TOKEN'], captured.getvalue())
+                        self.client.get.assert_called_once()
+                        self.assertEqual(self.client.get.call_args.args[0], 'me/')
+                        self.client.items.assert_not_called()
+                        self.client.post.assert_not_called()
+                        read.assert_not_called()
+                        limits.assert_not_called()
+                        save.assert_not_called()
+                        prompt.assert_not_called()
+                        self.assertFalse(self.path.exists())
+
+    def test_debug_execute_checks_authentication_before_opening_excel_even_in_dry_run(self):
+        self.addCleanup(awx.configure_debug, False)
+        self.prepare_launch([{'hostname': 'Linux1'}])
+        original = self.path.read_bytes()
+        get = self.client.get.side_effect
+        self.client.get.side_effect = lambda path, **options: (
+            {'results': [{'id': 7, 'username': 'operator'}]} if path == 'me/' else get(path, **options))
+        open_workbook = awx.open_workbook_sheet
+
+        def open_after_authentication(*args, **kwargs):
+            self.client.get.assert_called_once()
+            self.assertEqual(self.client.get.call_args.args[0], 'me/')
+            return open_workbook(*args, **kwargs)
+
+        with patch.object(awx, 'open_workbook_sheet', side_effect=open_after_authentication):
+            with patch.object(awx.excel, 'save_workbook') as save, patch('builtins.input') as prompt:
+                code, output = self.execute(['--debug', '--dry-run'])
+        self.assertEqual(code, 0, output)
+        self.assertIn('Połączenie z AWX i uwierzytelnienie: OK', output)
+        self.assertNotIn(self.settings['AWX_TOKEN'], output)
+        self.assertEqual(sum(call.args[0] == 'me/' for call in self.client.get.call_args_list), 1)
+        self.client.post.assert_not_called()
+        save.assert_not_called()
+        prompt.assert_not_called()
+        self.assertEqual(self.path.read_bytes(), original)
+
+    def test_configured_debug_probes_once_even_when_refresh_has_no_hosts(self):
+        self.addCleanup(awx.configure_debug, False)
+        self.write_config(DEBUG=True)
+        self.write_workbook([])
+        self.client.get = Mock(return_value={'results': [{'id': 7, 'username': 'operator'}]})
+        code, output, factory = self.refresh()
+        self.assertEqual(code, 0, output)
+        factory.assert_called_once()
+        self.client.get.assert_called_once()
+        self.assertEqual(self.client.get.call_args.args[0], 'me/')
+        self.client.items.assert_not_called()
+        self.client.post.assert_not_called()
 
     def test_execute_launches_one_job_per_distinct_excel_configuration(self):
         self.prepare_launch([
@@ -193,8 +262,28 @@ class RefreshTests(unittest.TestCase):
              'Full_Credential': 'B42-os, shared-vault'},
         ])
         self.client.post.side_effect = [{'job': 99, 'artifacts': {}}, {'job': 100, 'artifacts': {}}]
-        code, output = self.execute()
+        original = self.path.read_bytes()
+
+        def confirm(prompt):
+            self.assertIn('[tak/N]', prompt)
+            plan = sys.stdout.getvalue().split('PLAN DO POTWIERDZENIA', 1)[1]
+            first, second = plan.split('Paczka 2/2 — jeden job', 1)
+            self.assertIn('Paczka 1/2 — jeden job', first)
+            self.assertIn('Zabbix IT2 Unix install', first)
+            self.assertIn('- Linux1', first)
+            self.assertIn('- Linux2', first)
+            self.assertIn('Zabbix IT2 Unix install', second)
+            self.assertIn('- prefixLinux1', second)
+            self.assertEqual(self.path.read_bytes(), original)
+            self.client.post.assert_not_called()
+            save.assert_not_called()
+            return ' TaK '
+
+        with patch.object(awx.excel, 'save_workbook', wraps=awx.excel.save_workbook) as save:
+            with patch.object(sys.stdin, 'isatty', return_value=True), patch('builtins.input', side_effect=confirm) as confirmation:
+                code, output = self.execute()
         self.assertEqual(code, 0, output)
+        confirmation.assert_called_once()
         calls = self.client.post.call_args_list
         self.assertEqual([call.args[0] for call in calls], ['job_templates/7/launch/'] * 2)
         payloads = [call.args[1] for call in calls]
@@ -208,9 +297,209 @@ class RefreshTests(unittest.TestCase):
         book = load_workbook(self.path)
         try:
             columns = awx.excel.read_columns(book.active)
-            links = [book.active.cell(row, columns['exceiute_job']).value for row in (2, 3, 4)]
+            links = [book.active.cell(row, columns['exceiute_job_link']).value for row in (2, 3, 4)]
             self.assertEqual(links[0], links[1])
             self.assertNotEqual(links[1], links[2])
+        finally:
+            book.close()
+
+    def test_execute_declined_or_unavailable_confirmation_does_not_launch_or_save(self):
+        self.prepare_launch([{'hostname': 'Linux1'}, {'hostname': 'Linux2'}])
+        original = self.path.read_bytes()
+        for answer in ('', 'nie', 'maybe', EOFError()):
+            with self.subTest(answer=answer):
+                with patch.object(awx.excel, 'save_workbook') as save:
+                    with patch.object(sys.stdin, 'isatty', return_value=True), patch('builtins.input', side_effect=[answer]) as confirmation:
+                        code, output = self.execute()
+                self.assertEqual(code, 0, output)
+                self.assertIn('Uruchomienie anulowane.', output)
+                confirmation.assert_called_once()
+                self.client.post.assert_not_called()
+                save.assert_not_called()
+                self.assertEqual(self.path.read_bytes(), original)
+
+    def test_execute_without_interactive_terminal_does_not_launch_or_save(self):
+        self.prepare_launch([{'hostname': 'Linux1'}])
+        original = self.path.read_bytes()
+        with patch.object(awx.excel, 'save_workbook') as save:
+            with patch.object(sys.stdin, 'isatty', return_value=False), patch('builtins.input') as confirmation:
+                code, output = self.execute()
+        self.assertEqual(code, 0, output)
+        self.assertIn('- Linux1', output)
+        self.assertIn('- localhost (dodany automatycznie)', output)
+        self.assertIn('Brak interaktywnego terminala', output)
+        confirmation.assert_not_called()
+        self.client.post.assert_not_called()
+        save.assert_not_called()
+        self.assertEqual(self.path.read_bytes(), original)
+
+    def test_execute_plan_matches_each_template_to_its_resolved_hosts(self):
+        self.prepare_launch([
+            {'hostname': 'linux1'},
+            {'hostname': 'Linux2', 'template_job_name': 'Other Linux job',
+             'Job_Link': 'https://awx.example.test/api/v2/job_templates/8/'},
+        ])
+        self.job_templates[1]['name'] = 'Other Linux job'
+        with patch.object(sys.stdin, 'isatty', return_value=True), patch('builtins.input', return_value='n'):
+            code, output = self.execute()
+        self.assertEqual(code, 0, output)
+        plan = output.split('PLAN DO POTWIERDZENIA', 1)[1]
+        first, second = plan.split('Paczka 2/2 — jeden job', 1)
+        for block, name, template_id, hostname in (
+            (first, 'Zabbix IT2 Unix install', 7, 'Linux1'),
+            (second, 'Other Linux job', 8, 'Linux2'),
+        ):
+            self.assertRegex(block, rf'Nazwa joba\s+: {name}')
+            self.assertRegex(block, rf'ID szablonu AWX\s+: {template_id}')
+            self.assertRegex(block, r'System\s+: Linux')
+            self.assertRegex(block, r'Akcja playbooka\s+: install')
+            self.assertIn(f'- {hostname}', block)
+            self.assertIn(f'https://awx.example.test/api/v2/job_templates/{template_id}/', block)
+        self.client.post.assert_not_called()
+
+    def test_rerun_still_requires_final_plan_confirmation_before_waiting_or_saving(self):
+        self.prepare_launch([{'hostname': 'Linux1',
+                              'exceiute_job_link': 'https://awx.example.test/#/jobs/playbook/99/output'}])
+        self.write_config(INVENTORY=10, WAIT_FOR_COMPLETION=True)
+        original = self.path.read_bytes()
+        with patch.object(awx.excel, 'save_workbook') as save, patch.object(awx, 'wait_for_job') as wait:
+            with patch.object(sys.stdin, 'isatty', return_value=True), patch('builtins.input', side_effect=['2', 'n']) as confirmation:
+                code, output = self.execute(['--execution-scope', 'ask'])
+        self.assertEqual(code, 0, output)
+        self.assertEqual(confirmation.call_count, 2)
+        self.assertIn('Paczka 1/1 — jeden job', output)
+        self.assertRegex(output, r'Nazwa joba\s+: Zabbix IT2 Unix install')
+        self.assertIn('Uruchomienie anulowane.', output)
+        self.client.post.assert_not_called()
+        wait.assert_not_called()
+        save.assert_not_called()
+        self.assertEqual(self.path.read_bytes(), original)
+
+    def test_scope_question_defaults_to_only_entries_without_a_job_link(self):
+        previous = 'https://awx.example.test/#/jobs/playbook/90/output'
+        self.prepare_launch([{'hostname': 'Linux1', 'exceiute_job_link': previous},
+                             {'hostname': 'Linux2', 'exceiute_job_link': 'none'}])
+        self.client.post.side_effect = [{'job': 100, 'artifacts': {}}]
+        with patch.object(sys.stdin, 'isatty', return_value=True), patch('builtins.input', side_effect=['', 'tak']) as confirmation:
+            code, output = self.execute([])
+        self.assertEqual(code, 0, output)
+        self.assertIn('WYBÓR ZAKRESU URUCHOMIENIA', output)
+        self.assertEqual(confirmation.call_count, 2)
+        self.client.post.assert_called_once()
+        self.assertEqual(self.client.post.call_args.args[1]['limit'], 'localhost,Linux2')
+        book = load_workbook(self.path)
+        try:
+            column = awx.excel.read_columns(book.active)['exceiute_job_link']
+            self.assertEqual(book.active.cell(2, column).value, previous)
+            self.assertEqual(book.active.cell(3, column).value,
+                             'https://awx.example.test/#/jobs/playbook/100/output')
+        finally:
+            book.close()
+
+    def test_scope_all_launches_new_and_recorded_entries_and_keeps_previous_link(self):
+        previous = 'https://awx.example.test/#/jobs/playbook/90/output'
+        self.prepare_launch([{'hostname': 'Linux1', 'exceiute_job_link': previous}, {'hostname': 'Linux2'}])
+        self.client.post.side_effect = [{'job': 100, 'artifacts': {}}]
+        with patch.object(sys.stdin, 'isatty', return_value=True), patch('builtins.input', side_effect=['2', 'tak']) as confirmation:
+            code, output = self.execute([])
+        self.assertEqual(code, 0, output)
+        self.assertEqual(confirmation.call_count, 2)
+        self.client.post.assert_called_once()
+        self.assertEqual(self.client.post.call_args.args[1]['limit'], 'localhost,Linux1,Linux2')
+        book = load_workbook(self.path)
+        try:
+            column = awx.excel.read_columns(book.active)['exceiute_job_link']
+            first, second = (book.active.cell(row, column) for row in (2, 3))
+            self.assertEqual(first.value, second.value)
+            self.assertEqual(first.value, 'https://awx.example.test/#/jobs/playbook/100/output')
+            self.assertEqual(first.hyperlink.target, first.value)
+            self.assertIn(previous, first.comment.text)
+            self.assertIsNone(second.comment)
+        finally:
+            book.close()
+
+    def test_scope_can_be_set_in_configuration_and_all_still_respects_hosts(self):
+        self.prepare_launch([{'hostname': 'Linux1', 'exceiute_job_link': 'https://awx.example.test/api/v2/jobs/90/'},
+                             {'hostname': 'Linux2', 'exceiute_job_link': 'https://awx.example.test/api/v2/jobs/91/'}])
+        self.write_config(INVENTORY=10, EXECUTION_SCOPE='all')
+        self.client.post.side_effect = [{'job': 100, 'artifacts': {}}]
+        with patch.object(sys.stdin, 'isatty', return_value=True), patch('builtins.input', return_value='tak') as confirmation:
+            code, output = self.execute(['--hosts', 'Linux2'])
+        self.assertEqual(code, 0, output)
+        confirmation.assert_called_once()
+        self.assertNotIn('WYBÓR ZAKRESU URUCHOMIENIA', output)
+        self.assertEqual(self.client.post.call_args.args[1]['limit'], 'localhost,Linux2')
+
+    def test_scope_cancellation_or_eof_leaves_the_file_unchanged(self):
+        self.prepare_launch([{'hostname': 'Linux1'}])
+        original = self.path.read_bytes()
+        for answers in (['0'], [EOFError()], ['invalid', '0']):
+            with self.subTest(answers=answers), patch.object(awx.excel, 'save_workbook') as save:
+                with patch.object(sys.stdin, 'isatty', return_value=True), patch('builtins.input', side_effect=answers):
+                    code, output = self.execute([])
+                self.assertEqual(code, 0, output)
+                self.assertIn('Uruchomienie anulowane.', output)
+                self.client.post.assert_not_called()
+                save.assert_not_called()
+                self.assertEqual(self.path.read_bytes(), original)
+
+    def test_dry_run_all_previews_recorded_hosts_without_questions_or_writes(self):
+        self.prepare_launch([{'hostname': 'Linux1', 'exceiute_job_link': 'https://awx.example.test/api/v2/jobs/90/'},
+                             {'hostname': 'Linux2'}])
+        original = self.path.read_bytes()
+        with patch.object(awx.excel, 'save_workbook') as save, patch('builtins.input') as confirmation:
+            code, output = self.execute(['--execution-scope', 'all', '--dry-run'])
+        self.assertEqual(code, 0, output)
+        self.assertIn('- Linux1', output)
+        self.assertIn('- Linux2', output)
+        confirmation.assert_not_called()
+        self.client.post.assert_not_called()
+        save.assert_not_called()
+        self.assertEqual(self.path.read_bytes(), original)
+
+    def test_pending_launch_prevents_both_scopes_before_questions_or_writes(self):
+        self.prepare_launch([{'hostname': 'Linux1', 'exceiute_job_link': 'LAUNCH_PENDING template=7'},
+                             {'hostname': 'Linux2'}])
+        original = self.path.read_bytes()
+        for scope in ('all', 'missing'):
+            with self.subTest(scope=scope), patch.object(awx.excel, 'save_workbook') as save, patch('builtins.input') as confirmation:
+                code, output = self.execute(['--execution-scope', scope])
+                self.assertEqual(code, 1, output)
+                self.assertIn('LAUNCH_PENDING', output)
+                confirmation.assert_not_called()
+                self.client.post.assert_not_called()
+                save.assert_not_called()
+                self.assertEqual(self.path.read_bytes(), original)
+
+    def test_legacy_history_and_settings_migrate_without_rerunning_recorded_host(self):
+        previous = 'https://awx.example.test/api/v2/jobs/90/'
+        self.prepare_launch([{'hostname': 'Linux1', 'exceiute_job_link': previous}, {'hostname': 'Linux2'}])
+        book = load_workbook(self.path)
+        column = awx.excel.read_columns(book.active)['exceiute_job_link']
+        book.active.cell(1, column).value = 'exceiute_job'
+        book.active.cell(2, column).comment = Comment('keep history note', 'Operator')
+        book.save(self.path)
+        book.close()
+        self.write_config(INVENTORY=10, EXECUTION_COLUMN='exceiute_job',
+                          EXCEL_COLUMNS=['hostname', 'exceiute_job'])
+        self.client.post.side_effect = [{'job': 100, 'artifacts': {}}]
+        with patch.object(sys.stdin, 'isatty', return_value=True), patch('builtins.input', return_value='tak'):
+            code, output = self.execute()
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.client.post.call_args.args[1]['limit'], 'localhost,Linux2')
+        book = load_workbook(self.path)
+        try:
+            columns = awx.excel.read_columns(book.active)
+            self.assertNotIn('exceiute_job', columns)
+            cell = book.active.cell(2, columns['exceiute_job_link'])
+            self.assertEqual(cell.value, 'https://awx.example.test/#/jobs/playbook/90/output')
+            self.assertEqual(cell.hyperlink.target, cell.value)
+            self.assertEqual(cell.comment.text, 'keep history note')
+            self.assertFalse(book.active.column_dimensions[cell.column_letter].hidden)
+            jobs, _, _ = awx.build_output_plan(book.active, self.client, {
+                'EXECUTION_COLUMN': 'exceiute_job_link', 'OUTPUT_COLUMN': 'output',
+            })
+            self.assertEqual(set(jobs), {90, 100})
         finally:
             book.close()
 
@@ -240,11 +529,14 @@ class RefreshTests(unittest.TestCase):
     def test_dry_run_shows_separate_configurations_without_launches_or_excel_writes(self):
         self.prepare_launch([{'hostname': 'Linux1'}, {'hostname': 'Linux2', 'ApplicationID': 'other'}])
         original = self.path.read_bytes()
-        with patch.object(awx.excel, 'save_workbook') as save:
+        with patch.object(awx.excel, 'save_workbook') as save, patch('builtins.input') as confirmation:
             code, output = self.execute(['--dry-run'])
         self.assertEqual(code, 0, output)
-        self.assertIn('Batch 1: template=7', output)
-        self.assertIn('Batch 2: template=7', output)
+        self.assertIn('PODGLĄD PLANU (dry-run)', output)
+        self.assertIn('Paczka 1/2 — jeden job', output)
+        self.assertIn('Paczka 2/2 — jeden job', output)
+        self.assertIn('version: ***', output)
+        confirmation.assert_not_called()
         self.client.post.assert_not_called()
         save.assert_not_called()
         self.assertEqual(self.path.read_bytes(), original)
@@ -355,7 +647,7 @@ class RefreshTests(unittest.TestCase):
             self.assertEqual(row['artifacts'], '{"old": true}')
             self.assertEqual(row['artifact filter'], 'previous message')
             self.assertEqual(row['uwagi'], 'keep note')
-            self.assertTrue(row['exceiute_job'].endswith('/99/output'))
+            self.assertTrue(row['exceiute_job_link'].endswith('/99/output'))
             if row['hostname'] == 'missing':
                 self.assertEqual(row['awx_status'], 'not_found')
                 continue

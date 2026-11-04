@@ -169,7 +169,8 @@ Poniżej stan istotnych ustawień z lokalnego `awx_variable` w chwili przygotowa
 | `JOB_VARIABLE_OVERRIDES_BY_OS` | Puste słowniki dla Windows, Linux i AIX; bez zmian zmiennych z AWX. |
 | `HOST_COLUMN` / `HOSTS` | `None` / `[]`. |
 | `BATCH_SIZE` | `10` hostów na job, w ramach zgodnej grupy parametrów. |
-| `EXECUTION_COLUMN` | `'exceiute_job'`. |
+| `EXECUTION_COLUMN` | `'exceiute_job_link'`. |
+| `EXECUTION_SCOPE` | `'ask'`: pytanie o wpisy bez linku lub wszystkie wybrane wpisy. |
 | `JOB_TYPE` / `JOB_TYPE_VARIABLE` | `''` / `'action'`. |
 | `SURVEY_EXCEL_DEFAULTS` | `{'installtesttypename': 'testads'}`. |
 | `SURVEY_ANSWERS` | `{'installtesttypename': 'reinstall'}`. |
@@ -353,7 +354,7 @@ EXCEL_COLUMNS = [
     'hostname',
     'AWX_Status',
     'ostype',
-    'exceiute_job',
+    'exceiute_job_link',
     'output',
     'Survey_installtesttypename',
     'Uwagi',
@@ -825,26 +826,54 @@ Dodatkowe reguły:
 - Identyczne wpisy tego samego hosta są łączone; różne konfiguracje tego samego hosta mogą tworzyć osobne joby.
 - Każdy limit zaczyna się od `localhost`. Dodany automatycznie `localhost` nie zużywa miejsca w `BATCH_SIZE`.
 
+Po walidacji `awx_execute_jobs.py` pokazuje plan wszystkich jobów: nazwę i ID szablonu, URL, system, akcję playbooka, poświadczenia oraz hosty w osobnych wierszach. Automatycznie dodany `localhost` jest oznaczony. Następnie skrypt czeka na potwierdzenie `[tak/N]`. `tak` / `t` / `yes` / `y` zatwierdza cały plan. Numer paczki określa kolejność, a ID uruchomionego joba pojawia się po zatwierdzeniu planu i odpowiedzi AWX. Enter, inna odpowiedź lub brak interaktywnego terminala anuluje wykonanie bez startu jobów i zapisu Excela. `--dry-run` nie pyta o uruchomienie. Potwierdzenie planu obowiązuje także po zgodzie na ponowienie jobów z historią.
+
 ### EXECUTION_COLUMN
 
-**Typ:** nazwa osobnej kolumny. **Obecnie:** `'exceiute_job'`.
+**Typ:** nazwa osobnej kolumny. **Obecnie:** `'exceiute_job_link'`.
 
 ```python
-EXECUTION_COLUMN = 'exceiute_job'
+EXECUTION_COLUMN = 'exceiute_job_link'
 ```
 
-Pisownia `exceiute_job` jest faktycznie używana przez skrypty. Execute zapisuje tam linki, a output odczytuje je z tej samej kolumny. Zmiana nazwy wymaga spójnej konfiguracji obu operacji i uwzględnienia historii pod dotychczasową nazwą.
+Execute zapisuje tu linki bezpośrednio do jobów w WebUI, np. `https://awx.example.com/#/jobs/playbook/123/output`. Także szablon wskazany adresem API daje link WebUI. `awx_job_output.py` odczytuje ID joba z tej samej kolumny.
+
+Stara kolumna `exceiute_job` oraz jej nazwa w konfiguracji i `EXCEL_COLUMNS` są rozpoznawane jako `exceiute_job_link`. Nagłówek jest przenoszony z zachowaniem linków i komentarzy; zapis aktualizuje również stare adresy API jobów do WebUI. Jeżeli obie kolumny zawierają różne joby dla tego samego wiersza, skrypt zatrzyma się i poprosi o uzgodnienie historii.
 
 Nie używaj nazwy kolumny metadanych, `Artifacts` ani kolumny stdout.
 
 Historia:
 
-- Istniejące wpisy są pomijane podczas zwykłego uruchomienia.
-- Jeżeli nie ma nowych paczek, skrypt może poprosić o potwierdzenie ponowienia.
+- Tryb `missing` pomija wpisy z historią; puste komórki i `none` oznaczają brak linku.
+- Tryb `all` ponawia także wpisy z historią w wybranym zakresie hostów.
 - Potwierdzony rerun zachowuje poprzedni link w komentarzu.
 - Przed żądaniem startu zapisywany jest `LAUNCH_PENDING`.
 - `LAUNCH_PENDING` oznacza zamiar uruchomienia z niepotwierdzonym wynikiem; przed ponowieniem trzeba ustalić stan joba w AWX.
 - `--dry-run` nie dopisuje historii i nie potwierdza rerunu.
+
+### EXECUTION_SCOPE
+
+**Typ:** `ask`, `missing` albo `all`. **Domyślnie:** `'ask'`.
+
+```python
+EXECUTION_SCOPE = 'ask'
+```
+
+W terminalu skrypt pyta:
+
+- `1` — tylko wpisy bez linku w `exceiute_job_link`; wybór domyślny, również po Enter.
+- `2` — wszystkie wybrane wpisy, również z wcześniejszym jobem.
+- `0` — anuluj bez zapisu i startu.
+
+Zakres uwzględnia `HOSTS` / `--hosts`. Wybór `all` nie rozszerza wskazanej listy hostów. Po wyborze skrypt pokazuje pełny plan i wymaga potwierdzenia `[tak/N]`.
+
+```powershell
+python .\awx_execute_jobs.py --execution-scope missing
+python .\awx_execute_jobs.py --execution-scope all
+python .\awx_execute_jobs.py --execution-scope all --dry-run
+```
+
+Argument `--execution-scope` ma pierwszeństwo przed `EXECUTION_SCOPE`. `--dry-run` nie pyta o zakres ani start; przy `ask` pokazuje wpisy bez linku. Brak interaktywnego terminala uniemożliwia końcowe potwierdzenie startu. Anulowanie planu pozostawia plik bez zmian, także po wyborze `all` i przygotowaniu ponowienia w pamięci.
 
 ### JOB_TYPE
 
@@ -1124,6 +1153,10 @@ DEBUG = True
 
 Pokazuje cele i przebieg zapytań API, etapy przetwarzania, przyczyny pomijania wierszy, tworzenie paczek, walidację i zapis.
 
+Tylko w debug każda operacja (`inventory`, `refresh`, `execute`, `output`, `templates`) wykonuje przed rozpoczęciem pracy jeden uwierzytelniony odczyt [`GET /api/v2/me/`](https://docs.ansible.com/projects/awx/en/latest/rest_api/api_ref.html). Test sprawdza połączenie API i `AWX_TOKEN`, używa skonfigurowanego adresu API oraz `TIMEOUT` i pokazuje nazwę oraz ID uwierzytelnionego użytkownika. Wartość tokena pozostaje ukryta.
+
+Błąd połączenia, odrzucony token lub brak poprawnych danych aktywnego użytkownika zatrzymuje operację przed odczytem i zmianą Excela, pobieraniem danych hostów i uruchomieniem jobów. Test działa także w `--debug --dry-run` oraz przy pustym arkuszu refresh. Bez debug dodatkowe zapytanie nie jest wykonywane; `--no-debug` pomija test również wtedy, gdy plik zawiera `DEBUG=True`.
+
 Normalny eksport pokazuje skrócone linie:
 
 ```text
@@ -1254,7 +1287,7 @@ Standardowe kolumny są następujące. Nazwy konfigurowalnych kolumn wykonania i
 | `OS Credential` | Credentiale hosta z dopasowanych zmiennych grup. |
 | `Full_Credential` | Credentiale wybrane dla wykonania, z uwzględnieniem jumphostów. |
 | `Job_Type` | Wartość akcji określonej przez `JOB_TYPE_VARIABLE`. |
-| `exceiute_job` | Link do uruchomienia lub znacznik `LAUNCH_PENDING`. Nazwę określa `EXECUTION_COLUMN`. |
+| `exceiute_job_link` | Link do uruchomienia lub znacznik `LAUNCH_PENDING`. Nazwę określa `EXECUTION_COLUMN`. |
 | `output` | Stdout; nazwę określa `OUTPUT_COLUMN`. |
 | `Artifacts` | Artefakty joba w JSON. |
 | `artifact filter` | Komunikaty `message` przypisane do hosta. |
@@ -1393,7 +1426,8 @@ HOST_COLUMN = None
 HOSTS = []
 
 BATCH_SIZE = 10
-EXECUTION_COLUMN = 'exceiute_job'
+EXECUTION_COLUMN = 'exceiute_job_link'
+EXECUTION_SCOPE = 'ask'
 JOB_TYPE = ''
 JOB_TYPE_VARIABLE = 'action'
 
@@ -1444,7 +1478,7 @@ Plik `awx_variable.example` w repozytorium zawiera fragmenty konfiguracji. Nie z
 | Zmienna spoza survey jest odrzucana. | Czy szablon przyjmuje Variables przez Prompt on launch. |
 | Credential nie istnieje / nazwa jest niejednoznaczna. | Nazwę, ID i uprawnienia tokena do odczytu credentiali. |
 | AWX nie przyjmuje `Full_Credential`. | Prompt on launch dla Credentials oraz konflikty typów credentiali. |
-| Skrypt nie uruchamia ponownie wierszy. | Istniejące wpisy w `EXECUTION_COLUMN` i potwierdzenie rerunu. |
+| Skrypt nie uruchamia ponownie wierszy. | Wybór zakresu `all` / opcji 2 i końcowe potwierdzenie planu. |
 | Pozostał `LAUNCH_PENDING`. | Stan w AWX przed zmianą znacznika; wynik wcześniejszego żądania startu nie został potwierdzony. |
 | Nie można zapisać Excela. | Czy plik jest otwarty w Excelu, uprawnienia do katalogu i poprawność ścieżki. |
 | Log w Excelu jest skrócony. | Pełny plik w `OUTPUT_DIRECTORY`; obowiązuje limit komórki. |

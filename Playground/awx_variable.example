@@ -1,6 +1,10 @@
 # Widoczne kolumny w Excelu; [] pokazuje wszystkie.
 # Pozostałe kolumny są ukrywane z zachowaniem danych; własne kolumny dodawane jako puste.
-EXCEL_COLUMNS = ['hostname', 'ostype', 'AWX_Status', 'exceiute_job', 'output', 'Uwagi']
+EXCEL_COLUMNS = ['hostname', 'ostype', 'AWX_Status', 'exceiute_job_link', 'output', 'Uwagi']
+EXECUTION_COLUMN = 'exceiute_job_link'
+# ask: pytanie o zakres; missing: tylko wpisy bez linku; all: wszystkie wybrane.
+# Pełny plan nadal wymaga potwierdzenia przed startem.
+EXECUTION_SCOPE = 'ask'
 
 # Refresh szuka nazw hostów z Excela w inventory pasujących do tego wzorca.
 # Ignoruje INVENTORY. * to dowolny ciąg znaków (dynamiczne ApplicationID), ? jeden znak.

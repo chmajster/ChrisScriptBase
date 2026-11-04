@@ -6,6 +6,8 @@ Przykłady:
     python .\awx_execute_jobs.py --show-survey
     python .\awx_execute_jobs.py --survey
     python .\awx_execute_jobs.py --survey --dry-run
+    python .\awx_execute_jobs.py --execution-scope missing
+    python .\awx_execute_jobs.py --execution-scope all --dry-run
     python .\awx_execute_jobs.py -file .\hosty.xlsx --batch-size 10 --job-type install
     python .\awx_execute_jobs.py --hosts host1 host2 --job-url "https://awx.example.com/#/templates/job_template/7/details" --dry-run
     python .\awx_execute_jobs.py --help
@@ -47,6 +49,14 @@ Niezgodność zatrzymuje wykonanie przed wysłaniem żądania startu.
 Limit każdego joba zaczyna się od localhost, np. localhost,host1,host2.
 Jeśli localhost już występuje w paczce, jest przenoszony na początek bez powtórzeń.
 Automatycznie dodany localhost nie zużywa miejsca w BATCH_SIZE.
+Po walidacji skrypt pokazuje plan wszystkich jobów: nazwę i ID szablonu, URL,
+system, akcję playbooka, poświadczenia oraz hosty w osobnych wierszach.
+Automatycznie dodany localhost jest oznaczony. Skrypt czeka na potwierdzenie
+[tak/N]. Numer paczki określa kolejność; ID uruchomionego joba jest pokazywane
+po zatwierdzeniu planu i odpowiedzi AWX. tak/t/y/yes zatwierdza cały plan;
+Enter, inna odpowiedź lub brak interaktywnego terminala anuluje wykonanie
+bez startu jobów i zapisu Excela. --dry-run pokazuje podgląd bez pytania
+o uruchomienie.
 
 Survey używa Answer Variable Name pytania z AWX jako klucza extra_vars.
 Odpowiedzi: --survey-answers JSON > kolumna Survey_<nazwa_zmiennej>
@@ -71,14 +81,22 @@ Szablon jest wybierany z Job_Link w Excelu. JOB_URL z konfiguracji nie zastępuj
 linków z arkusza. Jawne --job-url nadpisuje Job_Link i aktualizuje template_job_name.
 Akceptowany jest URL szablonu UI/API na serwerze z AWX_URL.
 
-Uruchomienie zapisuje link do joba w EXECUTION_COLUMN (domyślnie exceiute_job).
+Przed planem skrypt pyta o zakres: 1 / Enter — tylko wpisy bez linku do joba,
+2 — wszystkie wybrane wpisy (także z historią), 0 — anuluj. Zakres nadal
+uwzględnia HOSTS / --hosts. --execution-scope missing lub all zastępuje to pytanie;
+EXECUTION_SCOPE='ask' przywraca pytanie. Pełny plan zawsze wymaga potwierdzenia.
+--dry-run domyślnie pokazuje wpisy bez linku; --execution-scope all pokazuje też
+wpisy z historią, bez pytań o zakres i start.
+
+Uruchomienie zapisuje link WebUI joba w EXECUTION_COLUMN (exceiute_job_link),
+np. https://awx.example.com/#/jobs/playbook/123/output. Link wskazuje job w
+przeglądarce, także gdy Job_Link szablonu jest adresem API. Stara kolumna
+exceiute_job jest przenoszona do exceiute_job_link z zachowaniem historii.
 Po zakończeniu joba zapisuje również Artifacts (JSON) i artifact filter
 (message znalezione dla hosta). Przy WAIT_FOR_COMPLETION=False końcowe wyniki
 uzupełnia awx_job_output.py.
-Wiersze z istniejącym wpisem są pomijane. Gdy nie ma nowych paczek, skrypt pyta
-w terminalu: Czy potwierdzasz ponowne uruchomienie joba? [tak/N]. Tak potwierdza,
-Enter lub inna odpowiedź kończy bez zapisu. Przy ponowieniu poprzedni link
-zostaje w komentarzu komórki z nowym adresem joba.
+W trybie missing wiersze z istniejącym wpisem są pomijane. Tryb all ponawia
+również te wpisy; poprzedni link zostaje w komentarzu komórki z nowym adresem.
 LAUNCH_PENDING oznacza zapisany zamiar
 startu z niepotwierdzonym wynikiem; taki wpis wymaga sprawdzenia w AWX.
 --dry-run pokazuje paczki bez startowania jobów i zapisu pliku. Gdy hostów brakuje
@@ -87,6 +105,9 @@ Wartości extra_vars są w podglądzie maskowane. --survey --dry-run dodatkowo
 odczytuje pytania z AWX i waliduje odpowiedzi, nadal bez startu jobów i zapisu.
 
 Tryb -d pokazuje ustawienia wykonania, powody pomijania wierszy i tworzenie paczek.
+Tylko w debug przed operacją sprawdza połączenie API i AWX_TOKEN przez GET /me/.
+Pokazuje uwierzytelnionego użytkownika; błąd zatrzymuje operację przed odczytem
+i zmianą Excela. Test działa też w --debug --dry-run. --no-debug pomija test.
 Opisuje dobór ID poświadczeń, walidację szablonów i ankiet oraz zapis LAUNCH_PENDING
 przed startem. Potwierdza zapis linku do zadania i podaje czas oraz liczbę żądań API.
 Wypisuje nazwy zmiennych zadania, a ich wartości pozostają ukryte.
@@ -114,7 +135,7 @@ VARIABLES = {
     # "INPUT_FILE": 'hosts.xlsx',
     # "SHEET_NAME": 'Results',
     # Widoczne kolumny; [] pokazuje wszystkie. Ukryte dane nadal służą do wykonania zadań.
-    # "EXCEL_COLUMNS": ['hostname', 'exceiute_job', 'Artifacts', 'artifact filter', 'Uwagi'],
+    # "EXCEL_COLUMNS": ['hostname', 'exceiute_job_link', 'Artifacts', 'artifact filter', 'Uwagi'],
 
     # Wybrane hosty: jeden host ['host1'] albo lista ['host1', 'host2'].
     # Można też podać tekst 'host1,host2'. [] oznacza wszystkie wiersze z Excela.
@@ -145,7 +166,7 @@ VARIABLES = {
     # Jeśli --job-type ma odpowiadać temu pytaniu, ustaw:
     # "JOB_TYPE_VARIABLE": 'installtesttypename',
     # True / --survey: pytania w terminalu, Enter zachowuje default.
-    # False: automatyczne wykonanie z odpowiedziami i defaultami, bez pytań.
+    # False: odpowiedzi i defaulty survey bez pytań ankiety.
     # --no-survey wyłącza pytania ustawione w pliku.
     # "SURVEY_INTERACTIVE": False,
 
@@ -156,8 +177,11 @@ VARIABLES = {
     # "POLL_INTERVAL": 5,
     # "JOB_WAIT_TIMEOUT": 3600,
 
-    # Kolumna linków do uruchomień. Wpisy w niej chronią przed ponownym startem.
-    # "EXECUTION_COLUMN": 'exceiute_job',
+    # Linki WebUI do uruchomień. Tryb missing pomija wpisy z historią.
+    # "EXECUTION_COLUMN": 'exceiute_job_link',
+    # ask: pytanie o zakres; missing: tylko bez linku; all: także wpisy z historią.
+    # Zakres jest ograniczany przez HOSTS / --hosts. Plan nadal wymaga potwierdzenia.
+    # "EXECUTION_SCOPE": 'ask',
     # Full_Credential: nazwy/ID zapisanych credentiali joba, oddzielone separatorem.
     # AWX_TOKEN uwierzytelnia API; Full_Credential wybiera credentiale dla playbooka.
     # Puste pole lub "none" zachowuje credentiale skonfigurowane na szablonie.
@@ -167,7 +191,8 @@ VARIABLES = {
     # odczytać z AWX. --no-dry-run wyłącza podgląd ustawiony w pliku.
     # Sam DEBUG nie włącza trybu podglądu.
     # "DRY_RUN": True,
-    # Szczegóły zapytań API, z maskowaniem tokena.
+    # Test połączenia API i AWX_TOKEN przed operacją oraz szczegóły zapytań.
+    # Błąd testu zatrzymuje operację. Wartość tokena jest maskowana.
     # "DEBUG": True,
     # Kolory: auto w terminalu, always wymusza ANSI, never wy??cza kolory.
     # "COLOR": 'auto',

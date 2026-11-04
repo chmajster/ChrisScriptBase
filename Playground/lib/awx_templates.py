@@ -173,6 +173,7 @@ def main(argv=None):
     awx.configure_debug(args.debug, settings['AWX_TOKEN'].strip())
     awx.apply_connection_settings(settings)
     client = awx.AWXClient(settings['AWX_URL'], settings['AWX_TOKEN'].strip())
+    awx.check_connection(client, debug=args.debug)
     host = None
     if args.hostname is not None:
         names = common.normalize_hostnames(args.hostname, required=True)

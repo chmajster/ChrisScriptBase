@@ -29,7 +29,8 @@ HOST_COLUMN = None
 HOSTS = []
 
 BATCH_SIZE = 10
-EXECUTION_COLUMN = 'exceiute_job'
+EXECUTION_COLUMN = 'exceiute_job_link'
+EXECUTION_SCOPE = 'ask'
 JOB_TYPE = ''
 JOB_TYPE_VARIABLE = 'action'
 

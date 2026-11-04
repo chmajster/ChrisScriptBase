@@ -5,12 +5,52 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
+from openpyxl.comments import Comment
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
 
 with patch.object(Path, 'read_text', side_effect=FileNotFoundError):
     from lib import awx_excel as excel
 
 
 class SettingsSheetTests(unittest.TestCase):
+    def test_legacy_execution_column_merges_links_and_comments(self):
+        book = excel.Workbook()
+        self.addCleanup(book.close)
+        sheet = book.active
+        sheet.append(['hostname', 'exceiute_job', 'exceiute_job_link', 'Survey_mode'])
+        sheet.append(['host1', 'https://awx.example.test/api/v2/jobs/90/', None])
+        sheet.append(['host2', 'https://awx.example.test/api/v2/jobs/91/',
+                      'https://awx.example.test/#/jobs/playbook/91/output'])
+        sheet.cell(2, 2).comment = Comment('old history', 'Operator')
+        sheet.cell(2, 3).comment = Comment('new history', 'AWX')
+        rule = DataValidation(type='list', formula1='"install,update"', promptTitle='AWX survey')
+        rule.add('D2:D10')
+        sheet.add_data_validation(rule)
+        columns, _ = excel.prepare_sheet(sheet)
+        self.assertNotIn('exceiute_job', columns)
+        cell = sheet.cell(2, columns['exceiute_job_link'])
+        self.assertEqual(cell.value, 'https://awx.example.test/api/v2/jobs/90/')
+        self.assertIn('old history', cell.comment.text)
+        self.assertIn('new history', cell.comment.text)
+        survey_column = get_column_letter(columns['survey_mode'])
+        self.assertEqual(str(rule.sqref), f'{survey_column}2:{survey_column}10')
+        excel.format_sheet(sheet)
+        self.assertEqual(cell.value, 'https://awx.example.test/#/jobs/playbook/90/output')
+        self.assertEqual(cell.hyperlink.target, cell.value)
+
+    def test_conflicting_old_and_new_job_history_stops_migration(self):
+        book = excel.Workbook()
+        self.addCleanup(book.close)
+        sheet = book.active
+        sheet.append(['hostname', 'exceiute_job', 'exceiute_job_link'])
+        sheet.append(['host1', 'https://awx.example.test/api/v2/jobs/90/',
+                      'https://awx.example.test/#/jobs/playbook/91/output'])
+        original = list(sheet.values)
+        with self.assertRaisesRegex(excel.AWXError, 'różną historię'):
+            excel.prepare_sheet(sheet)
+        self.assertEqual(list(sheet.values), original)
+
     def test_secrets_are_removed_and_parameter_types_survive_save_and_reload(self):
         book = excel.create_workbook(excel.headers(), [])
         self.addCleanup(book.close)

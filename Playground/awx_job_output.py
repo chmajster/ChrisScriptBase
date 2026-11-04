@@ -6,7 +6,7 @@ Przykłady:
     python .\awx_job_output.py -file .\hosty.xlsx --output-dir .\output -d
     python .\awx_job_output.py --help
 
-Skrypt odczytuje linki z EXECUTION_COLUMN (domyślnie exceiute_job) i system
+Skrypt odczytuje linki z EXECUTION_COLUMN (domyślnie exceiute_job_link) i system
 z ostype. Pobiera pełny stdout każdego unikalnego joba i wpisuje go do OUTPUT_COLUMN
 we wszystkich powiązanych wierszach. Puste linki i LAUNCH_PENDING są pomijane.
 
@@ -51,9 +51,9 @@ VARIABLES = {
     # "INPUT_FILE": 'hosts.xlsx',
     # "SHEET_NAME": 'Results',
     # Widoczne kolumny; [] pokazuje wszystkie. Pozostałe są ukrywane z zachowaniem danych.
-    # "EXCEL_COLUMNS": ['hostname', 'exceiute_job', 'output', 'Artifacts', 'artifact filter'],
+    # "EXCEL_COLUMNS": ['hostname', 'exceiute_job_link', 'output', 'Artifacts', 'artifact filter'],
     # Nazwa musi odpowiadać kolumnie używanej przez launcher execute.
-    # "EXECUTION_COLUMN": 'exceiute_job',
+    # "EXECUTION_COLUMN": 'exceiute_job_link',
 
     # Kolumna z treścią logu; zostanie dodana, jeśli jej brak.
     # "OUTPUT_COLUMN": 'output',

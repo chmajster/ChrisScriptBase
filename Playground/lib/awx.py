@@ -327,6 +327,10 @@ Przykłady:
   (albo przekazywane zmienne muszą być obsługiwane przez survey).
   Credentials: w edycji szablonu zaznacz Prompt on launch i zapisz ustawienie.
   Odpowiada mu pole API ask_credential_on_launch=True.
+  Po walidacji pokazuje plan wszystkich jobów: nazwę i ID szablonu, URL, OS,
+  typ joba oraz pełny limit hostów (z localhost). Czeka na potwierdzenie [tak/N].
+  tak/t/y/yes zatwierdza cały plan; Enter, inna odpowiedź lub brak terminala
+  anuluje wykonanie bez uruchamiania jobów i zapisu Excela.
 
 Wybrane hosty i URL:
   --hosts host1 host2 lub HOSTS=['host1', 'host2'] ogranicza listę wykonania.
@@ -341,12 +345,17 @@ Akcja i historia:
   Job_Variables to obiekt JSON, np. {"action": "install"}.
   Akcja: --job-type > odpowiedzi survey > Job_Variables > kolumna Job_Type > JOB_TYPE.
   Trafia do extra_vars[JOB_TYPE_VARIABLE], domyślnie action.
-  Link joba zapisuje w EXECUTION_COLUMN (domyślnie exceiute_job).
+  Link WebUI joba zapisuje w EXECUTION_COLUMN (domyślnie exceiute_job_link).
+  Stara kolumna exceiute_job jest przenoszona z zachowaniem historii.
   Po zakończeniu joba zapisuje Artifacts (JSON) i artifact filter (message hosta).
   Gdy WAIT_FOR_COMPLETION=False, pobierz końcowe artefakty przez awx_job_output.py.
-  Istniejące wpisy są pomijane. Przy braku nowych paczek pyta w terminalu
-  o ponowne uruchomienie: tak/T/y/yes potwierdza, Enter lub inna odpowiedź kończy
-  bez zapisu. Poprzedni link zostaje w komentarzu komórki EXECUTION_COLUMN.
+  Zakres: 1 / Enter — tylko wpisy bez linku, 2 — wszystkie wybrane wpisy,
+  0 — anuluj. --execution-scope missing/all zastępuje pytanie o zakres.
+  EXECUTION_SCOPE='ask' (domyślnie) włącza pytanie. HOSTS / --hosts nadal ogranicza zakres.
+  Pełny plan wymaga osobnego potwierdzenia [tak/N] przed zapisem i startem.
+  Przy ponowieniu poprzedni link zostaje w komentarzu komórki EXECUTION_COLUMN.
+  --dry-run nie pyta o zakres i start; domyślnie pokazuje tylko wpisy bez linku.
+  --execution-scope all --dry-run pokazuje również wpisy z historią.
   LAUNCH_PENDING wymaga sprawdzenia uruchomienia w AWX i nie jest ponawiany pytaniem.
   WAIT_FOR_COMPLETION=True czeka na sukces; błąd zatrzymuje kolejne paczki.
 
@@ -375,6 +384,8 @@ Przykłady:
   python .\awx_execute_jobs.py --show-survey
   python .\awx_execute_jobs.py --survey
   python .\awx_execute_jobs.py --survey --dry-run
+  python .\awx_execute_jobs.py --execution-scope missing
+  python .\awx_execute_jobs.py --execution-scope all --dry-run
   python .\awx_execute_jobs.py -file .\hosty.xlsx --batch-size 10 --job-type install
   python .\awx_execute_jobs.py --hosts host1 --job-url "https://awx.example.com/#/templates/job_template/7/details" --dry-run
   --dry-run: bez startu jobów i zapisu. Brakujące metadane może odczytać z AWX.
@@ -382,7 +393,7 @@ Przykłady:
   --survey --dry-run odczytuje i waliduje survey oraz umożliwia podanie odpowiedzi.
   --no-dry-run: wyłącza DRY_RUN ustawione w pliku lub launcherze.""",
     "output": r"""Działanie:
-  Czyta linki z EXECUTION_COLUMN (domyślnie exceiute_job) i system z ostype.
+  Czyta linki z EXECUTION_COLUMN (domyślnie exceiute_job_link) i system z ostype.
   Pobiera pełny stdout raz na unikalny job, także failed/error/canceled.
   Wpisuje log do OUTPUT_COLUMN we wszystkich powiązanych wierszach tego joba.
   Artifacts: JSON z pola artifacts joba. artifact filter: message dla hostname.
@@ -409,6 +420,8 @@ CONFIGURATION_HELP = """Ustawienia:
   Kolejność: argumenty komendy > VARIABLES > *_OVERRIDES operacji > wartości wspólne.
   Względne ścieżki plików liczą się od bieżącego katalogu uruchomienia.
   DEBUG pokazuje szczegóły zapytań; sam DEBUG nie włącza trybu --dry-run.
+  Tylko DEBUG wykonuje przed operacją test API i AWX_TOKEN przez GET /me/.
+  Błąd testu zatrzymuje operację przed odczytem i zmianą plików. --no-debug pomija test.
   COLOR: auto (terminal), always (wymuszenie), never (bez kolorów).
   --color nadpisuje COLOR; --no-color wyłącza kolory. NO_COLOR wyłącza tryb auto.
   URL-e w awx_variable mogą zawierać nowe linie; parser łączy je w jeden adres.
@@ -436,7 +449,8 @@ def operation_parser(description, *, with_sheet=True, with_file=True, operation=
         parser.add_argument("-file", "--file", dest="input_file", type=Path, help=file_help)
     if with_sheet:
         parser.add_argument("--sheet", help="Nazwa arkusza; domyślnie SHEET_NAME lub aktywny arkusz.")
-    parser.add_argument("-d", "-debug", "--debug", action="store_true", default=None, help="Szczegóły zapytań API; token jest maskowany.")
+    parser.add_argument("-d", "-debug", "--debug", action="store_true", default=None,
+                        help="Test połączenia i AWX_TOKEN przed operacją oraz szczegóły API; token jest maskowany.")
     parser.add_argument("--no-debug", dest="debug", action="store_false", default=None, help="Wyłącz DEBUG ustawione w zmiennych.")
     parser.add_argument("--color", choices=console.COLOR_MODES, default=None, help="Kolory: auto, always, never; nadpisuje COLOR.")
     parser.add_argument("--no-color", dest="color", action="store_const", const="never", default=None, help="Wyłącz kolory w terminalu.")
@@ -678,6 +692,37 @@ class AWXClient:
             next_page = page.get('next')
             url = self._resolve_url(next_page, relative_to=url) if next_page else None
         LOGGER.debug('Zakończono: %s\n  Pobrane rekordy: %d\n  Pobrane strony: %d', purpose, record_count, page_number)
+
+def check_connection(client, *, debug=False):
+    """Verify API connectivity and token authentication only when debug is enabled."""
+    if not debug:
+        return
+    console.print_record('TEST POŁĄCZENIA AWX (DEBUG)', {
+        'Adres API': client.redact(client._resolve_url('me/')),
+        'Uwierzytelnienie': 'AWX_TOKEN (wartość ukryta)',
+    })
+    started = time.perf_counter()
+    try:
+        response = client.get('me/', purpose='Test połączenia z AWX i uwierzytelnienia AWX_TOKEN przed operacją')
+        users = response.get('results') if isinstance(response, dict) else None
+        if not isinstance(users, list) or len(users) != 1 or not isinstance(users[0], dict):
+            raise AWXError('Endpoint /me/ nie zwrócił danych uwierzytelnionego użytkownika.')
+        user = users[0]
+        if (type(user.get('id')) is not int or user['id'] < 1
+                or not isinstance(user.get('username'), str) or not user['username'].strip()
+                or user.get('is_active') is False):
+            raise AWXError('Endpoint /me/ nie potwierdził aktywnego konta użytkownika.')
+    except AWXError as exc:
+        raise AWXError(client.redact(
+            'Test połączenia z AWX nie powiódł się. Operacja została zatrzymana.\n'
+            'Sprawdź AWX_URL, AWX_TOKEN i dostępność serwera.\n'
+            f'Szczegóły: {exc}'
+        )) from None
+    console.print_message(client.redact(
+        f"Połączenie z AWX i uwierzytelnienie: OK.\nUżytkownik: {user['username']} (ID: {user['id']}).\n"
+        f'Czas testu: {time.perf_counter() - started:.2f} s. Rozpoczynam operację.'
+    ), level='success', flush=True)
+
 
 def find_inventory(client, selector):
     if isinstance(selector, int):
@@ -1160,6 +1205,8 @@ def inventory_main(argv=None):
     try:
         settings = load_connection(args.debug)
         token = AWX_TOKEN.strip()
+        client = AWXClient(AWX_URL, token)
+        check_connection(client, debug=args.debug)
         debug_step('Eksport', 'ustawienia połączenia i plików', Serwer=AWX_URL, Inwentarz=INVENTORY,
                    Limit_HTTP_s=TIMEOUT, Rekordy_na_stronę=PAGE_SIZE,
                    Plik_JSON=OUTPUT_FILE, Plik_Excel=EXCEL_OUTPUT_FILE)
@@ -1175,7 +1222,6 @@ def inventory_main(argv=None):
             hostnames = read_host_limits(input_file)
         debug_step('Eksport', 'wybór hostów', Filtr=input_file or 'wszystkie hosty inwentarza',
                    Liczba_nazw=len(hostnames) if hostnames is not None else 'bez ograniczenia')
-        client = AWXClient(AWX_URL, token)
         scope = f'hosty z listy ({len(hostnames)})' if hostnames is not None else 'wszystkie hosty inwentarza'
         console.print_message(f'[1/4] Pobieram hosty, grupy i zmienne z AWX.\n  Zakres: {scope}',
                               level='progress', flush=True)
@@ -1252,6 +1298,8 @@ def parse_execute_arguments(argv=None):
     parser.add_argument("--job-url", help="URL szablonu joba dla wskazanych hostów; nadpisuje JOB_URL i Job_Link.")
     parser.add_argument("--batch-size", type=int, help="Maksymalna liczba hostów w jobie; nadpisuje BATCH_SIZE.")
     parser.add_argument("--job-type", help="Akcja playbooka, np. install/reinstall/update; nadpisuje także kolumnę Job_Type.")
+    parser.add_argument('--execution-scope', choices=('ask', 'missing', 'all'),
+                        help='Zakres: ask pyta (domyślnie), missing uruchamia tylko wpisy bez linku, all także wpisy z historią. Końcowe potwierdzenie planu jest wymagane.')
     parser.add_argument("--survey", action=argparse.BooleanOptionalAction, default=None,
                         help="Pytaj w terminalu o brakujące odpowiedzi survey; --no-survey wyłącza pytania.")
     parser.add_argument("--survey-answers", help="Odpowiedzi survey jako obiekt JSON; nadpisuje SURVEY_ANSWERS i Job_Variables.")
@@ -1430,11 +1478,12 @@ def execution_row_context(sheet, row_number, columns, excel_variables):
 
 def build_execution_plan(sheet, client, settings, job_type_override=None, hostnames=None, job_url_override=None, survey_overrides=None, survey_cache=None):
     """Verify Excel templates and batch equal OS/payloads, preserving distinct runs per host."""
+    excel.migrate_execution_column(sheet, common.normalize_execution_column(settings['EXECUTION_COLUMN']))
     columns = excel.read_columns(sheet)
     for name in ('hostname', 'job_link', 'job_variables', 'full_credential'):
         if name not in columns:
             raise AWXError(f"Missing {name} column. Generate a new Excel export with awx_inventory_hosts.py.")
-    execution_column = columns.get(settings['EXECUTION_COLUMN'].casefold(), sheet.max_column + 1)
+    execution_column = columns.get(common.normalize_execution_column(settings['EXECUTION_COLUMN']).casefold(), sheet.max_column + 1)
     hosts = {}
     selected = {common.hostname_key(name) for name in hostnames} if hostnames is not None else None
     skipped_without_job = 0
@@ -1497,6 +1546,8 @@ def build_execution_plan(sheet, client, settings, job_type_override=None, hostna
                credential_refs, preserve_defaults, json.dumps(context, sort_keys=True, ensure_ascii=False))
         execution_key = (host_key, key)
         execution = str(sheet.cell(row_number, execution_column).value or '').strip()
+        if execution.casefold() == 'none':
+            execution = ''
         if execution_key not in hosts:
             hosts[execution_key] = {'key': key, 'template_id': template_id, 'template_job_name': template_name,
                                     'ostype': ostype, 'link': link, 'variables': variables,
@@ -1672,7 +1723,7 @@ def update_survey_columns(client, sheet, settings, *, job_url_override=None, cac
                Wiersze=sum(map(len, template_rows.values())), Nowe_kolumny=', '.join(added) or 'brak',
                Nadpisywanie_odpowiedzi_z_konfiguracji=overwrite_configured)
     if added:
-        console.print_message('Added survey columns: ' + ', '.join(added), level='info')
+        console.print_message('Dodano kolumny odpowiedzi survey w arkuszu: ' + ', '.join(added), level='info')
     return cache
 
 
@@ -1789,13 +1840,7 @@ def resolve_execution_hostnames(client, batches, template_cache):
 
 
 def job_url(template_link, client, job_id):
-    parsed = urlsplit(template_link)
-    route = f"/jobs/playbook/{job_id}/output"
-    if parsed.fragment:
-        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, '', route))
-    if '/templates/' in parsed.path:
-        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path.split('/templates/', 1)[0] + route, '', ''))
-    return client._resolve_url(f"jobs/{job_id}/")
+    return common.job_web_url(template_link, job_id)
 
 def wait_for_job(client, job_id, settings, *, require_success=True):
     """One status polling loop for execution and collection of successful/failed job logs."""
@@ -1838,10 +1883,10 @@ def execute_plan(workbook, sheet, path, client, settings, batches, existing, exe
     excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=output_column, excel_columns=settings.get('EXCEL_COLUMNS'))
     for index, batch in enumerate(batches, start=1):
         template_id = batch['template_id']
-        console.print_message(f"Batch {index}/{len(batches)}: template={template_id}\n"
-                              f"template_job_name={batch.get('template_job_name') or 'none'}\n"
-                              f"ostype={batch.get('ostype') or 'unknown'}\njob_type={batch['job_type'] or 'none'}\n"
-                              f"credentials={batch['credentials']}\nhosts={batch['limit']}", flush=True, level="progress")
+        console.print_message(client.redact(
+            f"Uruchamiam paczkę {index}/{len(batches)}: {batch.get('template_job_name') or 'szablon bez nazwy'} "
+            f"(ID szablonu: {template_id})."
+        ), flush=True, level='progress')
         for entry in batch['entries']:
             for row_number in entry['rows']:
                 cell = sheet.cell(row_number, job_type_column)
@@ -1873,26 +1918,35 @@ def execute_plan(workbook, sheet, path, client, settings, batches, existing, exe
             result = client.post(f"job_templates/{template_id}/launch/", payload)
             job_id = result.get('job') or result.get('id')
             if type(job_id) is not int or job_id < 1:
-                raise AWXError('Launch response has no job ID; check AWX before clearing the Excel marker.')
+                raise AWXError('AWX nie zwrócił ID uruchomionego joba. Sprawdź stan w AWX przed usunięciem znacznika LAUNCH_PENDING z Excela.')
             link = job_url(batch['link'], client, job_id)
-            console.print_message(f"Job {job_id}: {link}", flush=True, level="success")
+            console.print_message(client.redact(
+                f'Paczka {index}/{len(batches)}: AWX przyjął uruchomienie joba o ID {job_id}.\n'
+                f'Podgląd joba: {link}'
+            ), flush=True, level='success')
             write_execution(sheet, execution_column, batch['entries'], link)
             excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=output_column, excel_columns=settings.get('EXCEL_COLUMNS'))
             debug_step('Uruchamianie', 'zapisano potwierdzony link zadania w Excelu', Zadanie_ID=job_id,
                        Link=link, Plik=path, Oczekiwanie=settings['WAIT_FOR_COMPLETION'])
             if result.get('ignored_fields'):
-                raise AWXError(f"Job {job_id}: AWX ignored launch fields {', '.join(result['ignored_fields'])}; stopped further launches.")
+                raise AWXError(f"Job {job_id}: AWX pominął parametry uruchomienia: {', '.join(result['ignored_fields'])}. Kolejne paczki zostały zatrzymane.")
             if settings['WAIT_FOR_COMPLETION']:
+                next_batch = ' Kolejna paczka ruszy po jego sukcesie.' if index < len(batches) else ''
+                console.print_message(f'Czekam na zakończenie joba {job_id}.{next_batch}',
+                                      level='progress', flush=True)
                 job = wait_for_job(client, job_id, settings, require_success=False)
                 write_job_artifacts(sheet, job, batch['entries'], client._resolve_url(f"jobs/{job_id}/"))
                 excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=output_column, excel_columns=settings.get('EXCEL_COLUMNS'))
                 if job['status'] != 'successful':
-                    raise AWXError(f"Job {job_id} finished with status {job['status']}; remaining batches were not launched.")
+                    raise AWXError(f"Job {job_id}: {console.job_status_description(job['status'])}. Pozostałe paczki nie zostały uruchomione.")
             else:
                 write_job_artifacts(sheet, result, batch['entries'], client._resolve_url(f"jobs/{job_id}/"))
                 excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=output_column, excel_columns=settings.get('EXCEL_COLUMNS'))
         except BaseException:
-            console.print_message('Stopped. Check the saved execution links/markers and AWX before retrying the affected batch.', file=sys.stderr, level="warning")
+            console.print_message(
+                f'Przerwano wykonanie przy paczce {index}/{len(batches)}.\n'
+                'Przed ponowieniem sprawdź joby w AWX oraz linki i znaczniki LAUNCH_PENDING zapisane w Excelu.',
+                file=sys.stderr, level='warning', flush=True)
             raise
 
 def add_selected_hosts(sheet, hostnames, client, connection, settings, *, job_url_override=None, template_cache=None):
@@ -1905,7 +1959,8 @@ def add_selected_hosts(sheet, hostnames, client, connection, settings, *, job_ur
                Brakujące_w_Excelu=', '.join(missing) or 'brak')
     if not missing:
         return
-    console.print_message(f"Fetching AWX metadata for {len(missing)} selected hosts missing from Excel.", flush=True, level="info")
+    console.print_message(f'Pobieram dane z AWX dla {len(missing)} wybranych hostów, których brakuje w Excelu.',
+                          flush=True, level='info')
     report = fetch_report(client, connection['INVENTORY'], hostnames=missing, allow_empty=True)
     if report.get('missing_hosts'):
         raise AWXError("Selected hosts not found in inventory: " + ", ".join(report['missing_hosts']))
@@ -1923,16 +1978,88 @@ def add_selected_hosts(sheet, hostnames, client, connection, settings, *, job_ur
     jumphosts.populate_choices(sheet, client, FULL_CREDENTIAL_SEPARATOR)
 
 
-def confirm_job_rerun(sheet, execution_column, entries):
-    """Confirm a repeat interactively; changes stay in memory until preflight passes."""
+def display_execution_plan(client, batches, *, preview=False, job_type_variable='action'):
+    """Describe each planned job and its exact hosts without printing variable values."""
+    hostnames = {common.hostname_key(entry['hostname']) for batch in batches for entry in batch['entries']}
+    console.print_record('PODGLĄD PLANU (dry-run)' if preview else 'PLAN DO POTWIERDZENIA', {
+        'Joby do uruchomienia': len(batches),
+        'Unikalne hosty z arkusza': len(hostnames),
+    })
+    console.print_message('Każda paczka poniżej uruchamia jeden job w AWX.\n'
+                          'Hosty z różnymi ustawieniami trafiają do osobnych paczek.\n',
+                          level='info', flush=True)
+    for index, batch in enumerate(batches, start=1):
+        source_hosts = {common.hostname_key(entry['hostname']) for entry in batch['entries']}
+        hosts = []
+        for hostname in batch['limit'].split(','):
+            note = ' (dodany automatycznie)' if hostname == 'localhost' and hostname not in source_hosts else ''
+            hosts.append(f'- {hostname}{note}')
+        if 'credentials' in batch:
+            credentials = []
+            for credential_id in batch['credentials']:
+                name = client.credential_cache.get(str(credential_id), {}).get('name')
+                credentials.append(f'{name} (ID: {credential_id})' if name else f'ID: {credential_id}')
+        else:
+            credentials = list(batch['credential_refs'])
+        fields = {
+            'Nazwa joba': batch.get('template_job_name') or 'szablon bez nazwy',
+            'ID szablonu AWX': batch['template_id'],
+            'Akcja playbooka': batch['variables'].get(job_type_variable, batch['job_type']) or 'nie podano osobnej akcji',
+            'System': {'windows': 'Windows', 'linux': 'Linux', 'aix': 'AIX'}.get(batch['ostype'], batch['ostype']),
+            'Hosty w limicie AWX': '\n'.join(hosts),
+            'Poświadczenia': '\n'.join(credentials) or 'domyślne z szablonu AWX',
+            'Zmienne (wartości ukryte)': '\n'.join(f'{key}: ***' for key in batch['variables']) or 'brak dodatkowych zmiennych',
+            'Link do szablonu': batch['link'],
+        }
+        console.print_record(f'Paczka {index}/{len(batches)} — jeden job',
+                             {name: client.redact(str(value)) for name, value in fields.items()})
+
+
+def confirm_execution_plan(client, batches, *, job_type_variable='action'):
+    """Show every validated batch and require approval before saving or launching."""
+    display_execution_plan(client, batches, job_type_variable=job_type_variable)
     if not sys.stdin.isatty():
+        console.print_message('Brak interaktywnego terminala do potwierdzenia planu.', level='warning')
         return False
     try:
-        answer = input('Czy potwierdzasz ponowne uruchomienie joba? [tak/N]: ')
+        console.print_message("Wpisz 'tak', aby uruchomić cały powyższy plan. Enter anuluje.", flush=True)
+        answer = input('Czy uruchomić wszystkie pokazane joby? [tak/N]: ')
     except EOFError:
         return False
-    if answer.strip().casefold() not in ('tak', 't', 'yes', 'y'):
-        return False
+    return answer.strip().casefold() in ('tak', 't', 'yes', 'y')
+
+
+def choose_execution_scope(column_name, batches, existing, *, requested='ask', preview=False):
+    """Select new entries or all selected entries; previews default to new entries."""
+    if requested != 'ask':
+        return requested
+    if preview or not sys.stdin.isatty():
+        return 'missing'
+    console.print_record('WYBÓR ZAKRESU URUCHOMIENIA', {
+        f'Wpisy bez linku w {column_name}': sum(len(batch['entries']) for batch in batches),
+        'Wpisy z wcześniejszym jobem': len(existing),
+    })
+    console.print_message(
+        '1 — Tylko wpisy bez linku do wcześniejszego joba (domyślnie).\n'
+        '2 — Wszystkie wybrane wpisy, również te z wcześniejszym jobem.\n'
+        '0 — Anuluj.\n'
+        'Po wyborze zobaczysz pełny plan do potwierdzenia.', flush=True)
+    while True:
+        try:
+            answer = input('Na których wpisach uruchomić joby? [1/2/0, Enter=1]: ').strip().casefold()
+        except EOFError:
+            return None
+        if answer in ('', '1', 'missing'):
+            return 'missing'
+        if answer in ('2', 'all'):
+            return 'all'
+        if answer in ('0', 'n', 'nie', 'anuluj'):
+            return None
+        console.print_message('Wpisz 1 (bez linku), 2 (wszystkie) albo 0 (anuluj).', level='warning', flush=True)
+
+
+def archive_execution_history(sheet, execution_column, entries):
+    """Prepare reruns in memory; keep the previous job in the cell comment."""
     for entry in entries:
         for row_number in entry['rows']:
             cell = sheet.cell(row_number, execution_column)
@@ -1943,7 +2070,6 @@ def confirm_job_rerun(sheet, execution_column, entries):
             cell.comment = Comment(text, (cell.comment.author or 'AWX') if cell.comment else 'AWX')
             cell.value = None
             cell.hyperlink = None
-    return True
 
 
 def execute_main(argv=None):
@@ -1982,6 +2108,7 @@ def execute_main(argv=None):
                Oczekiwanie=settings['WAIT_FOR_COMPLETION'], Pytania_ankiety=interactive_survey,
                Widoczne_kolumny=settings.get('EXCEL_COLUMNS') or 'wszystkie')
     client = AWXClient(connection['AWX_URL'], connection['AWX_TOKEN'].strip())
+    check_connection(client, debug=args.debug)
     template_cache = {}
     if selected_job_url:
         try:
@@ -2013,9 +2140,34 @@ def execute_main(argv=None):
             links = {entry['template_id']: entry['link'] for entry in [*batches, *existing]}
             show_template_surveys(client, links)
             return 0
-        console.print_message(f"Input: {path}\nbatch size: {settings['BATCH_SIZE']}\nbatches: {len(batches)}\nalready recorded runs: {len(existing)}\nrows without job: {skipped}", flush=True, level="info")
-        console.print_message('Wspólna paczka wymaga zgodnego szablonu, OS, zmiennych, Full_Credential i pozostałych metadanych wykonania. '
-                              'Różnice tworzą osobne joby, także dla tego samego szablonu.', flush=True)
+        console.print_record('PRZYGOTOWANIE URUCHOMIENIA', {
+            'Plik Excel': client.redact(str(path)),
+            'Arkusz': client.redact(sheet.title),
+            'Maks. hostów w paczce': settings['BATCH_SIZE'],
+            'Nowe paczki': len(batches),
+            'Wpisy z historią': len(existing),
+            'Pominięte wiersze bez szablonu': skipped,
+            'Tryb wykonania': ('kolejne paczki po sukcesie poprzedniego joba' if settings['WAIT_FOR_COMPLETION']
+                               else 'wysłanie wszystkich paczek bez czekania na wyniki'),
+        })
+        if not args.dry_run and any(entry['execution'].startswith('LAUNCH_PENDING') for entry in existing):
+            raise AWXError('W Excelu jest znacznik LAUNCH_PENDING po wcześniejszej próbie uruchomienia. Sprawdź w AWX, czy job powstał. Zastąp znacznik linkiem do joba lub usuń go dopiero po upewnieniu się, że job nie został uruchomiony.')
+        scope = choose_execution_scope(
+            settings['EXECUTION_COLUMN'], batches, existing,
+            requested=args.execution_scope or settings['EXECUTION_SCOPE'], preview=args.dry_run)
+        if scope is None:
+            console.print_message('Uruchomienie anulowane. Joby nie zostały uruchomione; plik Excel nie został zmieniony.',
+                                  level='warning', flush=True)
+            return 0
+        console.print_message('Wybrany zakres: ' + ('wszystkie wybrane wpisy, również z historią.' if scope == 'all'
+                                                   else 'tylko wpisy bez linku do wcześniejszego joba.'), flush=True)
+        rerun_entries = []
+        if scope == 'all' and existing:
+            rerun_entries = existing
+            archive_execution_history(sheet, column, rerun_entries)
+            batches, existing, column, skipped = build_execution_plan(
+                sheet, client, settings, job_type_override=args.job_type, hostnames=selected_hosts or None,
+                job_url_override=selected_job_url or None, survey_overrides=survey_overrides)
         if args.dry_run:
             LOGGER.debug('Podgląd wykonania: nie uruchamiam zadań i nie zapisuję pliku\n  Walidacja ankiety w AWX: %s',
                          'włączona' if interactive_survey else 'wyłączona w zwykłym podglądzie')
@@ -2027,44 +2179,32 @@ def execute_main(argv=None):
                     sheet, client, settings, job_type_override=args.job_type, hostnames=selected_hosts or None,
                     job_url_override=selected_job_url or None, survey_overrides=survey_overrides, survey_cache=cache)
                 validate_templates(client, batches, interactive=True, check_credentials=False, cache=cache)
-            for index, batch in enumerate(batches, start=1):
-                # No schema is fetched for an ordinary dry run, so mask all answer values.
-                preview = {key: '***' for key in batch['variables']}
-                console.print_message(f"Batch {index}: template={batch['template_id']}\n"
-                                      f"template_job_name={batch['template_job_name']}\nostype={batch['ostype'] or 'unknown'}\n"
-                                      f"limit={batch['limit']}\ncredentials={list(batch['credential_refs'])}\n"
-                                      f"job_type={batch['job_type'] or 'none'}\nextra_vars={json.dumps(preview, ensure_ascii=False)}", level="progress")
+            display_execution_plan(client, batches, preview=True, job_type_variable=settings['JOB_TYPE_VARIABLE'])
             console.print_message('Podgląd zakończony: joby nie zostały uruchomione; plik Excel nie został zmieniony.',
                                   level="warning", flush=True)
             return 0
-        if any((entry['execution'].startswith('LAUNCH_PENDING') for entry in existing)):
-            raise AWXError('An earlier launch has a LAUNCH_PENDING marker. Check AWX, then replace it with the job link or clear it only if no job was launched.')
-        rerun_entries = []
-        if not batches and existing:
-            LOGGER.debug('Wykonanie: wszystkie wybrane hosty mają historię\n  Ponowny start wymaga potwierdzenia w terminalu.')
-            if not confirm_job_rerun(sheet, column, existing):
-                console.print_message('Ponowne uruchomienie anulowane.', level='warning')
-                return 0
-            rerun_entries = existing
-            batches, existing, column, skipped = build_execution_plan(
-                sheet, client, settings, job_type_override=args.job_type, hostnames=selected_hosts or None,
-                job_url_override=selected_job_url or None, survey_overrides=survey_overrides)
         if not batches:
             excel.save_workbook(workbook, path, sheet=sheet, execution_column=settings['EXECUTION_COLUMN'], output_column=settings['OUTPUT_COLUMN'], excel_columns=settings.get('EXCEL_COLUMNS'))
-            console.print_message('No new batches to launch.', level="warning")
+            console.print_message('Brak wpisów do uruchomienia w wybranym zakresie. Zapisano układ arkusza.\n'
+                                  'Aby ponowić joby z historią, wybierz opcję 2 lub --execution-scope all.',
+                                  level='warning', flush=True)
             return 0
+        console.print_message('Sprawdzam w AWX szablony jobów, hosty, systemy, poświadczenia i odpowiedzi survey.',
+                              level='progress', flush=True)
         rows = [row for batch in batches for entry in batch['entries'] for row in entry['rows']]
         cache = update_survey_columns(client, sheet, settings, job_url_override=selected_job_url,
                                       row_numbers=rows, cache=template_cache)
         batches, existing, column, skipped = build_execution_plan(
             sheet, client, settings, job_type_override=args.job_type, hostnames=selected_hosts or None,
             job_url_override=selected_job_url or None, survey_overrides=survey_overrides, survey_cache=cache)
-        console.print_message('Sprawdzam hosty i ich OS w inwentarzach wskazanych przez szablony AWX.',
-                              level='progress', flush=True)
         resolve_execution_hostnames(client, batches, cache)
         resolve_credentials(client, batches, template_cache=cache)
         validate_templates(client, batches, interactive=interactive_survey, cache=cache)
         LOGGER.debug('Wykonanie: przygotowanie zakończone — zweryfikowano szablony, poświadczenia, zmienne i nazwy hostów.')
+        if not confirm_execution_plan(client, batches, job_type_variable=settings['JOB_TYPE_VARIABLE']):
+            console.print_message('Uruchomienie anulowane. Joby nie zostały uruchomione; plik Excel nie został zmieniony.',
+                                  level='warning', flush=True)
+            return 0
         if settings['WAIT_FOR_COMPLETION']:
             recorded_jobs = {}
             previous = [(entry, True) for entry in existing] + [(entry, False) for entry in rerun_entries]
@@ -2075,9 +2215,21 @@ def execute_main(argv=None):
                     job_id = int(match.group(1))
                     recorded_jobs[job_id] = recorded_jobs.get(job_id, False) or require_success
             for job_id in sorted(recorded_jobs):
+                console.print_message(f'Sprawdzam zakończenie wcześniejszego joba {job_id} przed startem nowego planu.',
+                                      level='progress', flush=True)
                 wait_for_job(client, job_id, settings, require_success=recorded_jobs[job_id])
         execute_plan(workbook, sheet, path, client, settings, batches, existing, column)
-        console.print_message(f"Saved job links to {settings['EXECUTION_COLUMN']} in {path}.", level="success")
+        console.print_message(f'Zakończono uruchamianie planu. Liczba uruchomionych jobów: {len(batches)}.',
+                              level='success', flush=True)
+        console.print_message(client.redact(
+            f"Linki do jobów zapisano w kolumnie {settings['EXECUTION_COLUMN']!r}.\nPlik Excel: {path}"
+        ), level='success', flush=True)
+        if settings['WAIT_FOR_COMPLETION']:
+            console.print_message('Wszystkie joby z planu zakończyły się pomyślnie. Artefakty zapisano w Excelu.',
+                                  level='success', flush=True)
+        else:
+            console.print_message('Joby mogą nadal działać w AWX. Końcowe logi i artefakty pobierz przez awx_job_output.py.',
+                                  level='info', flush=True)
         return 0
     finally:
         workbook.close()
@@ -2105,8 +2257,9 @@ def job_id_from_link(link, client):
     return resource_id_from_link(link, client, JOB_PATTERN, "Execution link")
 
 def build_output_plan(sheet, client, settings):
+    execution_name = common.normalize_execution_column(settings['EXECUTION_COLUMN']).casefold()
+    excel.migrate_execution_column(sheet, execution_name)
     columns = excel.read_columns(sheet)
-    execution_name = settings['EXECUTION_COLUMN'].strip().casefold()
     output_name = settings['OUTPUT_COLUMN'].strip().casefold()
     reserved = {name.casefold() for name in (*common.METADATA_COLUMNS, *common.ARTIFACT_COLUMNS)}
     if output_name == execution_name or output_name in reserved:
@@ -2341,6 +2494,7 @@ def output_main(argv=None):
     path = workbook_path(args.input_file, connection, settings, launch_settings)
     output_directory = Path(args.output_dir or settings['OUTPUT_DIRECTORY']).resolve()
     client = AWXClient(connection['AWX_URL'], connection['AWX_TOKEN'].strip())
+    check_connection(client, debug=args.debug)
     console.print_message(f'Odczytuję plik Excel: {path}', level='info', flush=True)
     workbook, sheet = open_workbook_sheet(path, settings["SHEET_NAME"], args.sheet)
     try:
@@ -2429,7 +2583,7 @@ def metadata_by_host(report, settings, *, client=None, template_cache=None):
         metadata[common.hostname_key(hostname)] = {name: record[name] for name in excel.METADATA_COLUMNS}
     return (metadata, list(excel.METADATA_COLUMNS[1:]))
 
-def refresh_sheet(sheet, host_rows, columns, source_column, metadata, headers, execution_column='exceiute_job', preserve_unidentified_rows=False, output_column='output'):
+def refresh_sheet(sheet, host_rows, columns, source_column, metadata, headers, execution_column=common.DEFAULT_EXECUTION_COLUMN, preserve_unidentified_rows=False, output_column='output'):
     missing_values = {name: 'none' for name in headers}
     missing_values.update(Job_Variables='{}', Job_Type='', AWX_Status='not_found', HOPS_COUNT=None)
     repaired, added = excel.prepare_sheet(sheet, execution_column, output_column, reorder=False)
@@ -2485,6 +2639,10 @@ def refresh_main(argv=None):
                Kolumna_hostów=args.host_column or 'automatyczne wykrywanie',
                Kolumna_wykonań=settings['EXECUTION_COLUMN'], Kolumna_logów=settings['OUTPUT_COLUMN'],
                Widoczne_kolumny=settings.get('EXCEL_COLUMNS') or 'wszystkie')
+    client = None
+    if args.debug:
+        client = AWXClient(connection['AWX_URL'], connection['AWX_TOKEN'].strip())
+        check_connection(client, debug=True)
     workbook, sheet = open_workbook_sheet(path, settings["SHEET_NAME"], args.sheet)
     try:
         sheet_name = sheet.title
@@ -2495,13 +2653,14 @@ def refresh_main(argv=None):
                    Kolumna_źródłowa=get_column_letter(source_column), Wiersze_z_hostami=len(host_rows),
                    Unikalne_hosty=len(hostnames), Powtórzone_wiersze=len(host_rows) - len(hostnames))
         console.print_message(f"Input: {path}\nworksheet: {sheet_name}\nunique hosts: {len(hostnames)}", flush=True, level="info")
-        client = None
         template_cache = {}
         if hostnames:
-            client = AWXClient(connection['AWX_URL'], connection['AWX_TOKEN'].strip())
+            if client is None:
+                client = AWXClient(connection['AWX_URL'], connection['AWX_TOKEN'].strip())
             report = fetch_refresh_report(client, hostnames, settings['REFRESH_INVENTORY_PATTERN'])
         else:
-            console.print_message('No hostnames in Excel. Updating column headers without querying AWX.', flush=True, level="warning")
+            console.print_message('Brak hostów w Excelu. Aktualizuję nagłówki bez pobierania danych hostów z AWX.',
+                                  flush=True, level='warning')
             report = {'hosts': [], 'host_count': 0, 'missing_hosts': []}
         metadata, headers = metadata_by_host(report, settings, client=client, template_cache=template_cache)
         debug_step('Odświeżanie', 'porównano hosty z AWX', Znalezione=len(metadata),
@@ -2512,7 +2671,8 @@ def refresh_main(argv=None):
                 f"Host: {record['hostname']}\nOrganizacja (ApplicationID): {record['ApplicationID']}\n"
                 f"template_job_name: {record['template_job_name']}\nJob_Link: {record['Job_Link']}"
             ), level='data')
-        protected = {settings['EXECUTION_COLUMN'].casefold(), 'exceiute_job', settings['OUTPUT_COLUMN'].casefold()}
+        protected = {settings['EXECUTION_COLUMN'].casefold(), common.DEFAULT_EXECUTION_COLUMN,
+                     common.LEGACY_EXECUTION_COLUMN, settings['OUTPUT_COLUMN'].casefold()}
         managed = {name.casefold() for name in ['hostname', *headers]}
         if protected & managed or columns.get(settings['EXECUTION_COLUMN'].casefold()) == source_column or columns.get(settings['OUTPUT_COLUMN'].casefold()) == source_column:
             raise AWXError('The host or metadata column conflicts with a job history column.')

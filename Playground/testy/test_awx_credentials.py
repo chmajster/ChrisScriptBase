@@ -18,7 +18,7 @@ TEMPLATE_URL = 'https://awx.example.test/#/templates/job_template/7/details'
 class FullCredentialTests(unittest.TestCase):
     def setUp(self):
         self.settings = {
-            'EXECUTION_COLUMN': 'exceiute_job', 'OUTPUT_COLUMN': 'output',
+            'EXECUTION_COLUMN': 'exceiute_job_link', 'OUTPUT_COLUMN': 'output',
             'SHEET_NAME': 'Results', 'JOB_URL': '', 'JOB_TYPE': '',
             'JOB_TYPE_VARIABLE': 'action', 'EXCEL_COLUMNS': [],
         }
@@ -114,7 +114,7 @@ class FullCredentialTests(unittest.TestCase):
         sheet.cell(2, columns['full_credential']).value = 'shared-vault, app_1hop'
         sheet.cell(2, columns['jumphost_for_hops']).value = 'app_alt_1hop'
         history = 'https://awx.example.test/#/jobs/playbook/99/output'
-        sheet.cell(2, columns['exceiute_job']).value = history
+        sheet.cell(2, columns['exceiute_job_link']).value = history
         sheet.cell(2, columns['output']).value = 'previous output'
         metadata, names = awx.metadata_by_host(
             self.report(['template-machine'], with_jumps=True), self.settings,
@@ -124,7 +124,7 @@ class FullCredentialTests(unittest.TestCase):
         self.assertEqual(sheet.cell(2, columns['full_credential']).value,
                          'shared-vault, template-machine, app_alt_1hop')
         self.assertEqual(sheet.cell(2, columns['os credential']).value, 'template-machine')
-        self.assertEqual(sheet.cell(2, columns['exceiute_job']).value, history)
+        self.assertEqual(sheet.cell(2, columns['exceiute_job_link']).value, history)
         self.assertEqual(sheet.cell(2, columns['output']).value, 'previous output')
 
 

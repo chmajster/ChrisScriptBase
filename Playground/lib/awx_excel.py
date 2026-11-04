@@ -9,13 +9,17 @@ from copy import copy
 from datetime import datetime
 from pathlib import Path
 
-from .awx_config import ARTIFACT_COLUMNS, AWXError, METADATA_COLUMNS, normalize_excel_columns
+from .awx_config import (
+    ARTIFACT_COLUMNS, AWXError, DEFAULT_EXECUTION_COLUMN, LEGACY_EXECUTION_COLUMN,
+    METADATA_COLUMNS, job_web_url, normalize_excel_columns, normalize_execution_column,
+)
 from .awx_dependencies import ensure_openpyxl
 
 ensure_openpyxl()
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
+from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.filters import AutoFilter
@@ -115,8 +119,8 @@ def add_settings_sheet(workbook, sections, *, sensitive_keys=(), secrets=()):
     return sheet
 
 
-def headers(execution_column="exceiute_job", output_column="output"):
-    names = [*METADATA_COLUMNS, execution_column.strip(), output_column.strip(), *ARTIFACT_COLUMNS]
+def headers(execution_column=DEFAULT_EXECUTION_COLUMN, output_column="output"):
+    names = [*METADATA_COLUMNS, normalize_execution_column(execution_column), output_column.strip(), *ARTIFACT_COLUMNS]
     keys = [name.casefold() for name in names]
     if any(not key for key in keys) or len(keys) != len(set(keys)):
         raise AWXError("Execution/output column names must be separate from metadata, artifact columns and each other.")
@@ -164,10 +168,54 @@ def copy_cell(source, target):
     target.comment = copy(source.comment)
 
 
-def prepare_sheet(sheet, execution_column="exceiute_job", output_column="output", *, reorder=True):
+def migrate_execution_column(sheet, execution_column):
+    """Merge the old default without discarding links or hiding conflicting history."""
+    columns = read_columns(sheet)
+    if execution_column.casefold() != DEFAULT_EXECUTION_COLUMN or LEGACY_EXECUTION_COLUMN not in columns:
+        return
+    old_column = columns[LEGACY_EXECUTION_COLUMN]
+    new_column = columns.get(DEFAULT_EXECUTION_COLUMN)
+    if new_column is None:
+        sheet.cell(1, old_column).value = DEFAULT_EXECUTION_COLUMN
+        return
+    for row in range(2, sheet.max_row + 1):
+        old = sheet.cell(row, old_column)
+        new = sheet.cell(row, new_column)
+        old_value = str(old.value or '').strip()
+        new_value = str(new.value or '').strip()
+        if (old_value.casefold() not in ('', 'none') and new_value.casefold() not in ('', 'none')
+                and job_web_url(old_value) != job_web_url(new_value)):
+            raise AWXError(f'Wiersz {row}: kolumny {LEGACY_EXECUTION_COLUMN} i {DEFAULT_EXECUTION_COLUMN} zawierają różną historię. Uzgodnij linki przed uruchomieniem.')
+    for row in range(2, sheet.max_row + 1):
+        old = sheet.cell(row, old_column)
+        new = sheet.cell(row, new_column)
+        comments = [cell.comment for cell in (new, old) if cell.comment]
+        if str(new.value or '').strip().casefold() in ('', 'none'):
+            copy_cell(old, new)
+        if comments:
+            new.comment = Comment('\n'.join(dict.fromkeys(comment.text for comment in comments)),
+                                  comments[0].author or 'AWX')
+    sheet.delete_cols(old_column)
+    for rule in list(sheet.data_validations.dataValidation):
+        targets = []
+        for area in rule.sqref.ranges:
+            for column in range(area.min_col, area.max_col + 1):
+                if column == old_column:
+                    continue
+                letter = get_column_letter(column - (column > old_column))
+                targets.append(f'{letter}{area.min_row}:{letter}{area.max_row}')
+        if targets:
+            rule.sqref = ' '.join(targets)
+        else:
+            sheet.data_validations.dataValidation.remove(rule)
+
+
+def prepare_sheet(sheet, execution_column=DEFAULT_EXECUTION_COLUMN, output_column="output", *, reorder=True):
     """Repair and order the complete schema without dropping custom columns or history."""
     if any(merged.max_row > 1 for merged in sheet.merged_cells.ranges):
         raise AWXError("Host data rows must not contain merged cells. Use one host per row.")
+    execution_column = normalize_execution_column(execution_column)
+    migrate_execution_column(sheet, execution_column)
     # Excel/openpyxl may retain empty column objects after columns are deleted.
     # Keep unlabelled columns containing user data, and remove empty remnants.
     for column in range(sheet.max_column, 0, -1):
@@ -262,8 +310,10 @@ def sort_host_rows(sheet, hostname_column=None, os_column=None):
                                  for area in rule.sqref.ranges)
 
 
-def format_sheet(sheet, execution_column="exceiute_job", output_column="output"):
+def format_sheet(sheet, execution_column=DEFAULT_EXECUTION_COLUMN, output_column="output"):
     """Apply the same formatting and text/link handling at every workflow stage."""
+    execution_column = normalize_execution_column(execution_column)
+    migrate_execution_column(sheet, execution_column)
     names = {name.casefold() for name in headers(execution_column, output_column)}
     columns = read_columns(sheet)
     inverse = {column: name for name, column in columns.items()}
@@ -293,6 +343,8 @@ def format_sheet(sheet, execution_column="exceiute_job", output_column="output")
                     cell.data_type = "s"
                     cell.number_format = "@"
                 if name in link_columns:
+                    if name == execution_column.casefold() and cell.row > 1 and cell.value:
+                        cell.value = job_web_url(cell.value)
                     cell.hyperlink = cell.value if str(cell.value or "").startswith(("http://", "https://")) else None
             cell.font = Font(name="Arial", size=10, bold=cell.row == 1,
                              color="FFFFFF" if cell.row == 1 else "0563C1" if cell.hyperlink else "1F2937",
@@ -319,7 +371,7 @@ def format_sheet(sheet, execution_column="exceiute_job", output_column="output")
             table.tableColumns = table_columns
 
 
-def save_workbook(workbook, path, *, sheet=None, execution_column="exceiute_job", output_column="output",
+def save_workbook(workbook, path, *, sheet=None, execution_column=DEFAULT_EXECUTION_COLUMN, output_column="output",
                   excel_columns=None):
     path = Path(path)
     selected = sheet if sheet is not None else workbook.active
@@ -351,7 +403,7 @@ def save_workbook(workbook, path, *, sheet=None, execution_column="exceiute_job"
             temporary_path.unlink()
 
 
-def create_workbook(names, rows, *, sheet_name="Results", execution_column="exceiute_job", output_column="output"):
+def create_workbook(names, rows, *, sheet_name="Results", execution_column=DEFAULT_EXECUTION_COLUMN, output_column="output"):
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = sheet_name

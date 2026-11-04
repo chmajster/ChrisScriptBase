@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 
 class AWXError(RuntimeError):
@@ -25,6 +26,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 VARIABLES_FILE = PROJECT_ROOT / "awx_variable"
 EXECUTION_SETTINGS_FILE = VARIABLES_FILE
 OUTPUT_SETTINGS_FILE = VARIABLES_FILE
+DEFAULT_EXECUTION_COLUMN = 'exceiute_job_link'
+LEGACY_EXECUTION_COLUMN = 'exceiute_job'
 METADATA_COLUMNS = (
     "hostname", "AWX_Status", "INVENTORY", "ApplicationID", "ostype", "template_job_name", "Job_Link", "Job_Credentials", "Job_Variables", "HOPS", "HOPS_COUNT", "jumphost_for_hops", "Extra_Credentials",
     "OS Credential", "Full_Credential", "Job_Type",
@@ -44,7 +47,7 @@ INVENTORY_KEYS = (
     "FULL_CREDENTIAL_SEPARATOR", "OUTPUT_FILE", "EXCEL_OUTPUT_FILE", "TIMEOUT", "PAGE_SIZE", "OS_JOBS",
 )
 EXECUTION_KEYS = (
-    "INPUT_FILE", "SHEET_NAME", "BATCH_SIZE", "EXECUTION_COLUMN", "JOB_TYPE", "JOB_TYPE_VARIABLE",
+    "INPUT_FILE", "SHEET_NAME", "BATCH_SIZE", "EXECUTION_COLUMN", "EXECUTION_SCOPE", "JOB_TYPE", "JOB_TYPE_VARIABLE",
     "WAIT_FOR_COMPLETION", "POLL_INTERVAL", "JOB_WAIT_TIMEOUT", "HOSTS", "JOB_URL",
     "SURVEY_ANSWERS", "SURVEY_INTERACTIVE", "SURVEY_EXCEL_DEFAULTS", "EXCEL_COLUMNS",
     "REFRESH_INVENTORY_PATTERN", "JOB_VARIABLE_OVERRIDES_BY_OS", *TEMPLATE_KEYS,
@@ -464,12 +467,45 @@ def normalize_excel_columns(value):
     for name in value:
         if not isinstance(name, str) or not name.strip():
             raise AWXError("EXCEL_COLUMNS musi zawierać niepuste nazwy kolumn.")
-        name = name.strip()
+        name = normalize_execution_column(name)
         if name.casefold() in seen:
             raise AWXError(f"Powtórzona nazwa kolumny w EXCEL_COLUMNS: {name!r}.")
         seen.add(name.casefold())
         names.append(name)
     return names
+
+
+def normalize_execution_column(value):
+    """Upgrade the former default while retaining custom history column names."""
+    name = value.strip()
+    return DEFAULT_EXECUTION_COLUMN if name.casefold() == LEGACY_EXECUTION_COLUMN else name
+
+
+def job_web_url(source_url, job_id=None):
+    """Build a job output link in the UI, preserving a known UI prefix/router."""
+    try:
+        parsed = urlsplit(source_url)
+    except ValueError:
+        return source_url
+    if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+        return source_url
+    if job_id is None:
+        match = re.search(r'/jobs/(?:playbook/)?([1-9][0-9]*)(?:/|$)', parsed.fragment or parsed.path)
+        if not match:
+            return source_url
+        job_id = int(match.group(1))
+    route = f'/jobs/playbook/{job_id}/output'
+    if parsed.fragment:
+        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, '', route))
+    api = re.search(r'/(?:api(?:/controller)?|controller)/v2(?:/|$)', parsed.path, re.IGNORECASE)
+    if api:
+        prefix = parsed.path[:api.start()].rstrip('/') + '/'
+        return urlunsplit((parsed.scheme, parsed.netloc, prefix, '', route))
+    for marker in ('/templates/', '/jobs/'):
+        if marker in parsed.path:
+            prefix = parsed.path.split(marker, 1)[0]
+            return urlunsplit((parsed.scheme, parsed.netloc, prefix + route, '', ''))
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip('/') + '/', '', route))
 
 
 def normalize_template_settings(settings, *, require_organization=False):
@@ -547,11 +583,19 @@ def read_execution_settings(settings_file=None, *, refresh=False):
         raise AWXError("SHEET_NAME must be a nonempty worksheet name.")
     if type(settings["BATCH_SIZE"]) is not int or settings["BATCH_SIZE"] < 1:
         raise AWXError("BATCH_SIZE must be a positive integer.")
+    scope = settings["EXECUTION_SCOPE"]
+    if scope is None:
+        scope = 'ask'
+    if not isinstance(scope, str) or scope.strip().casefold() not in ('ask', 'missing', 'all'):
+        raise AWXError('EXECUTION_SCOPE must be ask, missing, or all.')
+    settings['EXECUTION_SCOPE'] = scope.strip().casefold()
     column = settings["EXECUTION_COLUMN"]
+    if column is None:
+        column = DEFAULT_EXECUTION_COLUMN
     reserved = {name.casefold() for name in (*METADATA_COLUMNS, *ARTIFACT_COLUMNS)} | {"output"}
     if not isinstance(column, str) or not column.strip() or column.strip().casefold() in reserved:
         raise AWXError("EXECUTION_COLUMN must name a separate output column.")
-    settings["EXECUTION_COLUMN"] = column.strip()
+    settings["EXECUTION_COLUMN"] = normalize_execution_column(column)
     if not isinstance(settings["JOB_TYPE"], str):
         raise AWXError("JOB_TYPE must be a string, e.g. install, reinstall, or update.")
     settings["JOB_TYPE"] = settings["JOB_TYPE"].strip()
@@ -577,6 +621,8 @@ def read_output_settings(settings_file=None):
         if not isinstance(value, str) or not value.strip():
             raise AWXError(f"{name} must be a nonempty string.")
     settings["OUTPUT_COLUMN"] = settings["OUTPUT_COLUMN"].strip()
+    if settings['EXECUTION_COLUMN'] is not None:
+        settings['EXECUTION_COLUMN'] = normalize_execution_column(settings['EXECUTION_COLUMN'])
     if settings["OUTPUT_COLUMN"].casefold() in {name.casefold() for name in (*METADATA_COLUMNS, *ARTIFACT_COLUMNS)}:
         raise AWXError("OUTPUT_COLUMN must name a separate output column.")
     if type(settings["WAIT_FOR_COMPLETION"]) is not bool:
