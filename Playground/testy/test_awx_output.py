@@ -1,6 +1,8 @@
 """Invalid execution links must not stop collection for other Excel rows."""
 
 import io
+import os
+import tempfile
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
@@ -8,6 +10,40 @@ from unittest.mock import Mock, patch
 
 with patch.object(Path, 'read_text', side_effect=FileNotFoundError):
     from lib import awx
+
+
+class WorkbookAccessTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.path = Path(directory.name) / 'hosts.xlsx'
+        self.content = b'unchanged workbook bytes'
+        self.path.write_bytes(self.content)
+
+    def test_access_probe_preserves_data_and_releases_its_handle(self):
+        awx.excel.ensure_workbook_writable(self.path)
+        awx.excel.ensure_workbook_writable(self.path)
+        self.assertEqual(self.path.read_bytes(), self.content)
+
+    def test_open_or_locked_workbook_is_rejected_and_can_be_checked_after_close(self):
+        with self.path.open('r+b') as opened:
+            if os.name != 'nt':
+                import fcntl
+
+                fcntl.flock(opened.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaises(awx.AWXError) as raised:
+                awx.excel.ensure_workbook_writable(self.path)
+            self.assertIn('otwarty lub zablokowany', str(raised.exception))
+            self.assertIn(str(self.path), str(raised.exception))
+            self.assertIn('Zamknij ten plik w Excelu', str(raised.exception))
+        awx.excel.ensure_workbook_writable(self.path)
+        self.assertEqual(self.path.read_bytes(), self.content)
+
+    def test_missing_workbook_is_reported_without_creating_it(self):
+        missing = self.path.with_name('missing.xlsx')
+        with self.assertRaisesRegex(awx.AWXError, 'Plik Excel nie istnieje'):
+            awx.excel.ensure_workbook_writable(missing)
+        self.assertFalse(missing.exists())
 
 
 class OutputPlanTests(unittest.TestCase):

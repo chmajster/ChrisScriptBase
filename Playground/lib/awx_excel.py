@@ -1,5 +1,6 @@
 """One Excel schema, layout, sorting rule and atomic writer for all AWX scripts."""
 
+import errno
 import logging
 import math
 import os
@@ -369,6 +370,51 @@ def format_sheet(sheet, execution_column=DEFAULT_EXECUTION_COLUMN, output_column
                 column.name = str(cell.value)
                 table_columns.append(column)
             table.tableColumns = table_columns
+
+
+def ensure_workbook_writable(path):
+    """Probe exclusive access to an existing workbook without changing its bytes."""
+    path = Path(path).resolve()
+    LOGGER.debug('Excel: sprawdzam dostęp do zapisu i blokadę pliku: %s', path)
+    try:
+        if os.name == 'nt':
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+            create_file = kernel32.CreateFileW
+            create_file.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                    wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+            create_file.restype = wintypes.HANDLE
+            close_handle = kernel32.CloseHandle
+            close_handle.argtypes = [wintypes.HANDLE]
+            close_handle.restype = wintypes.BOOL
+            # Read/write and delete access match reading and atomic replacement.
+            access = 0x80000000 | 0x40000000 | 0x00010000
+            # No sharing; OPEN_EXISTING never creates or truncates the workbook.
+            handle = create_file(str(path), access, 0, None, 3, 0x80, None)
+            if handle == ctypes.c_void_p(-1).value:
+                raise ctypes.WinError(ctypes.get_last_error())
+            if not close_handle(handle):
+                raise ctypes.WinError(ctypes.get_last_error())
+        else:
+            import fcntl
+
+            with path.open('r+b') as workbook_file:
+                fcntl.flock(workbook_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(workbook_file.fileno(), fcntl.LOCK_UN)
+    except FileNotFoundError:
+        raise AWXError(f'Plik Excel nie istnieje: {path}. Sprawdź ścieżkę lub użyj --file.') from None
+    except OSError as exc:
+        locked = getattr(exc, 'winerror', None) in (32, 33) or exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK)
+        reason = ('Plik Excel jest otwarty lub zablokowany przez inny program.' if locked
+                  else 'Nie można uzyskać dostępu do zapisu pliku Excel.')
+        raise AWXError(
+            f'{reason}\nPlik: {path}\n'
+            'Zamknij ten plik w Excelu i innych programach, sprawdź uprawnienia do zapisu '
+            'i uruchom skrypt ponownie.\n'
+            f'Szczegóły: {exc}'
+        ) from None
 
 
 def save_workbook(workbook, path, *, sheet=None, execution_column=DEFAULT_EXECUTION_COLUMN, output_column="output",

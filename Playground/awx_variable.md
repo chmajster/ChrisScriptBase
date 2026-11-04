@@ -1135,6 +1135,8 @@ Inventory pochodzi z danych joba AWX, OS z wierszy Excela. Znaki niedozwolone w 
 
 Każdy unikalny job jest odczytywany raz, a jego wynik trafia do odpowiednich wierszy. Przy wielu OS dla tego samego joba mogą powstać osobne pliki z tym samym stdout.
 
+Przed odczytem Excela i zapytaniami do AWX `awx_job_output.py` sprawdza dostęp do zapisu istniejącego pliku. Na Windows próbuje uzyskać wyłączny dostęp bez zmiany zawartości. Jeżeli plik jest otwarty lub zablokowany, operacja kończy się przed pobieraniem wyników, a komunikat podaje ścieżkę i prosi o zamknięcie pliku. Kontrola działa niezależnie od `DEBUG` i nie tworzy brakującego pliku.
+
 Nieprawidłowy link w `exceiute_job_link` (np. adres strony głównej AWX bez ID joba) powoduje ostrzeżenie z nazwą arkusza i kolumny, numerem wiersza, adresem komórki, jej dokładną wartością, rzeczywistym celem hiperłącza i powodem pominięcia. Komunikat wskazuje, czy sprawdzano tekst komórki, czy cel hiperłącza, oraz podaje oczekiwany format adresu konkretnego joba. Cudzysłowy i zapis znaków specjalnych pozwalają zauważyć spacje i nowe linie; tokeny pozostają maskowane. Skrypt pomija ten wiersz i kontynuuje pobieranie dla poprawnych linków. Dotychczasowe logi i artefakty pominiętego wiersza pozostają zachowane. Licznik pominiętych wierszy obejmuje też puste linki i `LAUNCH_PENDING`.
 
 Komórka Excela mieści do 32767 znaków. Dłuższy log jest skracany z adresem pełnego pliku TXT. Zapis TXT zachowuje pełną treść.

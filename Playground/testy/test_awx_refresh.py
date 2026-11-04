@@ -2,6 +2,7 @@
 
 import io
 import json
+import os
 import re
 import sys
 import tempfile
@@ -193,6 +194,8 @@ class RefreshTests(unittest.TestCase):
         self.addCleanup(awx.configure_debug, False)
         self.write_config(INVENTORY=10, DEBUG=True, JOB_TEMPLATE_ORGANIZATION='Operations',
                           OUTPUT_FILE=str(Path(self.directory.name) / 'hosts.json'))
+        self.write_workbook([])
+        original = self.path.read_bytes()
         self.client.get.side_effect = awx.AWXError('HTTP 401: rejected ' + self.settings['AWX_TOKEN'])
         for operation in ('execute', 'refresh', 'output', 'inventory', 'templates'):
             self.client.get.reset_mock()
@@ -214,7 +217,7 @@ class RefreshTests(unittest.TestCase):
                         limits.assert_not_called()
                         save.assert_not_called()
                         prompt.assert_not_called()
-                        self.assertFalse(self.path.exists())
+                        self.assertEqual(self.path.read_bytes(), original)
 
     def test_debug_execute_checks_authentication_before_opening_excel_even_in_dry_run(self):
         self.addCleanup(awx.configure_debug, False)
@@ -502,6 +505,32 @@ class RefreshTests(unittest.TestCase):
             self.assertEqual(set(jobs), {90, 100})
         finally:
             book.close()
+
+    def test_output_rejects_open_workbook_before_awx_and_excel_work_with_or_without_debug(self):
+        self.addCleanup(awx.configure_debug, False)
+        output_directory = Path(self.directory.name) / 'logs'
+        self.write_config(INVENTORY=10, OUTPUT_DIRECTORY=str(output_directory))
+        self.write_workbook(['Linux1'])
+        original = self.path.read_bytes()
+        with self.path.open('r+b') as opened:
+            if os.name != 'nt':
+                import fcntl
+
+                fcntl.flock(opened.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            for debug_flag in ('--debug', '--no-debug'):
+                captured = io.StringIO()
+                with self.subTest(debug=debug_flag), patch.object(awx, 'AWXClient') as factory:
+                    with patch.object(awx, 'open_workbook_sheet') as read, patch.object(awx.excel, 'save_workbook') as save:
+                        with redirect_stdout(captured), redirect_stderr(captured):
+                            code = awx.run('output', [debug_flag], variables_file=self.config_path)
+                        self.assertEqual(code, 1, captured.getvalue())
+                        self.assertIn('otwarty lub zablokowany', captured.getvalue())
+                        self.assertIn(str(self.path), captured.getvalue())
+                        factory.assert_not_called()
+                        read.assert_not_called()
+                        save.assert_not_called()
+                        self.assertFalse(output_directory.exists())
+        self.assertEqual(self.path.read_bytes(), original)
 
     def test_output_skips_invalid_row_and_updates_only_rows_with_valid_job_links(self):
         output_directory = Path(self.directory.name) / 'logs'

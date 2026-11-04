@@ -6,6 +6,10 @@ Przykłady:
     python .\awx_job_output.py -file .\hosty.xlsx --output-dir .\output -d
     python .\awx_job_output.py --help
 
+Przed odczytem Excela i zapytaniami do AWX skrypt sprawdza, czy plik jest dostępny
+do zapisu. Otwarty/zablokowany plik zatrzymuje operację z podaniem ścieżki i prośbą
+o zamknięcie go w Excelu. Sprawdzenie działa również bez debug i nie zmienia danych.
+
 Skrypt odczytuje linki z EXECUTION_COLUMN (domyślnie exceiute_job_link) i system
 z ostype. Pobiera pełny stdout każdego unikalnego joba i wpisuje go do OUTPUT_COLUMN
 we wszystkich powiązanych wierszach. Puste linki i LAUNCH_PENDING są pomijane.

@@ -393,6 +393,8 @@ Przykłady:
   --survey --dry-run odczytuje i waliduje survey oraz umożliwia podanie odpowiedzi.
   --no-dry-run: wyłącza DRY_RUN ustawione w pliku lub launcherze.""",
     "output": r"""Działanie:
+  Przed odczytem Excela i zapytaniami do AWX sprawdza dostęp do zapisu pliku.
+  Otwarty lub zablokowany plik zatrzymuje operację; zamknij go w Excelu i ponów.
   Czyta linki z EXECUTION_COLUMN (domyślnie exceiute_job_link) i system z ostype.
   Pobiera pełny stdout raz na unikalny job, także failed/error/canceled.
   Wpisuje log do OUTPUT_COLUMN we wszystkich powiązanych wierszach tego joba.
@@ -2510,6 +2512,8 @@ def output_main(argv=None):
     settings['EXECUTION_COLUMN'] = settings['EXECUTION_COLUMN'] or launch_settings['EXECUTION_COLUMN']
     path = workbook_path(args.input_file, connection, settings, launch_settings)
     output_directory = Path(args.output_dir or settings['OUTPUT_DIRECTORY']).resolve()
+    console.print_message(f'Sprawdzam, czy plik Excel jest dostępny do zapisu: {path}', level='info', flush=True)
+    excel.ensure_workbook_writable(path)
     client = AWXClient(connection['AWX_URL'], connection['AWX_TOKEN'].strip())
     check_connection(client, debug=args.debug)
     console.print_message(f'Odczytuję plik Excel: {path}', level='info', flush=True)
